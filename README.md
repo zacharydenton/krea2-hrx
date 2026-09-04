@@ -34,7 +34,8 @@ denoising step against the reference in both W4A4 and bf16.
 | reference W4A4 in torch | 87 s | 9.96 dB | 18.9 dB |
 | Loom W4A4, first attention | 7.85 s | 10.09 dB | 19.0 dB |
 | Loom W4A4, staged attention | 2.89 s (29.2 s per image) | 10.09 dB | 19.04 dB |
-| Loom W4A4, Q resident + V transposed in LDS, raster groups | 2.31 s | | |
+| Loom W4A4, Q resident + V transposed in LDS, raster groups | 2.31 s (25.4 s per image) | 12.92 dB | 23.23 dB |
+| Loom W4A4, prepare kernels vectorised | 2.13 s | | |
 
 The three pictures (`build/bf16_seed0.png`, `build/w4a4_seed0.png`,
 `build/loom_seed0.png`) are the same fox in the same pose and light; the deviation is
@@ -43,7 +44,11 @@ of the same model that keeps 96 of its 224 block linears in int8 reports a minim
 image PSNR of 17.7 dB against bf16; this port quantises every block GEMM to int4 with
 per-row scales and measures 19.0.
 
-Where a forward goes now: the four GEMMs 63% (at 59-72 TOPS on the part's measured
-117 TOPS int4 ceiling), attention 28% (20 TFLOP/s), the prepare kernels 8%.
+Where a forward goes now: the four GEMMs 68% (at 56-75 TOPS on the part's measured
+117 TOPS int4 ceiling), attention 26% (20 TFLOP/s), the prepare kernels 5%.
+
+The PSNR between two 8-step trajectories swings by several dB between numerically
+near-identical runs (the sampler amplifies rounding); the per-block cosine against the
+reference in `tests/test_blocks.py` is the metric that tracks kernel correctness.
 
 See `docs/notes.md` for every decision and measurement.

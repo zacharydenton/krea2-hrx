@@ -189,3 +189,22 @@ attention is 28% of the forward, the four GEMMs 63%. LDS 21760 B per workgroup o
 waves. The lesson repeats dinov3's: a `fragment.load` from a view whose contiguous axis
 is not the fragment's k axis lowers to per-element loads, on LDS as on global; assemble
 the operand from wide loads yourself.
+
+## Prepare kernels: 8 elements per lane -- won (177 -> 98 ms over 28 blocks)
+
+The three prepare kernels loaded f16 two bytes per lane and stored int4 one byte per
+lane, and reached 60-115 GB/s. They now move 8 elements per lane per step: 16-byte global
+loads, vector arithmetic (`vector.extf/expf/absf/maxnumf/roundevenf/fptosi/andi`), 32-byte
+LDS row stores, and the 8 nibbles packed into one 4-byte store. The Hadamard stages are
+unchanged. Codes match the reference exactly as before (ties aside); the block-level
+cosines are identical through 4 blocks and drift by 0.003 at 28, the tie-breaking noise
+of the quantiser compounding.
+
+| stage | before | after |
+| --- | ---: | ---: |
+| prepare swiglu | 89.4 ms | 48.0 ms |
+| prepare norm | 58.4 | 32.9 |
+| prepare gated | 28.8 | 17.3 |
+| forward | 2313 | 2129 |
+
+The gate stride config only needs 8-element alignment (the qkv|gate stride is 15360).

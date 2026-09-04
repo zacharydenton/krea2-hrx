@@ -1,5 +1,5 @@
 """kernels/prepare_*_i4.loom: the GEMM-input preparation kernels, one workgroup of 256
-lanes per token. Every variant ends the same way -- group-256 Hadamard (Kronecker
+lanes per token, 8 elements per lane per step (16-byte loads, 4-byte packed stores). Every variant ends the same way -- group-256 Hadamard (Kronecker
 power of H4, normalised by 1/16), per-token absmax, symmetric int4 (q = round(x / s),
 s = absmax/7), nibbles packed low first, f32 scale beside -- and differs in how the
 row is formed first:
@@ -47,6 +47,16 @@ def stage(d: int, lds: str = "f32") -> str:
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
 """
 
+CHUNK = """    %{p}_lane_step = index.mul %{p}_j, %c256 : index
+    %{p}_chunk = index.add %{p}_lane_step, %lane : index
+    %{p}_i0 = index.mul %{p}_chunk, %c8 : index
+    %{p}_i = index.assume %{p}_i0 [le(%{p}_i0, %width_last), mul(%{p}_i0, 8)] : index
+"""
+
+def chunk(prefix: str) -> str:
+    """Index math for one 8-element chunk per lane per iteration: chunk = j*256 + lane."""
+    return CHUNK.replace("{p}", prefix)
+
 FORM = {
     "norm": dict(
         args="%h: buffer, %norm_scale: buffer, %mod_scale: buffer, %mod_shift: buffer",
@@ -60,34 +70,34 @@ FORM = {
   %sh_view = buffer.view %sh_global[%c0_offset] : buffer -> view<[%width]xf32>
 """,
         form="""  // sum of squares, then normalise, scale and modulate into LDS
-  %ss = scf.for %i0 = [%lane to %width step %c256](%acc = %zero : f32) -> (f32) {
-    %i = index.assume %i0 [lt(%i0, %width)] : index
-    %v16 = view.load %h_view[%row, %i] : view<[%tokens_b]x[%width]xf16> -> f16
-    %v = scalar.extf %v16 : f16 to f32
-    %sq = scalar.mulf %v, %v : f32
-    %next = scalar.addf %acc, %sq : f32
-    scf.yield %next : f32
+  %ss_v = scf.for %ss_j = [%c0 to %chunks_per_lane step %c1](%ss_acc = %zero8 : vector<8xf32>) -> (vector<8xf32>) {
+""" + chunk("ss") + """    %ss_v16 = vector.load %h_view[%row, %ss_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
+    %ss_x = vector.extf %ss_v16 : vector<8xf16> to vector<8xf32>
+    %ss_sq = vector.mulf %ss_x, %ss_x : vector<8xf32>
+    %ss_next = vector.addf %ss_acc, %ss_sq : vector<8xf32>
+    scf.yield %ss_next : vector<8xf32>
   }
+  %ss = vector.reduce<addf> %ss_v, %zero : vector<8xf32>, f32
   %total = kernel.workgroup.reduce<addf> %ss : f32
   %width_i = index.cast %width : index to i32
   %width_f = scalar.sitofp %width_i : i32 to f32
   %mean = scalar.divf %total, %width_f : f32
   %mean_eps = scalar.addf %mean, %eps : f32
   %rms_inv = scalar.rsqrtf %mean_eps : f32
-  scf.for %i0 = [%lane to %width step %c256] {
-    %i = index.assume %i0 [lt(%i0, %width)] : index
-    %v16 = view.load %h_view[%row, %i] : view<[%tokens_b]x[%width]xf16> -> f16
-    %v = scalar.extf %v16 : f16 to f32
-    %n = scalar.mulf %v, %rms_inv : f32
-    %ns = view.load %ns_view[%i] : view<[%width]xf32> -> f32
-    %ns1 = scalar.addf %ns, %one : f32
-    %normed = scalar.mulf %n, %ns1 : f32
-    %ms = view.load %ms_view[%i] : view<[%width]xf32> -> f32
-    %ms1 = scalar.addf %ms, %one : f32
-    %sh = view.load %sh_view[%i] : view<[%width]xf32> -> f32
-    %scaled = scalar.mulf %normed, %ms1 : f32
-    %modulated = scalar.addf %scaled, %sh : f32
-    view.store %modulated, %x_view[%i] : f32, view<[%width]xf32>
+  %rms_inv8 = vector.splat %rms_inv : vector<8xf32>
+  scf.for %m_j = [%c0 to %chunks_per_lane step %c1] {
+""" + chunk("m") + """    %m_v16 = vector.load %h_view[%row, %m_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
+    %m_x = vector.extf %m_v16 : vector<8xf16> to vector<8xf32>
+    %m_n = vector.mulf %m_x, %rms_inv8 : vector<8xf32>
+    %m_ns = vector.load %ns_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
+    %m_ns1 = vector.addf %m_ns, %one8 : vector<8xf32>
+    %m_normed = vector.mulf %m_n, %m_ns1 : vector<8xf32>
+    %m_ms = vector.load %ms_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
+    %m_ms1 = vector.addf %m_ms, %one8 : vector<8xf32>
+    %m_sh = vector.load %sh_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
+    %m_scaled = vector.mulf %m_normed, %m_ms1 : vector<8xf32>
+    %m_out = vector.addf %m_scaled, %m_sh : vector<8xf32>
+    vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
 """),
     "gated": dict(
@@ -97,19 +107,18 @@ FORM = {
   %a_view = buffer.view %a_global[%c0_offset] : buffer -> view<[%tokens_b]x[%width]xf16>
   %g_view = buffer.view %g_global[%c0_offset] : buffer -> view<[%tokens_b]x[%gate_stride]xf16>
 """,
-        form="""  scf.for %i0 = [%lane to %width step %c256] {
-    %i = index.assume %i0 [lt(%i0, %width)] : index
-    %a16 = view.load %a_view[%row, %i] : view<[%tokens_b]x[%width]xf16> -> f16
-    %ig = index.assume %i [lt(%i, %gate_stride)] : index
-    %g16 = view.load %g_view[%row, %ig] : view<[%tokens_b]x[%gate_stride]xf16> -> f16
-    %a = scalar.extf %a16 : f16 to f32
-    %g = scalar.extf %g16 : f16 to f32
-    %neg_g = scalar.subf %zero, %g : f32
-    %e = scalar.expf<afn> %neg_g : f32
-    %den = scalar.addf %one, %e : f32
-    %sig = scalar.divf %one, %den : f32
-    %v = scalar.mulf %a, %sig : f32
-    view.store %v, %x_view[%i] : f32, view<[%width]xf32>
+        form="""  scf.for %m_j = [%c0 to %chunks_per_lane step %c1] {
+""" + chunk("m") + """    %m_a16 = vector.load %a_view[%row, %m_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
+    %m_ig = index.assume %m_i [le(%m_i, %gate_last), mul(%m_i, 8)] : index
+    %m_g16 = vector.load %g_view[%row, %m_ig] : view<[%tokens_b]x[%gate_stride]xf16> -> vector<8xf16>
+    %m_a = vector.extf %m_a16 : vector<8xf16> to vector<8xf32>
+    %m_g = vector.extf %m_g16 : vector<8xf16> to vector<8xf32>
+    %m_neg_g = vector.subf %zero8, %m_g : vector<8xf32>
+    %m_e = vector.expf<afn> %m_neg_g : vector<8xf32>
+    %m_den = vector.addf %one8, %m_e : vector<8xf32>
+    %m_sig = vector.divf %one8, %m_den : vector<8xf32>
+    %m_out = vector.mulf %m_a, %m_sig : vector<8xf32>
+    vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
 """),
     "swiglu": dict(
@@ -118,25 +127,25 @@ FORM = {
   %gu_view = buffer.view %gu_global[%c0_offset] : buffer -> view<[%tokens_b]x[%gate_stride]xf16>
 """,
         form="""  // the fused gate|up GEMM output: gate at column i, up at column width + i
-  scf.for %i0 = [%lane to %width step %c256] {
-    %i = index.assume %i0 [lt(%i0, %width)] : index
-    %iu0 = index.add %i, %width : index
-    %iu = index.assume %iu0 [lt(%iu0, %gate_stride)] : index
-    %ig = index.assume %i [lt(%i, %gate_stride)] : index
-    %g16 = view.load %gu_view[%row, %ig] : view<[%tokens_b]x[%gate_stride]xf16> -> f16
-    %u16 = view.load %gu_view[%row, %iu] : view<[%tokens_b]x[%gate_stride]xf16> -> f16
-    %g = scalar.extf %g16 : f16 to f32
-    %u = scalar.extf %u16 : f16 to f32
-    %neg_g = scalar.subf %zero, %g : f32
-    %e = scalar.expf<afn> %neg_g : f32
-    %den = scalar.addf %one, %e : f32
-    %sig = scalar.divf %one, %den : f32
-    %silu = scalar.mulf %g, %sig : f32
-    %v = scalar.mulf %silu, %u : f32
-    view.store %v, %x_view[%i] : f32, view<[%width]xf32>
+  scf.for %m_j = [%c0 to %chunks_per_lane step %c1] {
+""" + chunk("m") + """    %m_iu0 = index.add %m_i, %width : index
+    %m_iu = index.assume %m_iu0 [le(%m_iu0, %gate_last), mul(%m_iu0, 8)] : index
+    %m_ig = index.assume %m_i [le(%m_i, %gate_last), mul(%m_i, 8)] : index
+    %m_g16 = vector.load %gu_view[%row, %m_ig] : view<[%tokens_b]x[%gate_stride]xf16> -> vector<8xf16>
+    %m_u16 = vector.load %gu_view[%row, %m_iu] : view<[%tokens_b]x[%gate_stride]xf16> -> vector<8xf16>
+    %m_g = vector.extf %m_g16 : vector<8xf16> to vector<8xf32>
+    %m_u = vector.extf %m_u16 : vector<8xf16> to vector<8xf32>
+    %m_neg_g = vector.subf %zero8, %m_g : vector<8xf32>
+    %m_e = vector.expf<afn> %m_neg_g : vector<8xf32>
+    %m_den = vector.addf %one8, %m_e : vector<8xf32>
+    %m_sig = vector.divf %one8, %m_den : vector<8xf32>
+    %m_silu = vector.mulf %m_g, %m_sig : vector<8xf32>
+    %m_out = vector.mulf %m_silu, %m_u : vector<8xf32>
+    vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
 """),
 }
+
 
 def kernel(name: str) -> str:
     f = FORM[name]
@@ -145,6 +154,7 @@ def kernel(name: str) -> str:
     ns, sym = f"krea2.prepare_{name}_i4", f"krea2_prepare_{name}_i4"
     extra_cfg = "" if name == "norm" else f"\nconfig.decl @{ns}.gate_stride : %value: index where [range(%value, 256, 65536), mul(%value, 256)]\n"
     extra_get = "" if name == "norm" else f"  %gate_stride = config.get @{ns}.gate_stride : index\n"
+    gate_last = "" if name == "norm" else "  %gate_last = index.sub %gate_stride, %c8 : index\n"
     eps_cfg = f"\nconfig.decl @{ns}.eps : f32\n" if name == "norm" else ""
     eps_get = f"  %eps = config.get @{ns}.eps : f32\n" if name == "norm" else ""
     return f"""// GEMM input preparation ({name}), one workgroup of 256 lanes per token: form the
@@ -156,7 +166,7 @@ def kernel(name: str) -> str:
 // GENERATED by tools/gen_prepare.py; edit the generator.
 amdgpu.target<gfx11-generic> @{sym}_gfx11 {{subgroup_size = 32}}
 
-config.decl @{ns}.width : %value: index where [range(%value, 256, 32768), mul(%value, 256)]
+config.decl @{ns}.width : %value: index where [range(%value, 2048, 32768), mul(%value, 2048)]
 {eps_cfg}{extra_cfg}
 kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   %c1 = index.constant 1 : index
@@ -168,6 +178,7 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
   %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
   %c16 = index.constant 16 : index
   %c64 = index.constant 64 : index
   %c256 = index.constant 256 : index
@@ -179,16 +190,29 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   %sixteenth = scalar.constant 0.0625 : f32
   %tiny = scalar.constant 1e-30 : f32
   %fifteen = scalar.constant 15 : i32
-  %four = scalar.constant 4 : i32
+  %sh4 = scalar.constant 4 : i32
+  %sh8 = scalar.constant 8 : i32
+  %sh12 = scalar.constant 12 : i32
+  %sh16 = scalar.constant 16 : i32
+  %sh20 = scalar.constant 20 : i32
+  %sh24 = scalar.constant 24 : i32
+  %sh28 = scalar.constant 28 : i32
+  %zero8 = vector.splat %zero : vector<8xf32>
+  %one8 = vector.splat %one : vector<8xf32>
+  %seven8 = vector.splat %seven : vector<8xf32>
+  %neg_seven8 = vector.splat %neg_seven : vector<8xf32>
+  %fifteen8 = vector.splat %fifteen : vector<8xi32>
   %tokens_b = index.assume %tokens [range(%tokens, 1, 1048576)] : index
   %token = kernel.workgroup.id<x> : index
   %row = index.assume %token [lt(%token, %tokens_b)] : index
   %lane = kernel.workitem.id<x> : index
   %half_width = index.div %width, %c2 : index
-  %quads = index.div %width, %c4 : index
+  %word_width = index.div %width, %c8 : index
+  %width_last = index.sub %width, %c8 : index
+{gate_last}  %quads = index.div %width, %c4 : index
 {f["views"]}  %q_global = buffer.assume.memory_space<global> %q : buffer
   %qs_global = buffer.assume.memory_space<global> %q_scale : buffer
-  %q_view = buffer.view %q_global[%c0_offset] : buffer -> view<[%tokens_b]x[%half_width]xi8>
+  %qw_view = buffer.view %q_global[%c0_offset] : buffer -> view<[%tokens_b]x[%word_width]xi32>
   %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<[%tokens_b]xf32>
   %row_bytes0 = index.mul %width, %c{lds_bytes} : index
   %row_bytes = index.cast %row_bytes0 : index to offset
@@ -199,41 +223,60 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
 
   // Hadamard: four radix-4 stages; each lane owns whole quads, so no barrier inside a stage.
 {stage(1, lds)}{stage(4, lds)}{stage(16, lds)}{stage(64, lds)}
-  // absmax (the 1/16 normalisation folded into the scale), quantise, pack
-  %amax = scf.for %i0 = [%lane to %width step %c256](%acc = %zero : f32) -> (f32) {{
-    %i = index.assume %i0 [lt(%i0, %width)] : index
-    %v = view.load %x_view[%i] : view<[%width]xf32> -> f32
-    %a = scalar.absf %v : f32
-    %next = scalar.maxnumf %acc, %a : f32
-    scf.yield %next : f32
+  // absmax (the 1/16 normalisation folded into the scale), quantise, pack 8 nibbles per lane per step
+  %amax_v = scf.for %a_j = [%c0 to %chunks_per_lane step %c1](%a_acc = %zero8 : vector<8xf32>) -> (vector<8xf32>) {{
+    %a_lane_step = index.mul %a_j, %c256 : index
+    %a_chunk = index.add %a_lane_step, %lane : index
+    %a_i0 = index.mul %a_chunk, %c8 : index
+    %a_i = index.assume %a_i0 [le(%a_i0, %width_last), mul(%a_i0, 8)] : index
+    %a_x = vector.load %x_view[%a_i] : view<[%width]xf32> -> vector<8xf32>
+    %a_abs = vector.absf %a_x : vector<8xf32>
+    %a_next = vector.maxnumf %a_acc, %a_abs : vector<8xf32>
+    scf.yield %a_next : vector<8xf32>
   }}
+  %amax = vector.reduce<maxnumf> %amax_v, %zero : vector<8xf32>, f32
   %row_max0 = kernel.workgroup.reduce<maxnumf> %amax : f32
   %row_max = scalar.mulf %row_max0, %sixteenth : f32
   %row_max_safe = scalar.maxnumf %row_max, %tiny : f32
   %s = scalar.divf %row_max_safe, %seven : f32
   %inv_s = scalar.divf %sixteenth, %s : f32
-  scf.for %b0 = [%lane to %half_width step %c256] {{
-    %b = index.assume %b0 [lt(%b0, %half_width)] : index
-    %i0 = index.mul %b, %c2 : index
-    %i1 = index.add %i0, %c1 : index
-    %v0 = view.load %x_view[%i0] : view<[%width]xf32> -> f32
-    %v1 = view.load %x_view[%i1] : view<[%width]xf32> -> f32
-    %r0 = scalar.mulf %v0, %inv_s : f32
-    %r1 = scalar.mulf %v1, %inv_s : f32
-    %q0f = scalar.roundevenf %r0 : f32
-    %q1f = scalar.roundevenf %r1 : f32
-    %q0c = scalar.maxnumf %q0f, %neg_seven : f32
-    %q1c = scalar.maxnumf %q1f, %neg_seven : f32
-    %q0d = scalar.minnumf %q0c, %seven : f32
-    %q1d = scalar.minnumf %q1c, %seven : f32
-    %q0 = scalar.fptosi %q0d : f32 to i32
-    %q1 = scalar.fptosi %q1d : f32 to i32
-    %lo_n = scalar.andi %q0, %fifteen : i32
-    %hi_n0 = scalar.andi %q1, %fifteen : i32
-    %hi_n = scalar.shli %hi_n0, %four : i32
-    %byte32 = scalar.ori %lo_n, %hi_n : i32
-    %byte = scalar.trunci %byte32 : i32 to i8
-    view.store %byte, %q_view[%row, %b] : i8, view<[%tokens_b]x[%half_width]xi8>
+  %inv_s8 = vector.splat %inv_s : vector<8xf32>
+  scf.for %q_j = [%c0 to %chunks_per_lane step %c1] {{
+    %q_lane_step = index.mul %q_j, %c256 : index
+    %q_chunk = index.add %q_lane_step, %lane : index
+    %q_i0 = index.mul %q_chunk, %c8 : index
+    %q_i = index.assume %q_i0 [le(%q_i0, %width_last), mul(%q_i0, 8)] : index
+    %q_w = index.assume %q_chunk [lt(%q_chunk, %word_width)] : index
+    %q_x = vector.load %x_view[%q_i] : view<[%width]xf32> -> vector<8xf32>
+    %q_r = vector.mulf %q_x, %inv_s8 : vector<8xf32>
+    %q_f = vector.roundevenf %q_r : vector<8xf32>
+    %q_c = vector.maxnumf %q_f, %neg_seven8 : vector<8xf32>
+    %q_d = vector.minnumf %q_c, %seven8 : vector<8xf32>
+    %q_q = vector.fptosi %q_d : vector<8xf32> to vector<8xi32>
+    %q_n = vector.andi %q_q, %fifteen8 : vector<8xi32>
+    %q_e0 = vector.extract %q_n[0] : vector<8xi32> -> i32
+    %q_e1 = vector.extract %q_n[1] : vector<8xi32> -> i32
+    %q_e2 = vector.extract %q_n[2] : vector<8xi32> -> i32
+    %q_e3 = vector.extract %q_n[3] : vector<8xi32> -> i32
+    %q_e4 = vector.extract %q_n[4] : vector<8xi32> -> i32
+    %q_e5 = vector.extract %q_n[5] : vector<8xi32> -> i32
+    %q_e6 = vector.extract %q_n[6] : vector<8xi32> -> i32
+    %q_e7 = vector.extract %q_n[7] : vector<8xi32> -> i32
+    %q_s1 = scalar.shli %q_e1, %sh4 : i32
+    %q_s2 = scalar.shli %q_e2, %sh8 : i32
+    %q_s3 = scalar.shli %q_e3, %sh12 : i32
+    %q_s4 = scalar.shli %q_e4, %sh16 : i32
+    %q_s5 = scalar.shli %q_e5, %sh20 : i32
+    %q_s6 = scalar.shli %q_e6, %sh24 : i32
+    %q_s7 = scalar.shli %q_e7, %sh28 : i32
+    %q_o1 = scalar.ori %q_e0, %q_s1 : i32
+    %q_o2 = scalar.ori %q_o1, %q_s2 : i32
+    %q_o3 = scalar.ori %q_o2, %q_s3 : i32
+    %q_o4 = scalar.ori %q_o3, %q_s4 : i32
+    %q_o5 = scalar.ori %q_o4, %q_s5 : i32
+    %q_o6 = scalar.ori %q_o5, %q_s6 : i32
+    %q_o7 = scalar.ori %q_o6, %q_s7 : i32
+    view.store %q_o7, %qw_view[%row, %q_w] : i32, view<[%tokens_b]x[%word_width]xi32>
   }}
   // the token scale, by one lane, after the last loop (a divergent region before a
   // loop is rejected by the branch lowering)
@@ -266,6 +309,18 @@ def lds_type(text: str, lds: str) -> str:
             out.append(f"{ind}{name}_h = scalar.fptrunc {name} : f32 to f16")
             out.append(f"{ind}view.store {name}_h, %x_view[{idx}] : f16, view<[%width]xf16>")
             continue
+        m = re.match(r"^(\s*)(%\w+) = vector\.load %x_view\[(%\w+)\] : view<\[%width\]xf16> -> vector<(\d+)xf32>$", line)
+        if m:
+            ind, name, idx, n = m.groups()
+            out.append(f"{ind}{name}_h = vector.load %x_view[{idx}] : view<[%width]xf16> -> vector<{n}xf16>")
+            out.append(f"{ind}{name} = vector.extf {name}_h : vector<{n}xf16> to vector<{n}xf32>")
+            continue
+        m = re.match(r"^(\s*)vector\.store (%\w+), %x_view\[(%\w+)\] : vector<(\d+)xf32>, view<\[%width\]xf16>$", line)
+        if m:
+            ind, name, idx, n = m.groups()
+            out.append(f"{ind}{name}_h = vector.fptrunc {name} : vector<{n}xf32> to vector<{n}xf16>")
+            out.append(f"{ind}vector.store {name}_h, %x_view[{idx}] : vector<{n}xf16>, view<[%width]xf16>")
+            continue
         out.append(line)
     return "\n".join(out)
 
@@ -283,7 +338,7 @@ def uniform_loops(text: str) -> str:
     text = re.sub(r"scf\.for %(\w+)0 = \[%lane to (%\w+) step %c256\]((?:\(.*?\) -> \(.*?\))?) \{\n", repl, text)
     return text.replace("  %quads = index.div %width, %c4 : index\n",
                         "  %quads = index.div %width, %c4 : index\n  %width_per_lane = index.div %width, %c256 : index\n"
-                        "  %quads_per_lane = index.div %quads, %c256 : index\n  %half_per_lane = index.div %half_width, %c256 : index\n")
+                        "  %quads_per_lane = index.div %quads, %c256 : index\n  %chunks_per_lane = index.div %word_width, %c256 : index\n")
 
 for name in FORM:
     (OUT / f"prepare_{name}_i4.loom").write_text(uniform_loops(lds_type(kernel(name), "f16" if name == "swiglu" else "f32")))
