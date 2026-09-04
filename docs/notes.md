@@ -250,3 +250,19 @@ after the butterfly, so a per-lane compare is consistent (the vote's uniform sca
 rejected as a branch mask anyway). Both levers are dropped; the kernel stays at 240
 VGPRs with four Q fragments resident, which every variant so far has confirmed is the
 binding constraint.
+
+## SwiGLU in the gate|up GEMM epilogue -- neutral (0.995x), kept
+
+The gate and up weight rows are interleaved in 16-row groups by `tools/export_weights.py`
+so each wave's fragments fj = 0,1 (and 2,3) are the gate and up of the same 16 outputs;
+`kernels/gemm_i4_swiglu.loom` stages both through a 2 KB per-wave result stage and writes
+f16(silu(g) * u) to a [T][16384] output, and `prepare_plain_i4` takes the row as is. The
+one-block cosine against the reference is unchanged (0.99943). Interleaved kernel A/B
+(`tools/ab_gu.py`, 4115 tokens, GEMM + prepare, the box shared with another session's
+GPU job): 29.77 ms unfused (27.97 + 1.81) against 29.91 fused (28.68 + 1.24): the epilogue's
+sigmoid per output costs about what the halved 270 MB write saves, the prepare halves.
+Kept: exact, 270 MB per block less traffic, and silu on the unrounded f32 products.
+
+Measurement note for this evening: another session's GPU job inflated every stage of the
+block profile by 1.3-1.7x (attention, unchanged, read 705-847 ms against 562 on a calm
+box); the interleaved kernel A/Bs are the only numbers that survived that.
