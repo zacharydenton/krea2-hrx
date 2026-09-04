@@ -26,6 +26,23 @@ kernel matches torch's to cosine 0.99999996 at the real sequence length, and
 `tests/test_blocks.py` runs the native blocks on a fixture captured from a real
 denoising step against the reference in both W4A4 and bf16.
 
-## Status
+## Results so far (1024x1024, 8 Turbo steps, seed 0)
 
-Building. See `docs/notes.md` for decisions and results as they land.
+| | per forward of the 28 blocks | latent PSNR vs bf16 | image PSNR vs bf16 |
+| --- | ---: | ---: | ---: |
+| torch bf16 (diffusers) | ~7 s | | |
+| reference W4A4 in torch | 87 s | 9.96 dB | 18.9 dB |
+| Loom W4A4, first attention | 7.85 s | 10.09 dB | 19.0 dB |
+| Loom W4A4, staged attention | 2.96 s | | |
+
+The three pictures (`build/bf16_seed0.png`, `build/w4a4_seed0.png`,
+`build/loom_seed0.png`) are the same fox in the same pose and light; the deviation is
+fur and snow detail, not artifacts. For comparison, a published int4 ConvRot checkpoint
+of the same model that keeps 96 of its 224 block linears in int8 reports a minimum
+image PSNR of 17.7 dB against bf16; this port quantises every block GEMM to int4 with
+per-row scales and measures 19.0.
+
+Where a forward goes now: attention 43%, the four GEMMs 50% (at 59-72 TOPS on the
+part's measured 117 TOPS int4 ceiling), the prepare kernels 6%.
+
+See `docs/notes.md` for every decision and measurement.

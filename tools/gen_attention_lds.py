@@ -6,11 +6,15 @@ kv_head*4 + w. Per 16-key tile the workgroup loads the K tile [16][128] and the 
 LDS, and all four waves take their operands from there: K's rhs by hand (lane = key,
 16 contiguous channels), V's rhs as dense fragment loads from the tile rows. The online softmax,
 running statistics and epilogue are the tested 16-key kernel's."""
+import sys
 from pathlib import Path
 
+PREFETCH = "--prefetch" in sys.argv
+
 ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / "kernels/attention_gqa_lds_f16_wmma.loom"
-NS, SYM = "krea2.attention_gqa_lds_f16_wmma", "krea2_attention_gqa_lds_f16_wmma"
+STEM = "attention_gqa_ldsp_f16_wmma" if PREFETCH else "attention_gqa_lds_f16_wmma"
+OUT = ROOT / f"kernels/{STEM}.loom"
+NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
 
 
@@ -145,7 +149,44 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
   %key_tile_count = index.add %tiles_per_image, %c0 : index
 
-  %final_max_even, %final_sum_even, %final_max_odd, %final_sum_odd, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%max_even = %negative_vector : vector<8xf32>, %sum_even = %zero_vector : vector<8xf32>, %max_odd = %negative_vector : vector<8xf32>, %sum_odd = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> ({", ".join(["vector<8xf32>"] * 12)}) {{
+  %zero_chunk = vector.constant 0.0 : vector<16xf16>
+"""
+if PREFETCH:
+    K += f"""  // The first tile's chunks, loaded before the loop; every iteration stores the chunks
+  // it was handed, barriers, loads the next tile's while the WMMAs run.
+  %st_row_first0 = index.add %c0, %st_key : index
+  %st_row_first = index.assume %st_row_first0 [lt(%st_row_first0, %padded_tokens)] : index
+  %k_first = vector.load %k_view[%st_row_first, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+  %v_first = vector.load %v_view[%st_row_first, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+  %final_max_even, %final_sum_even, %final_max_odd, %final_sum_odd, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7, %k_last, %v_last = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%max_even = %negative_vector : vector<8xf32>, %sum_even = %zero_vector : vector<8xf32>, %max_odd = %negative_vector : vector<8xf32>, %sum_odd = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>, %k_cur = %k_first : vector<16xf16>, %v_cur = %v_first : vector<16xf16>) -> ({", ".join(["vector<8xf32>"] * 12)}, vector<16xf16>, vector<16xf16>) {{
+    %key_origin1 = index.mul %key_tile, %c16 : index
+    %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, 16)] : index
+    vector.store %k_cur, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
+    vector.store %v_cur, %v_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    // next tile's chunks (zero past the last tile)
+    %next_tile = index.add %key_tile, %c1 : index
+    %has_next = index.cmp ult, %next_tile, %key_tile_count : index
+    %next_origin1 = index.mul %next_tile, %c16 : index
+    %next_origin2 = scf.select %has_next, %next_origin1, %c0 : index
+    %next_origin = index.assume %next_origin2 [le(%next_origin2, %tile_origin_limit), mul(%next_origin2, 16)] : index
+    %st_row_next0 = index.add %next_origin, %st_key : index
+    %st_row_next = index.assume %st_row_next0 [lt(%st_row_next0, %padded_tokens)] : index
+    %k_next = scf.if %has_next -> (vector<16xf16>) {{
+      %kl = vector.load %k_view[%st_row_next, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+      scf.yield %kl : vector<16xf16>
+    }} else {{
+      scf.yield %zero_chunk : vector<16xf16>
+    }}
+    %v_next = scf.if %has_next -> (vector<16xf16>) {{
+      %vl = vector.load %v_view[%st_row_next, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+      scf.yield %vl : vector<16xf16>
+    }} else {{
+      scf.yield %zero_chunk : vector<16xf16>
+    }}
+"""
+else:
+    K += f"""  %final_max_even, %final_sum_even, %final_max_odd, %final_sum_odd, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%max_even = %negative_vector : vector<8xf32>, %sum_even = %zero_vector : vector<8xf32>, %max_odd = %negative_vector : vector<8xf32>, %sum_odd = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> ({", ".join(["vector<8xf32>"] * 12)}) {{
     %key_origin1 = index.mul %key_tile, %c16 : index
     %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, 16)] : index
     // stage K and V tiles (rows past the sequence are zero headroom)
@@ -156,7 +197,8 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
     vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
     vector.store %v_chunk, %v_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-
+"""
+K += f"""
     %local_key = index.add %key_origin0, %lane_column : index
     %key_valid = index.cmp ult, %local_key, %tokens0 : index
 """
@@ -241,7 +283,10 @@ for c in range(8):
 for c in range(8):
     K += f"    %next{c} = vector.mma %probability, %v{c}, %rescaled{c} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
 K += "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
-K += "    scf.yield %next_max_even, %next_sum_even, %next_max_odd, %next_sum_odd, " + ", ".join(f"%next{c}" for c in range(8)) + " : " + ", ".join(["vector<8xf32>"] * 12) + "\n  }\n"
+if PREFETCH:
+    K += "    scf.yield %next_max_even, %next_sum_even, %next_max_odd, %next_sum_odd, " + ", ".join(f"%next{c}" for c in range(8)) + ", %k_next, %v_next : " + ", ".join(["vector<8xf32>"] * 12) + ", vector<16xf16>, vector<16xf16>\n  }\n"
+else:
+    K += "    scf.yield %next_max_even, %next_sum_even, %next_max_odd, %next_sum_odd, " + ", ".join(f"%next{c}" for c in range(8)) + " : " + ", ".join(["vector<8xf32>"] * 12) + "\n  }\n"
 K += """  %selected_sum = scf.if %lane_group_even -> (vector<8xf32>) {
     scf.yield %final_sum_even : vector<8xf32>
   } else {
