@@ -27,7 +27,7 @@ def run(tmp: Path, tokens: int, heads=HEADS, kv=KV) -> bool:
     hs = tmp / f"attn_{tokens}.hsaco"
     compile_kernel(ROOT / "kernels/attention_gqa_f16_wmma.loom", SYM,
                    {f"{NS}.q_stride": heads * D, f"{NS}.kv_stride": kv * D, f"{NS}.kv_groups": groups, f"{NS}.tokens": tokens,
-                    f"{NS}.token_capacity": capacity, f"{NS}.scale": 1.0 / math.sqrt(D)}, hs)
+                    f"{NS}.token_capacity": capacity, f"{NS}.scale": 1.0 / math.sqrt(D), f"{NS}.out_stride": heads * D}, hs)
     tiles = (tokens + 15) // 16
     vt = np.ascontiguousarray(pad(v).T)      # [kv_stride][capacity], zero past the sequence
     (out,), t = launch(hs, SYM, (tiles, heads, 1), (32, 1, 1),

@@ -70,8 +70,10 @@ class ReferenceForward:
     """Routes Krea2Transformer2DModel.forward through krea2_ref (compacting the text
     tokens by the padding mask, which is exact), optionally dumping one step's block
     inputs and outputs as the fixture for the Loom runtime."""
-    def __init__(self, ref: R.Krea2Ref, fixture: Path | None):
-        self.ref, self.fixture, self.calls = ref, fixture, 0
+    def __init__(self, ref: R.Krea2Ref, fixture: Path | None, backend: str = "torch"):
+        self.ref, self.fixture, self.calls, self.backend = ref, fixture, 0, backend
+        self.loom = None
+        self.block_time = 0.0
 
     def __call__(self, hidden_states, encoder_hidden_states, timestep, position_ids, encoder_attention_mask=None,
                  attention_kwargs=None, return_dict=True):
@@ -87,7 +89,17 @@ class ReferenceForward:
             x = torch.cat([txt, img], dim=1)
             temb, mod = ref.time_embed(timestep)
             cos, sin = R.rope_tables(R.position_ids(txt.shape[1], grid_h, grid_w, x.device))
-            y = ref.blocks_forward(x, mod, cos, sin)
+            if self.backend == "loom":
+                if self.loom is None:
+                    sys.path.insert(0, str(ROOT))
+                    from krea2_loom import Krea2Blocks
+                    self.loom = Krea2Blocks(tokens=x.shape[1], layers=ref.layers)
+                mods = torch.stack([ref.block_modulation(i, mod)[0, 0] for i in range(ref.layers)])
+                t0 = time.time()
+                y = self.loom.forward(x[0], mods, cos, sin)[None].to(x.device, x.dtype)
+                self.block_time += time.time() - t0
+            else:
+                y = ref.blocks_forward(x, mod, cos, sin)
             out = ref.final(y[:, txt.shape[1]:], temb)
         if self.fixture is not None and self.calls == 0:
             mods = torch.stack([ref.block_modulation(i, mod)[0, 0] for i in range(ref.layers)])   # [28, 6, 6144]
@@ -98,20 +110,25 @@ class ReferenceForward:
         return (out,) if not return_dict else type("O", (), {"sample": out})()
 
 
-def build(quant: str, fixture: Path | None, device="cuda"):
+def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch"):
     from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from transformers import AutoTokenizer, Qwen3VLModel
     t0 = time.time()
-    comfy = R.load_weights(str(TURBO))
-    transformer = Krea2Transformer2DModel()
-    missing, unexpected = transformer.load_state_dict(diffusers_state(comfy), strict=False)
+    # The checkpoint goes straight to the GPU (unified memory, one copy) and the
+    # module is built on the meta device so no f32 copy of 12.9B parameters is ever
+    # materialised: that combination was 78 GB of host RAM and an OOM kill.
+    from safetensors.torch import load_file
+    comfy = load_file(str(TURBO), device=device)
+    with torch.device("meta"):
+        transformer = Krea2Transformer2DModel()
+    missing, unexpected = transformer.load_state_dict(diffusers_state(comfy), strict=False, assign=True)
     assert not unexpected, unexpected[:5]
     assert not missing, missing[:5]
-    transformer = transformer.to(device=device, dtype=torch.bfloat16)
-    if quant != "none" or fixture is not None:
+    transformer = transformer.to(dtype=torch.bfloat16)
+    if quant != "none" or fixture is not None or backend != "torch":
         ref = R.Krea2Ref(comfy, quant=quant, device=device, dtype=torch.bfloat16)
-        transformer.forward = ReferenceForward(ref, fixture)
+        transformer.forward = ReferenceForward(ref, fixture, backend)
     text_encoder = Qwen3VLModel.from_pretrained(str(QWEN), torch_dtype=torch.bfloat16).to(device)
     tokenizer = AutoTokenizer.from_pretrained(str(QWEN))
     vae = AutoencoderKLQwenImage.from_pretrained(str(VAE), torch_dtype=torch.bfloat16).to(device)
@@ -129,12 +146,13 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--quant", default="none", choices=["none", "w4a4"])
+    ap.add_argument("--backend", default="torch", choices=["torch", "loom"], help="run the 28 blocks in Loom (int4) instead of torch")
     ap.add_argument("--out", default="build/out.png")
     ap.add_argument("--fixture", default=None)
     ap.add_argument("--latents-out", default=None, help="save the final packed latents for PSNR comparisons")
     a = ap.parse_args()
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    pipe = build(a.quant, Path(a.fixture) if a.fixture else None)
+    pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend)
     gen = torch.Generator("cuda").manual_seed(a.seed)
     t0 = time.time()
     result = pipe(a.prompt, height=a.size, width=a.size, num_inference_steps=a.steps, guidance_scale=0.0,
@@ -149,6 +167,9 @@ def main() -> None:
         result.images[0].save(a.out)
         print(f"saved {a.out}")
     print(f"{a.steps} steps at {a.size}^2: {dt:.1f} s ({dt / a.steps:.2f} s/step incl. text encode and decode)")
+    fwd = getattr(pipe.transformer, "forward", None)
+    if getattr(fwd, "loom", None) is not None:
+        print(f"loom blocks: {fwd.block_time:.1f} s total, {fwd.block_time / fwd.calls:.2f} s per forward (with host copies)")
 
 
 if __name__ == "__main__":

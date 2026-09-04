@@ -1,0 +1,79 @@
+"""prepare_{norm,gated,swiglu}_i4 vs the reference's own quantisation (krea2_ref):
+the int4 codes must match exactly except at rounding ties, and the scales to f32."""
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools")); sys.path.insert(0, str(ROOT / "reference"))
+from kernel_test import compile_kernel, launch, workdir
+import krea2_ref as R
+
+
+def unpack(q: np.ndarray) -> np.ndarray:
+    lo = (q & 0xF).astype(np.int8); hi = ((q >> 4) & 0xF).astype(np.int8)
+    lo = np.where(lo > 7, lo - 16, lo); hi = np.where(hi > 7, hi - 16, hi)
+    return np.stack([lo, hi], axis=-1).reshape(q.shape[0], -1)
+
+
+def check(name, tmp, tokens, width, x_expected, args, cfg):
+    """x_expected: the f32 row before rotation; compare codes and scales."""
+    h = R.hadamard(256)
+    xr = R.rotate_groups(torch.from_numpy(x_expected), h)
+    qs, ss = R.quant_int4_rows(xr)
+    sym, ns = f"krea2_prepare_{name}_i4", f"krea2.prepare_{name}_i4"
+    hs = tmp / f"{name}.hsaco"
+    compile_kernel(ROOT / f"kernels/prepare_{name}_i4.loom", sym, {f"{ns}.width": width, **cfg}, hs)
+    (q, s), t = launch(hs, sym, (tokens, 1, 1), (256, 1, 1), [("i32", tokens)] + args +
+                       [("out", ((tokens, width // 2), np.uint8)), ("out", ((tokens,), np.float32))], tmp, repeat=3)
+    got = unpack(q).astype(np.int64); want = qs.numpy().astype(np.int64)
+    mism = (got != want); off_by_one = (np.abs(got - want) == 1)
+    bad = mism & ~off_by_one
+    scale_err = np.abs(s - ss.numpy().ravel()).max() / np.abs(ss.numpy()).max()
+    # the SwiGLU variant keeps its 16384-wide row as f16 in LDS: a few more ties and a
+    # scale rounded at f16 precision, both far inside int4's step
+    tol_codes, tol_scale = (5e-3, 2e-3) if name == "swiglu" else (2e-3, 1e-5)
+    ok = bad.sum() == 0 and mism.mean() < tol_codes and scale_err < tol_scale
+    print(f"  {'PASS' if ok else 'FAIL'} prepare_{name}: tokens={tokens} width={width}  {t['per_launch_us'] / 1e3:.3f} ms  "
+          f"codes differ {mism.mean() * 100:.3f}% (all by 1, ties) scale rel err {scale_err:.1e}")
+    return ok
+
+
+def main() -> int:
+    ok = True
+    rng = np.random.default_rng(0)
+    tokens, width = 300, 6144
+    with workdir() as tmp:
+        tmp = Path(tmp)
+        # norm: h f16, norm_scale, mod scale/shift f32
+        h = (rng.standard_normal((tokens, width)) * 1.5).astype(np.float16)
+        ns = (rng.standard_normal(width) * 0.1).astype(np.float32)
+        ms = (rng.standard_normal(width) * 0.2).astype(np.float32)
+        sh = (rng.standard_normal(width) * 0.2).astype(np.float32)
+        hf = h.astype(np.float32)
+        normed = hf / np.sqrt((hf * hf).mean(axis=1, keepdims=True) + 1e-5) * (1 + ns)
+        x = (1 + ms) * normed + sh
+        ok &= check("norm", tmp, tokens, width, x.astype(np.float32),
+                    [("in_f16", h), ("in", ns), ("in", ms), ("in", sh)], {"krea2.prepare_norm_i4.eps": 1e-5})
+        # gated: attn f16 [tokens][width], gate f16 [tokens][gate_stride] (a slice of the fused output)
+        gate_stride = 15360
+        attn = (rng.standard_normal((tokens, width)) * 0.5).astype(np.float16)
+        fused = (rng.standard_normal((tokens, gate_stride)) * 0.5).astype(np.float16)
+        g = fused[:, :width].astype(np.float32)
+        x = attn.astype(np.float32) / (1 + np.exp(-g))
+        ok &= check("gated", tmp, tokens, width, x.astype(np.float32),
+                    [("in_f16", attn), ("in_f16", fused)], {"krea2.prepare_gated_i4.gate_stride": gate_stride})
+        # swiglu: the fused gate|up output [tokens][2*inter]; width = inter
+        inter = 16384
+        gu = (rng.standard_normal((tokens, 2 * inter)) * 0.5).astype(np.float16)
+        gg, uu = gu[:, :inter].astype(np.float32), gu[:, inter:].astype(np.float32)
+        x = gg / (1 + np.exp(-gg)) * uu
+        ok &= check("swiglu", tmp, tokens, inter, x.astype(np.float32),
+                    [("in_f16", gu)], {"krea2.prepare_swiglu_i4.gate_stride": 2 * inter})
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

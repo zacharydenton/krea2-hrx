@@ -1,0 +1,115 @@
+// Per-head RMSNorm (zero-centred scale, multiplier 1 + scale[c]) and rotary embedding
+// on q and k in place inside the fused projection buffer [tokens][row_stride], q at
+// column 0 (q_heads x 128), k at column k_offset (kv_heads x 128). One workgroup of 256
+// lanes per token handles eight heads at a time: a wave per head, four channels per
+// lane, the head's sum of squares reduced across the wave.
+//   x = h / sqrt(mean(h^2) + eps) * (1 + scale[c])
+//   (x[2i], x[2i+1]) -> (x0*cos - x1*sin, x1*cos + x0*sin), cos/sin [tokens][128]
+amdgpu.target<gfx11-generic> @krea2_rope_qknorm_gfx11 {subgroup_size = 32}
+
+config.decl @krea2.rope_qknorm_f16.row_stride : %value: index where [range(%value, 128, 65536), mul(%value, 128)]
+
+config.decl @krea2.rope_qknorm_f16.q_heads : %value: index where [range(%value, 1, 256)]
+
+config.decl @krea2.rope_qknorm_f16.kv_heads : %value: index where [range(%value, 1, 256)]
+
+config.decl @krea2.rope_qknorm_f16.k_offset : %value: index where [range(%value, 128, 65536), mul(%value, 128)]
+
+config.decl @krea2.rope_qknorm_f16.eps : f32
+
+kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @krea2_rope_qknorm_f16(%tokens: index) {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  kernel.launch.config workgroups(%tokens, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%tokens: index, %qkv: buffer, %q_scale: buffer, %k_scale: buffer, %cos: buffer, %sin: buffer) {
+  %row_stride = config.get @krea2.rope_qknorm_f16.row_stride : index
+  %q_heads = config.get @krea2.rope_qknorm_f16.q_heads : index
+  %kv_heads = config.get @krea2.rope_qknorm_f16.kv_heads : index
+  %k_offset = config.get @krea2.rope_qknorm_f16.k_offset : index
+  %eps = config.get @krea2.rope_qknorm_f16.eps : f32
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c7 = index.constant 7 : index
+  %c8 = index.constant 8 : index
+  %c32 = index.constant 32 : index
+  %c128 = index.constant 128 : index
+  %c0_offset = index.constant 0 : offset
+  %one = scalar.constant 1.0 : f32
+  %zero_f = scalar.constant 0.0 : f32
+  %inv128 = scalar.constant 0.0078125 : f32
+  %tokens_b = index.assume %tokens [range(%tokens, 1, 1048576)] : index
+  %token = kernel.workgroup.id<x> : index
+  %row = index.assume %token [lt(%token, %tokens_b)] : index
+  %wave0 = kernel.subgroup.id : index
+  %wave = index.assume %wave0 [range(%wave0, 0, 7)] : index
+  %lane = kernel.subgroup.lane.id : index
+  %lane_col = index.mul %lane, %c4 : index
+  %heads_total = index.add %q_heads, %kv_heads : index
+  %rounds0 = index.add %heads_total, %c7 : index
+  %rounds = index.div %rounds0, %c8 : index
+  %qkv_global = buffer.assume.memory_space<global> %qkv : buffer
+  %qs_global = buffer.assume.memory_space<global> %q_scale : buffer
+  %ks_global = buffer.assume.memory_space<global> %k_scale : buffer
+  %cos_global = buffer.assume.memory_space<global> %cos : buffer
+  %sin_global = buffer.assume.memory_space<global> %sin : buffer
+  %qkv_view = buffer.view %qkv_global[%c0_offset] : buffer -> view<[%tokens_b]x[%row_stride]xf16>
+  %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<128xf32>
+  %ks_view = buffer.view %ks_global[%c0_offset] : buffer -> view<128xf32>
+  %cos_view = buffer.view %cos_global[%c0_offset] : buffer -> view<[%tokens_b]x128xf32>
+  %sin_view = buffer.view %sin_global[%c0_offset] : buffer -> view<[%tokens_b]x128xf32>
+  %col_limit = index.sub %row_stride, %c4 : index
+  scf.for %r = [%c0 to %rounds step %c1] {
+    %r8 = index.mul %r, %c8 : index
+    %head = index.add %r8, %wave : index
+    %active = index.cmp ult, %head, %heads_total : index
+    scf.if %active {
+      %is_q = index.cmp ult, %head, %q_heads : index
+      %k_head = index.sub %head, %q_heads : index
+      %q_base = index.mul %head, %c128 : index
+      %k_base0 = index.mul %k_head, %c128 : index
+      %k_base = index.add %k_offset, %k_base0 : index
+      %base = scf.select %is_q, %q_base, %k_base : index
+      %col0 = index.add %base, %lane_col : index
+      %col = index.assume %col0 [le(%col0, %col_limit), mul(%col0, 4)] : index
+      %v16 = vector.load %qkv_view[%row, %col] : view<[%tokens_b]x[%row_stride]xf16> -> vector<4xf16>
+      %v = vector.extf %v16 : vector<4xf16> to vector<4xf32>
+      %sq = vector.mulf %v, %v : vector<4xf32>
+      %lane_ss = vector.reduce<addf> %sq, %zero_f : vector<4xf32>, f32
+      %ss = kernel.subgroup.reduce<addf> %lane_ss : f32
+      %mean = scalar.mulf %ss, %inv128 : f32
+      %mean_eps = scalar.addf %mean, %eps : f32
+      %rinv = scalar.rsqrtf %mean_eps : f32
+      %rinv_v = vector.splat %rinv : vector<4xf32>
+      %normed = vector.mulf %v, %rinv_v : vector<4xf32>
+      %sc_q = vector.load %qs_view[%lane_col] : view<128xf32> -> vector<4xf32>
+      %sc_k = vector.load %ks_view[%lane_col] : view<128xf32> -> vector<4xf32>
+      %sc = scf.if %is_q -> (vector<4xf32>) {
+        scf.yield %sc_q : vector<4xf32>
+      } else {
+        scf.yield %sc_k : vector<4xf32>
+      }
+      %one_v = vector.splat %one : vector<4xf32>
+      %sc1 = vector.addf %sc, %one_v : vector<4xf32>
+      %x = vector.mulf %normed, %sc1 : vector<4xf32>
+      %c = vector.load %cos_view[%row, %lane_col] : view<[%tokens_b]x128xf32> -> vector<4xf32>
+      %s = vector.load %sin_view[%row, %lane_col] : view<[%tokens_b]x128xf32> -> vector<4xf32>
+      // interleaved pairs: rotated = (-x1, x0, -x3, x2)
+      %x0 = vector.extract %x[0] : vector<4xf32> -> f32
+      %x1 = vector.extract %x[1] : vector<4xf32> -> f32
+      %x2 = vector.extract %x[2] : vector<4xf32> -> f32
+      %x3 = vector.extract %x[3] : vector<4xf32> -> f32
+      %zero = scalar.constant 0.0 : f32
+      %n1 = scalar.subf %zero, %x1 : f32
+      %n3 = scalar.subf %zero, %x3 : f32
+      %rot = vector.from_elements %n1, %x0, %n3, %x2 : vector<4xf32>
+      %xc = vector.mulf %x, %c : vector<4xf32>
+      %rs = vector.mulf %rot, %s : vector<4xf32>
+      %out = vector.addf %xc, %rs : vector<4xf32>
+      %out16 = vector.fptrunc %out : vector<4xf32> to vector<4xf16>
+      vector.store %out16, %qkv_view[%row, %col] : vector<4xf16>, view<[%tokens_b]x[%row_stride]xf16>
+    }
+  }
+  kernel.return
+}

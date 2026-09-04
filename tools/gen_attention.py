@@ -41,7 +41,7 @@ HEADER = """// Online-softmax attention for Krea 2: one wave32 per (16 query row
 s = HEADER + s
 NS = "krea2.attention_gqa_f16_wmma"
 sub("hidden_size decl", f"config.decl @{NS}.hidden_size : %value: index where [range(%value, 64, 8192), mul(%value, 64)]\n",
-    f"config.decl @{NS}.kv_stride : %value: index where [range(%value, 128, 32768), mul(%value, 128)]\n\nconfig.decl @{NS}.kv_groups : %value: index where [range(%value, 1, 64)]\n")
+    f"config.decl @{NS}.kv_stride : %value: index where [range(%value, 128, 32768), mul(%value, 128)]\n\nconfig.decl @{NS}.kv_groups : %value: index where [range(%value, 1, 64)]\n\nconfig.decl @{NS}.out_stride : %value: index where [range(%value, 128, 32768), mul(%value, 128)]\n")
 sub("qkv_stride decl", f"config.decl @{NS}.qkv_stride : %value: index where [range(%value, 64, 32768), mul(%value, 64)]",
     f"config.decl @{NS}.q_stride : %value: index where [range(%value, 128, 32768), mul(%value, 128)]")
 s = s.replace(f"@{NS}.tokens_per_image", f"@{NS}.tokens")
@@ -53,10 +53,10 @@ sub("launch config", """  %images = index.div %token_count, %tokens_per_image0 :
   kernel.launch.config workgroups(%tiles, %head_count, %c1) workgroup_size(%c32, %c1, %c1) : index""",
     """  kernel.launch.config workgroups(%tiles_per_image, %head_count, %c1) workgroup_size(%c32, %c1, %c1) : index""")
 sub("config gets", f"  %hidden_size0 = config.get @{NS}.hidden_size : index\n  %qkv_stride0 = config.get @{NS}.qkv_stride : index\n",
-    f"  %q_stride0 = config.get @{NS}.q_stride : index\n  %kv_stride0 = config.get @{NS}.kv_stride : index\n  %kv_groups = config.get @{NS}.kv_groups : index\n")
+    f"  %q_stride0 = config.get @{NS}.q_stride : index\n  %kv_stride0 = config.get @{NS}.kv_stride : index\n  %kv_groups = config.get @{NS}.kv_groups : index\n  %out_stride0 = config.get @{NS}.out_stride : index\n")
 sub("constants", "  %c64 = index.constant 64 : index\n", "  %c64 = index.constant 64 : index\n  %c80 = index.constant 80 : index\n  %c96 = index.constant 96 : index\n  %c112 = index.constant 112 : index\n  %c128 = index.constant 128 : index\n")
 sub("head limit", "  %head_limit = index.div %hidden_size0, %c64 : index\n  %head = index.rem %head_raw, %head_limit : index\n",
-    "  %head_limit = index.div %q_stride0, %c128 : index\n  %head = index.rem %head_raw, %head_limit : index\n  %kv_head_limit = index.div %kv_stride0, %c128 : index\n  %kv_head0 = index.div %head, %kv_groups : index\n  %kv_head = index.rem %kv_head0, %kv_head_limit : index\n")
+    "  %head_limit = index.div %out_stride0, %c128 : index\n  %head = index.rem %head_raw, %head_limit : index\n  %kv_head_limit = index.div %kv_stride0, %c128 : index\n  %kv_head0 = index.div %head, %kv_groups : index\n  %kv_head = index.rem %kv_head0, %kv_head_limit : index\n")
 sub("image machinery", """  %image_raw = index.div %tile_id, %tiles_per_image : index
   %image_limit = config.get @krea2.attention_gqa_f16_wmma.max_images : index
   %image = index.rem %image_raw, %image_limit : index
@@ -76,11 +76,8 @@ sub("k view", "  %k_transposed = buffer.view %k_aligned[%c0_offset] : buffer -> 
     "  %k_view = buffer.view %k_aligned[%c0_offset] : buffer -> view<[%padded_tokens]x[%kv_stride0]xf16>\n")
 sub("v view", "  %v_view = buffer.view %v_aligned[%c0_offset] : buffer -> view<[%padded_tokens]x[%kv_stride0]xf16>\n",
     "  // V arrives transposed, [kv_stride][token_capacity], so a lane's 16 keys of one\n  // channel are contiguous; keys past the sequence are zero there.\n  %vt_view = buffer.view %v_aligned[%c0_offset] : buffer -> view<[%kv_stride0]x[%padded_tokens]xf16>\n")
-sub("hoist q", "  %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>\n",
-    "  %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>\n  // The 16 query rows' eight lhs fragments, loaded once.\n"
-    + "".join(f"  %q_channel{j} = index.add %head_base0, %c{16*j} : index\n  %lhs{j} = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel{j}] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n" if j else "  %q_channel0 = index.add %head_base0, %c0 : index\n  %lhs0 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel0] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n" for j in range(8)))
 sub("out view", "  %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%token_count]x[%hidden_size0]xf32>\n",
-    "  %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%token_count]x[%q_stride0]xf16>\n")
+    "  %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%token_count]x[%out_stride0]xf16>\n")
 sub("result bytes", "  %result_bytes = index.constant 4096 : offset\n", "  %result_bytes = index.constant 8192 : offset\n")
 s = s.replace("view<16x64xf32>", "view<16x128xf32>")
 sub("final results", "%final0, %final1, %final2, %final3 = scf.for", "%final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for")
@@ -96,36 +93,53 @@ sub("qk loop", """    %raw_scores = scf.for %head_tile = [%c0 to %c64 step %c16]
     """    // K as the rhs operand, assembled by hand: lane l holds key (l mod 16) with 16
     // contiguous channels, which is K's own row layout -- two 16-byte loads per
     // fragment instead of the transposed view's sixteen 2-byte ones. The eight
-    // 16-channel steps are written out so each uses its hoisted query fragment.
+    // 16-channel steps are written out; Q fragments reload per tile from cache,
+    // which beats holding all eight across the loop (256 VGPRs and spills).
     %key_row = index.add %key_origin0, %lane_column : index
+    %q_channel0 = index.add %head_base0, %c0 : index
+    %lhs0 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel0] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data0 = vector.load %k_view[%key_row, %kv_base0] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs0 = vector.fragment<rhs> %k_data0 shape [%k_frag, %n] : vector<16xf16>
     %qk0 = vector.mma %lhs0, %rhs0, %init : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel1 = index.add %kv_base0, %c16 : index
+    %q_channel1 = index.add %head_base0, %c16 : index
+    %lhs1 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel1] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data1 = vector.load %k_view[%key_row, %kv_channel1] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs1 = vector.fragment<rhs> %k_data1 shape [%k_frag, %n] : vector<16xf16>
     %qk1 = vector.mma %lhs1, %rhs1, %qk0 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel2 = index.add %kv_base0, %c32 : index
+    %q_channel2 = index.add %head_base0, %c32 : index
+    %lhs2 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel2] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data2 = vector.load %k_view[%key_row, %kv_channel2] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs2 = vector.fragment<rhs> %k_data2 shape [%k_frag, %n] : vector<16xf16>
     %qk2 = vector.mma %lhs2, %rhs2, %qk1 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel3 = index.add %kv_base0, %c48 : index
+    %q_channel3 = index.add %head_base0, %c48 : index
+    %lhs3 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel3] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data3 = vector.load %k_view[%key_row, %kv_channel3] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs3 = vector.fragment<rhs> %k_data3 shape [%k_frag, %n] : vector<16xf16>
     %qk3 = vector.mma %lhs3, %rhs3, %qk2 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel4 = index.add %kv_base0, %c64 : index
+    %q_channel4 = index.add %head_base0, %c64 : index
+    %lhs4 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel4] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data4 = vector.load %k_view[%key_row, %kv_channel4] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs4 = vector.fragment<rhs> %k_data4 shape [%k_frag, %n] : vector<16xf16>
     %qk4 = vector.mma %lhs4, %rhs4, %qk3 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel5 = index.add %kv_base0, %c80 : index
+    %q_channel5 = index.add %head_base0, %c80 : index
+    %lhs5 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel5] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data5 = vector.load %k_view[%key_row, %kv_channel5] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs5 = vector.fragment<rhs> %k_data5 shape [%k_frag, %n] : vector<16xf16>
     %qk5 = vector.mma %lhs5, %rhs5, %qk4 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel6 = index.add %kv_base0, %c96 : index
+    %q_channel6 = index.add %head_base0, %c96 : index
+    %lhs6 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel6] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data6 = vector.load %k_view[%key_row, %kv_channel6] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs6 = vector.fragment<rhs> %k_data6 shape [%k_frag, %n] : vector<16xf16>
     %qk6 = vector.mma %lhs6, %rhs6, %qk5 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel7 = index.add %kv_base0, %c112 : index
+    %q_channel7 = index.add %head_base0, %c112 : index
+    %lhs7 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel7] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data7 = vector.load %k_view[%key_row, %kv_channel7] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs7 = vector.fragment<rhs> %k_data7 shape [%k_frag, %n] : vector<16xf16>
     %raw_scores = vector.mma %lhs7, %rhs7, %qk6 : vector<16xf16>, vector<16xf16>, vector<8xf32>""")
@@ -148,7 +162,7 @@ sub("epilogue header", "  // 16 rows x 64 channels is 256 vector4s over 32 lanes
 sub("epilogue slot", "    %row = index.div %slot, %c16 : index\n    %column_group = index.rem %slot, %c16 : index\n",
     "    %row = index.div %slot, %c32 : index\n    %column_group = index.rem %slot, %c32 : index\n")
 sub("epilogue store", "      %values = vector.load %result_view[%row, %column] : view<16x128xf32> -> vector<4xf32>\n      %out_column0 = index.add %head_base0, %column : index\n      %out_column = index.assume %out_column0 [le(%out_column0, %hidden_vector_limit)] : index\n      vector.store %values, %out_view[%global_row, %out_column] : vector<4xf32>, view<[%token_count]x[%hidden_size0]xf32>\n",
-    "      %values = vector.load %result_view[%row, %column] : view<16x128xf32> -> vector<4xf32>\n      %halves = vector.fptrunc %values : vector<4xf32> to vector<4xf16>\n      %out_column0 = index.add %head_base0, %column : index\n      %out_column = index.assume %out_column0 [le(%out_column0, %hidden_vector_limit)] : index\n      vector.store %halves, %out_view[%global_row, %out_column] : vector<4xf16>, view<[%token_count]x[%q_stride0]xf16>\n")
+    "      %values = vector.load %result_view[%row, %column] : view<16x128xf32> -> vector<4xf32>\n      %halves = vector.fptrunc %values : vector<4xf32> to vector<4xf16>\n      %out_column0 = index.add %head_base0, %column : index\n      %out_column = index.assume %out_column0 [le(%out_column0, %hidden_vector_limit)] : index\n      vector.store %halves, %out_view[%global_row, %out_column] : vector<4xf16>, view<[%token_count]x[%out_stride0]xf16>\n")
 left = [l for l in s.split("\n") if "%hidden_size0" in l or "%qkv_stride0" in l or "max_images" in l or "%k_transposed" in l or "%v_view" in l]
 if left:
     sys.exit("leftover names:\n" + "\n".join(left[:5]))

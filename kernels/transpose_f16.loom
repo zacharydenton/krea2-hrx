@@ -1,9 +1,12 @@
-// out[c][r] = in[r][c] for r < rows, zero for rows <= r < row_capacity: the V
-// operand of attention needs each channel's keys contiguous. One workgroup per
+// out[c][r] = in[r][c] for r < rows (c < cols of a row_stride-wide row), zero for
+// rows <= r < row_capacity: the V operand of attention needs each channel's keys
+// contiguous. One workgroup per
 // 32x32 tile through LDS; the tile is read row-major and written column-major.
 amdgpu.target<gfx11-generic> @krea2_transpose_gfx11 {subgroup_size = 32}
 
 config.decl @krea2.transpose_f16.cols : %value: index where [range(%value, 32, 65536), mul(%value, 32)]
+
+config.decl @krea2.transpose_f16.row_stride : %value: index where [range(%value, 32, 65536), mul(%value, 32)]
 
 config.decl @krea2.transpose_f16.row_capacity : %value: index where [range(%value, 32, 1048576), mul(%value, 32)]
 
@@ -18,6 +21,7 @@ kernel.def target(@krea2_transpose_gfx11) export("krea2_transpose_f16") @krea2_t
   kernel.launch.config workgroups(%col_tiles, %row_tiles, %c1) workgroup_size(%c256, %c1, %c1) : index
 } launch(%rows: index, %in: buffer, %out: buffer) {
   %cols = config.get @krea2.transpose_f16.cols : index
+  %row_stride = config.get @krea2.transpose_f16.row_stride : index
   %row_capacity = config.get @krea2.transpose_f16.row_capacity : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
@@ -33,7 +37,7 @@ kernel.def target(@krea2_transpose_gfx11) export("krea2_transpose_f16") @krea2_t
   %workitem = kernel.workitem.id<x> : index
   %in_global = buffer.assume.memory_space<global> %in : buffer
   %out_global = buffer.assume.memory_space<global> %out : buffer
-  %in_view = buffer.view %in_global[%c0_offset] : buffer -> view<[%rows_b]x[%cols]xf16>
+  %in_view = buffer.view %in_global[%c0_offset] : buffer -> view<[%rows_b]x[%row_stride]xf16>
   %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%cols]x[%row_capacity]xf16>
   %tile = buffer.alloca<workgroup> align(16) %tile_bytes : buffer
   %tile_view = buffer.view %tile[%c0_offset] : buffer -> view<32x32xf16>
@@ -51,8 +55,8 @@ kernel.def target(@krea2_transpose_gfx11) export("krea2_transpose_f16") @krea2_t
     %ccg0 = index.add %c_col0, %e : index
     %v = scf.if %r_ok -> (f16) {
       %r = index.assume %r0 [lt(%r0, %rows_b)] : index
-      %ccg = index.assume %ccg0 [lt(%ccg0, %cols)] : index
-      %x = view.load %in_view[%r, %ccg] : view<[%rows_b]x[%cols]xf16> -> f16
+      %ccg = index.assume %ccg0 [lt(%ccg0, %row_stride)] : index
+      %x = view.load %in_view[%r, %ccg] : view<[%rows_b]x[%row_stride]xf16> -> f16
       scf.yield %x : f16
     } else {
       scf.yield %zero : f16

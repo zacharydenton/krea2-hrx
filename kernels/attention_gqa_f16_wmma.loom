@@ -20,6 +20,8 @@ config.decl @krea2.attention_gqa_f16_wmma.kv_stride : %value: index where [range
 
 config.decl @krea2.attention_gqa_f16_wmma.kv_groups : %value: index where [range(%value, 1, 64)]
 
+config.decl @krea2.attention_gqa_f16_wmma.out_stride : %value: index where [range(%value, 128, 32768), mul(%value, 128)]
+
 config.decl @krea2.attention_gqa_f16_wmma.q_stride : %value: index where [range(%value, 128, 32768), mul(%value, 128)]
 
 config.decl @krea2.attention_gqa_f16_wmma.tokens : %value: index where [range(%value, 16, 65536)]
@@ -44,6 +46,7 @@ kernel.def target(@krea2_attention_gqa_gfx11) export("krea2_attention_gqa_f16_wm
   %q_stride0 = config.get @krea2.attention_gqa_f16_wmma.q_stride : index
   %kv_stride0 = config.get @krea2.attention_gqa_f16_wmma.kv_stride : index
   %kv_groups = config.get @krea2.attention_gqa_f16_wmma.kv_groups : index
+  %out_stride0 = config.get @krea2.attention_gqa_f16_wmma.out_stride : index
   %tokens_per_image0 = config.get @krea2.attention_gqa_f16_wmma.tokens : index
   %scale = config.get @krea2.attention_gqa_f16_wmma.scale : f32
 
@@ -77,7 +80,7 @@ kernel.def target(@krea2_attention_gqa_gfx11) export("krea2_attention_gqa_f16_wm
   // index.rem is what the subrange analysis follows through a workgroup id.
   // Both of these are no-ops at runtime -- the launch never exceeds either
   // limit -- but they are how the fragment-load bounds proof gets its ceiling.
-  %head_limit = index.div %q_stride0, %c128 : index
+  %head_limit = index.div %out_stride0, %c128 : index
   %head = index.rem %head_raw, %head_limit : index
   %kv_head_limit = index.div %kv_stride0, %c128 : index
   %kv_head0 = index.div %head, %kv_groups : index
@@ -121,7 +124,7 @@ kernel.def target(@krea2_attention_gqa_gfx11) export("krea2_attention_gqa_f16_wm
   // V arrives transposed, [kv_stride][token_capacity], so a lane's 16 keys of one
   // channel are contiguous; keys past the sequence are zero there.
   %vt_view = buffer.view %v_aligned[%c0_offset] : buffer -> view<[%kv_stride0]x[%padded_tokens]xf16>
-  %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%token_count]x[%q_stride0]xf16>
+  %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%token_count]x[%out_stride0]xf16>
 
   %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
   %scratch_view = buffer.view %scratch[%c0_offset] : buffer -> view<16x16xf16>
@@ -130,23 +133,6 @@ kernel.def target(@krea2_attention_gqa_gfx11) export("krea2_attention_gqa_f16_wm
   %result_view = buffer.view %result_stage[%c0_offset] : buffer -> view<16x128xf32>
 
   %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
-  // The 16 query rows' eight lhs fragments, loaded once.
-  %q_channel0 = index.add %head_base0, %c0 : index
-  %lhs0 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel0] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel1 = index.add %head_base0, %c16 : index
-  %lhs1 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel1] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel2 = index.add %head_base0, %c32 : index
-  %lhs2 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel2] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel3 = index.add %head_base0, %c48 : index
-  %lhs3 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel3] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel4 = index.add %head_base0, %c64 : index
-  %lhs4 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel4] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel5 = index.add %head_base0, %c80 : index
-  %lhs5 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel5] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel6 = index.add %head_base0, %c96 : index
-  %lhs6 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel6] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %q_channel7 = index.add %head_base0, %c112 : index
-  %lhs7 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel7] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
   %key_tile_count = index.add %tiles_per_image, %c0 : index
 
   %final_max_even, %final_sum_even, %final_max_odd, %final_sum_odd, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%max_even = %negative_vector : vector<8xf32>, %sum_even = %zero_vector : vector<8xf32>, %max_odd = %negative_vector : vector<8xf32>, %sum_odd = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
@@ -158,36 +144,53 @@ kernel.def target(@krea2_attention_gqa_gfx11) export("krea2_attention_gqa_f16_wm
     // K as the rhs operand, assembled by hand: lane l holds key (l mod 16) with 16
     // contiguous channels, which is K's own row layout -- two 16-byte loads per
     // fragment instead of the transposed view's sixteen 2-byte ones. The eight
-    // 16-channel steps are written out so each uses its hoisted query fragment.
+    // 16-channel steps are written out; Q fragments reload per tile from cache,
+    // which beats holding all eight across the loop (256 VGPRs and spills).
     %key_row = index.add %key_origin0, %lane_column : index
+    %q_channel0 = index.add %head_base0, %c0 : index
+    %lhs0 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel0] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data0 = vector.load %k_view[%key_row, %kv_base0] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs0 = vector.fragment<rhs> %k_data0 shape [%k_frag, %n] : vector<16xf16>
     %qk0 = vector.mma %lhs0, %rhs0, %init : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel1 = index.add %kv_base0, %c16 : index
+    %q_channel1 = index.add %head_base0, %c16 : index
+    %lhs1 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel1] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data1 = vector.load %k_view[%key_row, %kv_channel1] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs1 = vector.fragment<rhs> %k_data1 shape [%k_frag, %n] : vector<16xf16>
     %qk1 = vector.mma %lhs1, %rhs1, %qk0 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel2 = index.add %kv_base0, %c32 : index
+    %q_channel2 = index.add %head_base0, %c32 : index
+    %lhs2 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel2] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data2 = vector.load %k_view[%key_row, %kv_channel2] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs2 = vector.fragment<rhs> %k_data2 shape [%k_frag, %n] : vector<16xf16>
     %qk2 = vector.mma %lhs2, %rhs2, %qk1 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel3 = index.add %kv_base0, %c48 : index
+    %q_channel3 = index.add %head_base0, %c48 : index
+    %lhs3 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel3] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data3 = vector.load %k_view[%key_row, %kv_channel3] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs3 = vector.fragment<rhs> %k_data3 shape [%k_frag, %n] : vector<16xf16>
     %qk3 = vector.mma %lhs3, %rhs3, %qk2 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel4 = index.add %kv_base0, %c64 : index
+    %q_channel4 = index.add %head_base0, %c64 : index
+    %lhs4 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel4] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data4 = vector.load %k_view[%key_row, %kv_channel4] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs4 = vector.fragment<rhs> %k_data4 shape [%k_frag, %n] : vector<16xf16>
     %qk4 = vector.mma %lhs4, %rhs4, %qk3 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel5 = index.add %kv_base0, %c80 : index
+    %q_channel5 = index.add %head_base0, %c80 : index
+    %lhs5 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel5] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data5 = vector.load %k_view[%key_row, %kv_channel5] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs5 = vector.fragment<rhs> %k_data5 shape [%k_frag, %n] : vector<16xf16>
     %qk5 = vector.mma %lhs5, %rhs5, %qk4 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel6 = index.add %kv_base0, %c96 : index
+    %q_channel6 = index.add %head_base0, %c96 : index
+    %lhs6 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel6] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data6 = vector.load %k_view[%key_row, %kv_channel6] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs6 = vector.fragment<rhs> %k_data6 shape [%k_frag, %n] : vector<16xf16>
     %qk6 = vector.mma %lhs6, %rhs6, %qk5 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     %kv_channel7 = index.add %kv_base0, %c112 : index
+    %q_channel7 = index.add %head_base0, %c112 : index
+    %lhs7 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel7] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
     %k_data7 = vector.load %k_view[%key_row, %kv_channel7] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %rhs7 = vector.fragment<rhs> %k_data7 shape [%k_frag, %n] : vector<16xf16>
     %raw_scores = vector.mma %lhs7, %rhs7, %qk6 : vector<16xf16>, vector<16xf16>, vector<8xf32>
@@ -355,7 +358,7 @@ kernel.def target(@krea2_attention_gqa_gfx11) export("krea2_attention_gqa_f16_wm
       %halves = vector.fptrunc %values : vector<4xf32> to vector<4xf16>
       %out_column0 = index.add %head_base0, %column : index
       %out_column = index.assume %out_column0 [le(%out_column0, %hidden_vector_limit)] : index
-      vector.store %halves, %out_view[%global_row, %out_column] : vector<4xf16>, view<[%token_count]x[%q_stride0]xf16>
+      vector.store %halves, %out_view[%global_row, %out_column] : vector<4xf16>, view<[%token_count]x[%out_stride0]xf16>
     }
   }
   kernel.return
