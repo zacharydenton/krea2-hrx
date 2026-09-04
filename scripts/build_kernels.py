@@ -25,7 +25,7 @@ def compile_one(src: str, root: str, out: Path, cfg: dict) -> None:
 
 
 def build(tokens: int) -> Path:
-    capacity = (tokens + 16 + 31) // 32 * 32       # >= tokens + 16 for attention, a multiple of 32 for the transpose
+    capacity = max((tokens + 16 + 31) // 32 * 32, (tokens + 63) // 64 * 64)   # tokens+16 headroom, whole 64-key blocks, a multiple of 32
     out = ROOT / "build/kernels" / f"T{tokens}"
     out.mkdir(parents=True, exist_ok=True)
     jobs = [

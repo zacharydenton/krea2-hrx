@@ -76,7 +76,7 @@ public:
         if (tokens < 16 || tokens > 65536) throw std::invalid_argument("tokens must be 16..65536");
         if (layers < 1 || layers > 28) throw std::invalid_argument("layers must be 1..28");
         HIP_CHECK(hipInit(0));
-        capacity_ = (tokens + 16 + 31) / 32 * 32;                  // >= tokens + 16 for attention, a multiple of 32 for the transpose
+        capacity_ = std::max<size_t>((tokens + 16 + 31) / 32 * 32, (tokens + 63) / 64 * 64);   // tokens+16 headroom, whole 64-key blocks
         auto spans = read_manifest(weights_dir + "/manifest.txt");
         auto blob = read_file(weights_dir + "/weights.bin");
         for (const auto &e : spans)

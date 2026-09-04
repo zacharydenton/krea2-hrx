@@ -9,7 +9,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 from kernel_test import compile_kernel, launch, report, workdir, ROOT
 
-NS, SYM = "krea2.attention_gqa_f16_wmma", "krea2_attention_gqa_f16_wmma"
+import os
+STEM = os.environ.get("ATTN", "attention_gqa_f16_wmma")
+NS, SYM = "krea2." + STEM, "krea2_" + STEM
 HEADS, KV, D = 48, 12, 128
 
 
@@ -21,11 +23,11 @@ def run(tmp: Path, tokens: int, heads=HEADS, kv=KV) -> bool:
     groups = heads // kv
     qf, kf, vf = (t.float().cuda() for t in (q, k.repeat_interleave(groups, dim=1), v.repeat_interleave(groups, dim=1)))
     want = torch.nn.functional.scaled_dot_product_attention(qf.transpose(0, 1)[None], kf.transpose(0, 1)[None], vf.transpose(0, 1)[None])[0].transpose(0, 1).reshape(tokens, heads * D).cpu().numpy()
-    capacity = (tokens + 31) // 16 * 16
+    capacity = max((tokens + 16 + 31) // 32 * 32, (tokens + 63) // 64 * 64)
     def pad(t):                              # 16 rows of headroom
         out = np.zeros((capacity, t.shape[1] * D), np.float16); out[:tokens] = t.reshape(tokens, -1).numpy(); return out
     hs = tmp / f"attn_{tokens}.hsaco"
-    compile_kernel(ROOT / "kernels/attention_gqa_f16_wmma.loom", SYM,
+    compile_kernel(ROOT / f"kernels/{STEM}.loom", SYM,
                    {f"{NS}.q_stride": heads * D, f"{NS}.kv_stride": kv * D, f"{NS}.kv_groups": groups, f"{NS}.tokens": tokens,
                     f"{NS}.token_capacity": capacity, f"{NS}.scale": 1.0 / math.sqrt(D), f"{NS}.out_stride": heads * D}, hs)
     tiles = (tokens + 15) // 16
@@ -35,7 +37,7 @@ def run(tmp: Path, tokens: int, heads=HEADS, kv=KV) -> bool:
                         ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
     us = t["per_launch_us"]
     flops = 4.0 * tokens * tokens * D * heads
-    return report(f"attention tokens={tokens} heads={heads}/{kv}  {us / 1e3:8.3f} ms  {flops / (us * 1e-6) / 1e12:5.1f} TFLOP/s",
+    return report(f"{STEM} tokens={tokens} heads={heads}/{kv}  {us / 1e3:8.3f} ms  {flops / (us * 1e-6) / 1e12:5.1f} TFLOP/s",
                   out, want, atol=2e-2, rtol=2e-2)
 
 
