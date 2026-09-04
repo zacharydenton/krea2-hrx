@@ -147,3 +147,22 @@ against 65.3 s for the official bf16 pipeline on the same box: 2.24x, with the P
 unchanged to the last digit (19.04 dB against bf16, 22.13 dB against the W4A4
 reference). A published int4 ConvRot checkpoint of this model that keeps 96 of 224
 block linears in int8 reports 18 s per image on an NVIDIA L4 at a minimum 17.7 dB.
+
+## GEMM raster group per token count -- won (3-4% on the forward)
+
+At 4115 tokens the 33 tile rows were padded to 36 for the group-of-4 raster and the three
+ghost rows ran the whole k-loop on zeros. The group is now a config (`m_group`, chosen by
+the builder and the host by the same rule: of 4, 3, 2 the one that pads least, ties to
+the larger), so 33 rows raster in groups of 3 with no ghosts. Interleaved A/B, 28 blocks:
+
+| | group 4 | group 3 |
+| --- | ---: | ---: |
+| gemm gate/up | 670 / 655 ms | 603 / 621 ms |
+| gemm qkv/gate | 304 / 302 | 280 / 282 |
+| gemm wo | 126 / 126 | 117 / 117 |
+| gemm down (K=16384) | 403 / 403 | 388 / 429 |
+| forward | 2936 / 2945 | 2809 / 2872 |
+
+The down GEMM's spread (its 1 MB W tiles are the L2-sensitive case) is the box's noise;
+the other three gain 7-8%, the whole forward 3-4%. `KREA2_M_GROUP` overrides both sides
+for A/Bs.

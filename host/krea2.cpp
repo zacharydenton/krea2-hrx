@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -178,7 +179,16 @@ private:
             stage_us[stage] += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
         }
     }
-    static unsigned gemm_grid_y(size_t m) { return unsigned((m + 127) / 128 + 3) / 4 * 4; }   // grouped raster: whole groups of 4
+    // m-tiles per raster group: of 4, 3, 2 the one that pads the tile rows least (ties to the
+    // larger); scripts/build_kernels.py compiles the GEMMs with the same rule for this token count.
+    static unsigned gemm_m_group(size_t m) {
+        if (const char* e = std::getenv("KREA2_M_GROUP")) return unsigned(std::atoi(e));   // A/B override, mirrored in the builder
+        const size_t tiles = (m + 127) / 128;
+        unsigned best = 4; size_t best_pad = (tiles + 3) / 4 * 4;
+        for (unsigned g : {3u, 2u}) { const size_t pad = (tiles + g - 1) / g * g; if (pad < best_pad) { best = g; best_pad = pad; } }
+        return best;
+    }
+    static unsigned gemm_grid_y(size_t m) { const unsigned g = gemm_m_group(m); return unsigned(((m + 127) / 128 + g - 1) / g * g); }
 
     void gemm(Kernel &k, const char *stage, char *w_q, char *w_s, int n, void *out, const float *gate) {
         KernArgs a;

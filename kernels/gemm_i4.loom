@@ -12,6 +12,9 @@ config.decl @krea2.gemm_i4.k_size : %value: index where [range(%value, 128, 6553
 
 config.decl @krea2.gemm_i4.n_size : %value: index where [range(%value, 128, 32768), mul(%value, 128)]
 
+// m-tiles per raster group: chosen per token count so the tile rows divide with as few ghost rows as possible
+config.decl @krea2.gemm_i4.m_group : %value: index where [range(%value, 1, 4)]
+
 kernel.def target(@krea2_gemm_i4_gfx11) export("krea2_gemm_i4") @krea2_gemm_i4(%m_size: index) {
   %c1 = index.constant 1 : index
   %c127 = index.constant 127 : index
@@ -20,11 +23,11 @@ kernel.def target(@krea2_gemm_i4_gfx11) export("krea2_gemm_i4") @krea2_gemm_i4(%
   %n_size0 = config.get @krea2.gemm_i4.n_size : index
   %m_rounded = index.add %m_size, %c127 : index
   %m_tiles = index.div %m_rounded, %c128 : index
-  %c3 = index.constant 3 : index
-  %c4 = index.constant 4 : index
-  %m_tiles3 = index.add %m_tiles, %c3 : index
-  %m_groups = index.div %m_tiles3, %c4 : index
-  %m_tiles_padded = index.mul %m_groups, %c4 : index
+  %m_group = config.get @krea2.gemm_i4.m_group : index
+  %m_group_less = index.sub %m_group, %c1 : index
+  %m_tiles3 = index.add %m_tiles, %m_group_less : index
+  %m_groups = index.div %m_tiles3, %m_group : index
+  %m_tiles_padded = index.mul %m_groups, %m_group : index
   %n_tiles = index.div %n_size0, %c128 : index
   kernel.launch.config workgroups(%n_tiles, %m_tiles_padded, %c1) workgroup_size(%c256, %c1, %c1) : index
 } launch(%m_size: index, %a: buffer, %w: buffer, %scale: buffer, %a_scale: buffer, %c: buffer) {
@@ -64,22 +67,23 @@ kernel.def target(@krea2_gemm_i4_gfx11) export("krea2_gemm_i4") @krea2_gemm_i4(%
   %lane16 = index.rem %lane, %c16 : index
   %m_bounded = index.assume %m_size [range(%m_size, 1, 16777216)] : index
   %c127 = index.constant 127 : index
-  // Rasterization: the launch is n_tiles x (m_tiles rounded up to a multiple of 4),
-  // and tiles are visited in groups of 4 m-tiles per sweep of n, so each W tile is
-  // read 4 times in quick succession from cache instead of once per row of tiles.
+  // Rasterization: the launch is n_tiles x (m_tiles rounded up to a multiple of m_group),
+  // and tiles are visited in groups of m_group m-tiles per sweep of n, so each W tile is
+  // read m_group times in quick succession from cache instead of once per row of tiles.
   // A tile row past M is a ghost: its A rows load as zero and it writes nothing.
   %wg_x = kernel.workgroup.id<x> : index
   %wg_y = kernel.workgroup.id<y> : index
   %c_n_tiles = index.div %n_size, %c128 : index
   %linear0 = index.mul %wg_y, %c_n_tiles : index
   %linear = index.add %linear0, %wg_x : index
-  %group_span = index.mul %c_n_tiles, %c4 : index
+  %m_group = config.get @krea2.gemm_i4.m_group : index
+  %group_span = index.mul %c_n_tiles, %m_group : index
   %group = index.div %linear, %group_span : index
   %in_group = index.rem %linear, %group_span : index
-  %group_m = index.mul %group, %c4 : index
-  %m_in_group = index.rem %in_group, %c4 : index
+  %group_m = index.mul %group, %m_group : index
+  %m_in_group = index.rem %in_group, %m_group : index
   %tile_m_id = index.add %group_m, %m_in_group : index
-  %tile_n_id0 = index.div %in_group, %c4 : index
+  %tile_n_id0 = index.div %in_group, %m_group : index
   %tile_n_id = index.assume %tile_n_id0 [lt(%tile_n_id0, %c_n_tiles)] : index
 
   // Wave grid 4 (m) x 2 (n): rows wave_row..+32, columns wave_col..+64 of the tile.
