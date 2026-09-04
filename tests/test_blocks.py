@@ -23,7 +23,7 @@ def cosine(a, b):
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(); ap.add_argument("--layers", type=int, default=28); ap.add_argument("--fixture", default=str(ROOT / "build/fixture_step0.pt"))
+    ap = argparse.ArgumentParser(); ap.add_argument("--layers", type=int, default=28); ap.add_argument("--fixture", default=str(ROOT / "build/fixture_step0.pt")); ap.add_argument("--profile", action="store_true")
     a = ap.parse_args()
     fx = torch.load(a.fixture)
     x, mods, cos, sin = fx["x"], fx["mods"], fx["cos"], fx["sin"]
@@ -33,8 +33,11 @@ def main() -> int:
     w = load_file(str(Path.home() / "krea2-models/krea2_turbo_bf16.safetensors"), device="cuda")
     ok = True
     loom = Krea2Blocks(tokens, layers=a.layers)
+    got = loom.forward(x, mods, cos, sin)                       # cold: module loads, first allocations
     t0 = time.time(); got = loom.forward(x, mods, cos, sin); dt = time.time() - t0
-    print(f"loom {a.layers} block(s): {dt * 1e3:.0f} ms (includes the copies)")
+    print(f"loom {a.layers} block(s): {dt * 1e3:.0f} ms warm (includes the host copies)")
+    if a.profile:
+        loom.profile(True); loom.forward(x, mods, cos, sin); loom.profile(False)
     for quant in ("w4a4", "none"):
         ref = R.Krea2Ref(w, quant=quant, device="cuda", dtype=torch.bfloat16, layers=a.layers)
         with torch.no_grad():
@@ -43,9 +46,11 @@ def main() -> int:
                 xr = ref.block(i, xr, mods[i][None, None].cuda(), cos.cuda(), sin.cuda())
         want = xr[0].float().cpu()
         c = cosine(got.float(), want); err = (got.float() - want).abs().max().item() / want.abs().max().item()
-        good = c > (0.999 if quant == "w4a4" else 0.99)
+        # the update the blocks made, which the residual stream's cosine hides
+        c_delta = cosine(got.float() - x.float(), want - x.float())
+        good = c_delta > (0.99 if quant == "w4a4" else 0.9)
         ok &= good
-        print(f"  {'PASS' if good else 'FAIL'} vs reference {quant:<5s}: cosine {c:.6f}  max rel err {err:.3e}")
+        print(f"  {'PASS' if good else 'FAIL'} vs reference {quant:<5s}: stream cosine {c:.6f}  update cosine {c_delta:.5f}  max rel err {err:.3e}")
     return 0 if ok else 1
 
 

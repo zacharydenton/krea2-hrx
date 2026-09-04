@@ -147,6 +147,16 @@ public:
         for (int i = 0; i < layers_; ++i) block(i);
         HIP_CHECK(hipDeviceSynchronize());
         HIP_CHECK(hipMemcpyDtoH(x, (hipDeviceptr_t)x_, T * HIDDEN * 2));
+        if (profile) {
+            double total = 0; for (auto &e : stage_us) total += e.second;
+            std::vector<std::pair<double, std::string>> rows;
+            for (auto &e : stage_us) rows.push_back({e.second, e.first});
+            std::sort(rows.rbegin(), rows.rend());
+            fprintf(stderr, "stage profile over %d block(s), %zu tokens:\n", layers_, T);
+            for (auto &r : rows) fprintf(stderr, "  %-24s %9.3f ms  %5.1f%%\n", r.second.c_str(), r.first / 1000.0, 100.0 * r.first / total);
+            fprintf(stderr, "  %-24s %9.3f ms\n", "total", total / 1000.0);
+            stage_us.clear();
+        }
     }
 
     bool profile = false;
