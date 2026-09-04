@@ -84,3 +84,21 @@ The four GEMMs run at 31-49 TOPS at M = 4115 (a tail tile row and the epilogue's
 token scale); the whole block minus attention is 60 ms. Attention at 390-560 ms per
 block is the entire problem: the 16-key online-softmax kernel pays two cross-lane
 reductions, an LDS round trip and two barriers per 16 keys.
+
+## The quantisation is acceptable
+
+Same seed, same prompt, 8 Turbo steps: the reference W4A4 (per-row weights, per-token
+activations, group-256 Hadamard) against bf16 gives latent PSNR 9.96 dB and image
+PSNR 18.9 dB, and the two pictures (build/bf16_seed0.png, build/w4a4_seed0.png) are
+the same fox in the same pose and light, differing only in fur and snow detail, with
+no artifacts. For a distilled 8-step model that is sample-level variation, not
+degradation. No finer scale granularity is needed.
+
+## Attention: what the 32-key variant showed
+
+Processing 32 keys per iteration (half the reductions and barriers) lost, 0.885x
+(155 vs 137 ms at 4115 tokens), so the per-tile softmax overhead is not the cost.
+The loads are: every lane fetches 16-byte pieces of rows 3 KB apart, and the four
+query heads sharing a key-value head each stream the whole K and V. 137 ms is 3
+TFLOP/s. The next kernel stages each 16-key K and V tile once into LDS for a
+workgroup made of the four query heads of one key-value head, with coalesced loads.
