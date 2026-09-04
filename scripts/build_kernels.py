@@ -37,8 +37,7 @@ def build(tokens: int) -> Path:
         ("gemm_i4_resid", "krea2_gemm_i4_resid", "gemm_wo", {"krea2.gemm_i4_resid.k_size": HIDDEN, "krea2.gemm_i4_resid.n_size": HIDDEN}),
         ("gemm_i4_resid", "krea2_gemm_i4_resid", "gemm_down", {"krea2.gemm_i4_resid.k_size": INTER, "krea2.gemm_i4_resid.n_size": HIDDEN}),
         ("rope_qknorm_f16", "krea2_rope_qknorm_f16", "rope_qknorm", {"krea2.rope_qknorm_f16.row_stride": QKVG, "krea2.rope_qknorm_f16.q_heads": 48, "krea2.rope_qknorm_f16.kv_heads": KV, "krea2.rope_qknorm_f16.k_offset": HIDDEN, "krea2.rope_qknorm_f16.eps": 1e-5}),
-        ("transpose_f16", "krea2_transpose_f16", "transpose_v", {"krea2.transpose_f16.cols": KV * D, "krea2.transpose_f16.row_stride": QKVG, "krea2.transpose_f16.row_capacity": capacity}),
-        ("attention_gqa_f16_wmma", "krea2_attention_gqa_f16_wmma", "attention", {"krea2.attention_gqa_f16_wmma.q_stride": HIDDEN, "krea2.attention_gqa_f16_wmma.kv_stride": KV * D, "krea2.attention_gqa_f16_wmma.kv_groups": 4, "krea2.attention_gqa_f16_wmma.tokens": tokens, "krea2.attention_gqa_f16_wmma.token_capacity": capacity, "krea2.attention_gqa_f16_wmma.scale": D ** -0.5, "krea2.attention_gqa_f16_wmma.out_stride": HIDDEN}),
+        ("attention_gqa_lds_f16_wmma", "krea2_attention_gqa_lds_f16_wmma", "attention", {"krea2.attention_gqa_lds_f16_wmma.q_stride": HIDDEN, "krea2.attention_gqa_lds_f16_wmma.kv_stride": KV * D, "krea2.attention_gqa_lds_f16_wmma.tokens": tokens, "krea2.attention_gqa_lds_f16_wmma.token_capacity": capacity, "krea2.attention_gqa_lds_f16_wmma.scale": D ** -0.5, "krea2.attention_gqa_lds_f16_wmma.out_stride": HIDDEN}),
     ]
     for src, root, stem, cfg in jobs:
         compile_one(src, root, out / f"{stem}.hsaco", cfg)

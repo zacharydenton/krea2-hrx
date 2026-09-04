@@ -102,3 +102,33 @@ The loads are: every lane fetches 16-byte pieces of rows 3 KB apart, and the fou
 query heads sharing a key-value head each stream the whole K and V. 137 ms is 3
 TFLOP/s. The next kernel stages each 16-key K and V tile once into LDS for a
 workgroup made of the four query heads of one key-value head, with coalesced loads.
+
+## Attention staged in LDS: 3.19x
+
+kernels/attention_gqa_lds_f16_wmma.loom: one workgroup of four waves per (16 query
+rows, key-value head), each wave one of the four query heads that share that K/V.
+Per 16-key tile the workgroup loads the K and V tiles once, coalesced (each lane 32
+contiguous bytes), into LDS; K's rhs fragments are assembled from the tile rows (lane
+= key, 16 contiguous channels), V's are dense fragment loads from the same tile rows
+(the tile's [key][channel] layout is the rhs' logical [k][n]; a transposed view here
+was the one bug). The result publishes one fragment at a time through 1 KB per wave,
+so the LDS is 14.8 KB and four workgroups fit per CU; 216 VGPRs, no spills. The V
+transpose kernel is gone: the QK-norm/RoPE kernel now writes q, k and v contiguous.
+
+| kernel, 4115 tokens | ms | TFLOP/s |
+| --- | ---: | ---: |
+| 16-key, operands from global | 136.9 | 3.0 |
+| 32-key, operands from global | 155.2 | 2.7 |
+| LDS-staged, four heads per tile | 43.0 | 9.7 |
+
+Stage profile, 28 blocks, after: attention 1261 ms (42.8%), gemm gate|up 672
+(22.8%, 69 TOPS), down 391 (13.3%, 59 TOPS), qkv|gate 304 (10.3%, 72 TOPS), wo 126
+(4.3%, 69 TOPS), the prepares 174, QK-norm+RoPE 20. A forward of 28 blocks: 7.95 ->
+2.96 s. Correctness unchanged (update cosine 0.96841 vs the W4A4 reference).
+
+## End to end in Loom (first run, before the staged attention)
+
+Same seed as the baseline: latent PSNR 10.09 dB / image 19.0 dB against bf16 (the
+W4A4 reference is 9.96 / 18.9), and 12.95 dB / 22.1 dB against the W4A4 reference,
+so the native pipeline lands in the same quality class as the arithmetic it
+implements. 7.85 s per forward then; the picture is build/loom_seed0.png.
