@@ -230,3 +230,23 @@ layer 5 ms. The whole image is 21.9 s: 8 x 2.35 s of blocks, about a second of t
 encoding, about two of tiled decode. The first image of a process took 189 s: 6 s of
 session build and, once per machine, MIOpen's kernel search for the VAE's convolutions.
 The suspected per-step glue was that first call's session build averaged over the steps.
+
+## Lazy accumulator rescaling and exp2 -- lost to registers
+
+FlashAttention-3's trick: leave the running max where it is unless a row's max grows
+by more than 2^8, so the 64 accumulator multiplies and 8 exponentials per tile run on a
+handful of tiles instead of all 258. In Loom the skip is an `scf.if` yielding the eight
+accumulators, and a branch that yields the accumulators keeps both versions live:
+
+| variant | VGPRs | spill | vs shipped |
+| --- | ---: | ---: | ---: |
+| conditional, 4 Q fragments hoisted | 256 | 112 B | 0.595x |
+| conditional, 2 hoisted | 256 | 12 B | 1.030x |
+| conditional, 0 hoisted | 248 | 0 | 0.903x |
+| exp2 with log2(e) folded into the scale, no conditional | 240 | 0 | 0.988x (noise) |
+
+The condition itself needs no vote: the 16 lanes of a row group see the same maxima
+after the butterfly, so a per-lane compare is consistent (the vote's uniform scalar is
+rejected as a branch mask anyway). Both levers are dropped; the kernel stays at 240
+VGPRs with four Q fragments resident, which every variant so far has confirmed is the
+binding constraint.
