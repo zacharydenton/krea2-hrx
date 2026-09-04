@@ -25,7 +25,7 @@ namespace {
 
 constexpr int HIDDEN = 6144, HEADS = 48, KV_HEADS = 12, HEAD_DIM = 128, INTER = 16384;
 constexpr int QKVG = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN;   // 15360
-constexpr int K_OFFSET = HIDDEN, V_OFFSET = HIDDEN + KV_HEADS * HEAD_DIM, GATE_OFFSET = V_OFFSET + KV_HEADS * HEAD_DIM;
+constexpr int V_OFFSET = HIDDEN + KV_HEADS * HEAD_DIM, GATE_OFFSET = V_OFFSET + KV_HEADS * HEAD_DIM;
 constexpr int THREADS = 256;
 
 #define HIP_CHECK(call) do { hipError_t e_ = (call); if (e_ != hipSuccess) \
@@ -119,6 +119,10 @@ public:
         HIP_CHECK(hipMalloc(&a_s_, T * 4));
         HIP_CHECK(hipMalloc(&fused_, T * QKVG * 2));
         HIP_CHECK(hipMalloc(&vt_, size_t(KV_HEADS * HEAD_DIM) * T * 2));
+        HIP_CHECK(hipMalloc(&q_, T * HIDDEN * 2));
+        HIP_CHECK(hipMalloc(&k_, size_t(KV_HEADS * HEAD_DIM) * T * 2));
+        HIP_CHECK(hipMemset(q_, 0, T * HIDDEN * 2));
+        HIP_CHECK(hipMemset(k_, 0, size_t(KV_HEADS * HEAD_DIM) * T * 2));
         HIP_CHECK(hipMalloc(&attn_, T * HIDDEN * 2));
         HIP_CHECK(hipMalloc(&gu_, T * 2 * INTER * 2));
         HIP_CHECK(hipMalloc(&mods_, size_t(layers) * 6 * HIDDEN * 4));
@@ -129,7 +133,7 @@ public:
         HIP_CHECK(hipMemset(x_, 0, T * HIDDEN * 2));
     }
     ~Session() {
-        for (void *p : {x_, a_q_, a_s_, fused_, vt_, attn_, gu_, mods_, cos_, sin_, weights_}) if (p) (void)hipFree(p);
+        for (void *p : {x_, a_q_, a_s_, fused_, vt_, q_, k_, attn_, gu_, mods_, cos_, sin_, weights_}) if (p) (void)hipFree(p);
         for (Kernel *k : {&k_prep_norm_, &k_prep_gated_, &k_prep_swiglu_, &k_gemm_qkvg_, &k_gemm_gu_, &k_gemm_wo_, &k_gemm_down_, &k_rope_, &k_transpose_, &k_attention_})
             if (k->module) (void)hipModuleUnload(k->module);
     }
@@ -194,11 +198,11 @@ private:
         { KernArgs a; a.scalar_i32(T); a.pointer(x_); a.pointer(b.prenorm); a.pointer(prescale); a.pointer(preshift); a.pointer(a_q_); a.pointer(a_s_);
           launch(k_prep_norm_, "prepare norm", T, 1, THREADS, a); }
         gemm(k_gemm_qkvg_, "gemm qkv|gate", b.qkvg_q, b.qkvg_s, QKVG, fused_, nullptr);
-        { KernArgs a; a.scalar_i32(T); a.pointer(fused_); a.pointer(b.qnorm); a.pointer(b.knorm); a.pointer(cos_); a.pointer(sin_);
+        { KernArgs a; a.scalar_i32(T); a.pointer(fused_); a.pointer(b.qnorm); a.pointer(b.knorm); a.pointer(cos_); a.pointer(sin_); a.pointer(q_); a.pointer(k_);
           launch(k_rope_, "qk norm + rope", T, 1, THREADS, a); }
         { KernArgs a; a.scalar_i32(T); a.pointer((char *)fused_ + V_OFFSET * 2); a.pointer(vt_);
           launch(k_transpose_, "v transpose", unsigned(KV_HEADS * HEAD_DIM / 32), unsigned(capacity_ / 32), THREADS, a); }
-        { KernArgs a; a.scalar_i32(T); a.scalar_i32(HEADS); a.pointer(fused_); a.pointer((char *)fused_ + K_OFFSET * 2); a.pointer(vt_); a.pointer(attn_);
+        { KernArgs a; a.scalar_i32(T); a.scalar_i32(HEADS); a.pointer(q_); a.pointer(k_); a.pointer(vt_); a.pointer(attn_);
           launch(k_attention_, "attention", unsigned((T + 15) / 16), HEADS, 32, a); }
         { KernArgs a; a.scalar_i32(T); a.pointer(attn_); a.pointer((char *)fused_ + GATE_OFFSET * 2); a.pointer(a_q_); a.pointer(a_s_);
           launch(k_prep_gated_, "prepare gated", T, 1, THREADS, a); }
@@ -215,7 +219,7 @@ private:
     size_t capacity_ = 0;
     std::mutex mutex_;
     std::vector<Block> blocks_;
-    void *weights_ = nullptr, *x_ = nullptr, *a_q_ = nullptr, *a_s_ = nullptr, *fused_ = nullptr, *vt_ = nullptr,
+    void *weights_ = nullptr, *x_ = nullptr, *a_q_ = nullptr, *a_s_ = nullptr, *fused_ = nullptr, *vt_ = nullptr, *q_ = nullptr, *k_ = nullptr,
          *attn_ = nullptr, *gu_ = nullptr, *mods_ = nullptr, *cos_ = nullptr, *sin_ = nullptr;
     Kernel k_prep_norm_, k_prep_gated_, k_prep_swiglu_, k_gemm_qkvg_, k_gemm_gu_, k_gemm_wo_, k_gemm_down_, k_rope_, k_transpose_, k_attention_;
 };

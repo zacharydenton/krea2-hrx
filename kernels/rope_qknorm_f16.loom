@@ -1,6 +1,7 @@
 // Per-head RMSNorm (zero-centred scale, multiplier 1 + scale[c]) and rotary embedding
-// on q and k in place inside the fused projection buffer [tokens][row_stride], q at
-// column 0 (q_heads x 128), k at column k_offset (kv_heads x 128). One workgroup of 256
+// on q and k read from the fused projection buffer [tokens][row_stride] (q at column 0,
+// k at column k_offset) and written to contiguous q_out [tokens][q_heads*128] and
+// k_out [tokens][kv_heads*128], the layouts attention's operand loads want. One workgroup of 256
 // lanes per token handles eight heads at a time: a wave per head, four channels per
 // lane, the head's sum of squares reduced across the wave.
 //   x = h / sqrt(mean(h^2) + eps) * (1 + scale[c])
@@ -21,7 +22,7 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
   %c1 = index.constant 1 : index
   %c256 = index.constant 256 : index
   kernel.launch.config workgroups(%tokens, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
-} launch(%tokens: index, %qkv: buffer, %q_scale: buffer, %k_scale: buffer, %cos: buffer, %sin: buffer) {
+} launch(%tokens: index, %qkv: buffer, %q_scale: buffer, %k_scale: buffer, %cos: buffer, %sin: buffer, %q_out: buffer, %k_out: buffer) {
   %row_stride = config.get @krea2.rope_qknorm_f16.row_stride : index
   %q_heads = config.get @krea2.rope_qknorm_f16.q_heads : index
   %kv_heads = config.get @krea2.rope_qknorm_f16.kv_heads : index
@@ -50,11 +51,19 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
   %rounds0 = index.add %heads_total, %c7 : index
   %rounds = index.div %rounds0, %c8 : index
   %qkv_global = buffer.assume.memory_space<global> %qkv : buffer
+  %qo_global = buffer.assume.memory_space<global> %q_out : buffer
+  %ko_global = buffer.assume.memory_space<global> %k_out : buffer
+  %q_width = index.mul %q_heads, %c128 : index
+  %k_width = index.mul %kv_heads, %c128 : index
   %qs_global = buffer.assume.memory_space<global> %q_scale : buffer
   %ks_global = buffer.assume.memory_space<global> %k_scale : buffer
   %cos_global = buffer.assume.memory_space<global> %cos : buffer
   %sin_global = buffer.assume.memory_space<global> %sin : buffer
   %qkv_view = buffer.view %qkv_global[%c0_offset] : buffer -> view<[%tokens_b]x[%row_stride]xf16>
+  %qo_view = buffer.view %qo_global[%c0_offset] : buffer -> view<[%tokens_b]x[%q_width]xf16>
+  %ko_view = buffer.view %ko_global[%c0_offset] : buffer -> view<[%tokens_b]x[%k_width]xf16>
+  %q_limit = index.sub %q_width, %c4 : index
+  %k_limit = index.sub %k_width, %c4 : index
   %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<128xf32>
   %ks_view = buffer.view %ks_global[%c0_offset] : buffer -> view<128xf32>
   %cos_view = buffer.view %cos_global[%c0_offset] : buffer -> view<[%tokens_b]x128xf32>
@@ -66,7 +75,10 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
     %active = index.cmp ult, %head, %heads_total : index
     scf.if %active {
       %is_q = index.cmp ult, %head, %q_heads : index
-      %k_head = index.sub %head, %q_heads : index
+      // the key-head index is only meaningful off the q path; keep it non-negative everywhere
+      %k_head0 = index.sub %head, %q_heads : index
+      %k_head1 = scf.select %is_q, %c0, %k_head0 : index
+      %k_head = index.assume %k_head1 [range(%k_head1, 0, 255)] : index
       %q_base = index.mul %head, %c128 : index
       %k_base0 = index.mul %k_head, %c128 : index
       %k_base = index.add %k_offset, %k_base0 : index
@@ -108,7 +120,15 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
       %rs = vector.mulf %rot, %s : vector<4xf32>
       %out = vector.addf %xc, %rs : vector<4xf32>
       %out16 = vector.fptrunc %out : vector<4xf32> to vector<4xf16>
-      vector.store %out16, %qkv_view[%row, %col] : vector<4xf16>, view<[%tokens_b]x[%row_stride]xf16>
+      scf.if %is_q {
+        %qc0 = index.add %q_base, %lane_col : index
+        %qc = index.assume %qc0 [le(%qc0, %q_limit), mul(%qc0, 4)] : index
+        vector.store %out16, %qo_view[%row, %qc] : vector<4xf16>, view<[%tokens_b]x[%q_width]xf16>
+      } else {
+        %kc0 = index.add %k_base0, %lane_col : index
+        %kc = index.assume %kc0 [le(%kc0, %k_limit), mul(%kc0, 4)] : index
+        vector.store %out16, %ko_view[%row, %kc] : vector<4xf16>, view<[%tokens_b]x[%k_width]xf16>
+      }
     }
   }
   kernel.return
