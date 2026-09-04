@@ -220,3 +220,13 @@ but needs 40 KB of LDS (three workgroups per WGP instead of five). Interleaved A
 generator keeps the `ATTN_TILE=32` path as the record of what was tried; the shipped
 16-key output is byte-identical. The lesson: at 240 registers the kernel is occupancy
 bound, and any lever that adds LDS or registers per wave has to pay for itself twice.
+
+## Where a step goes outside the blocks
+
+Per-call timers (`KREA2_TIMING=1 tools/pipeline.py --backend loom --images 2`), second
+image of the process: text_in + image_in 13 ms, time embedding + rope tables 13 ms, block
+modulation 1 ms, the Loom forward 2.32 s of which the host copies are under 10 ms, final
+layer 5 ms. The whole image is 21.9 s: 8 x 2.35 s of blocks, about a second of text
+encoding, about two of tiled decode. The first image of a process took 189 s: 6 s of
+session build and, once per machine, MIOpen's kernel search for the VAE's convolutions.
+The suspected per-step glue was that first call's session build averaged over the steps.

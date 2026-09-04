@@ -35,7 +35,12 @@ denoising step against the reference in both W4A4 and bf16.
 | Loom W4A4, first attention | 7.85 s | 10.09 dB | 19.0 dB |
 | Loom W4A4, staged attention | 2.89 s (29.2 s per image) | 10.09 dB | 19.04 dB |
 | Loom W4A4, Q resident + V transposed in LDS, raster groups | 2.31 s (25.4 s per image) | 12.92 dB | 23.23 dB |
-| Loom W4A4, prepare kernels vectorised | 2.13 s | | |
+| Loom W4A4, prepare kernels vectorised | 2.13 s (21.9 s per image, steady state) | | |
+
+The per-image time is the second image of a process (`tools/pipeline.py --images 2`):
+8 steps at 2.35 s plus text encoding and the tiled VAE decode. The first image pays the
+Loom session build (about 6 s) and, once per machine, MIOpen's convolution kernel search
+for the VAE decode (minutes; cached afterwards).
 
 The three pictures (`build/bf16_seed0.png`, `build/w4a4_seed0.png`,
 `build/loom_seed0.png`) are the same fox in the same pose and light; the deviation is

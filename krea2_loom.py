@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ctypes
 import os
+import time
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -57,16 +59,23 @@ class Krea2Blocks:
     def forward(self, x: torch.Tensor, mods: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         """x [tokens][6144] (any float dtype) -> f16 residual stream after `layers` blocks.
         mods [layers][6][6144] f32, cos/sin [tokens][128] f32."""
+        timing = os.environ.get("KREA2_TIMING") == "1"
+        t0 = time.time()
         xa = np.ascontiguousarray(x.detach().to(torch.float16).cpu().numpy())
         ma = np.ascontiguousarray(mods.detach().float().cpu().numpy()[: self.layers])
         ca = np.ascontiguousarray(cos.detach().float().cpu().numpy()); sa = np.ascontiguousarray(sin.detach().float().cpu().numpy())
+        t1 = time.time()
         assert xa.shape == (self.tokens, 6144) and ma.shape == (self.layers, 6, 6144) and ca.shape == sa.shape == (self.tokens, 128)
         err = ctypes.create_string_buffer(_ERR)
         rc = self._native.krea2_run(self._handle, xa.ctypes.data_as(_U16P), xa.size, ma.ctypes.data_as(_F32P), ma.size,
                                     ca.ctypes.data_as(_F32P), sa.ctypes.data_as(_F32P), ca.size, err, _ERR)
         if rc:
             raise Krea2Error(err.value.decode())
-        return torch.from_numpy(xa.copy())
+        t2 = time.time()
+        out = torch.from_numpy(xa.copy())
+        if timing:
+            print(f"  loom wrapper: to-host {t1 - t0:.3f} s, krea2_run {t2 - t1:.3f} s, from-host {time.time() - t2:.3f} s", file=sys.stderr)
+        return out
 
     def profile(self, enable: bool = True):
         self._native.krea2_profile(self._handle, int(enable))

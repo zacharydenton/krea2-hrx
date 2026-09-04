@@ -12,6 +12,7 @@ the W4A4 ConvRot arithmetic can be judged on real images before any kernel exist
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 import time
@@ -74,6 +75,7 @@ class ReferenceForward:
         self.ref, self.fixture, self.calls, self.backend = ref, fixture, 0, backend
         self.loom = None
         self.block_time = 0.0
+        self.stage_times = {}
 
     def __call__(self, hidden_states, encoder_hidden_states, timestep, position_ids, encoder_attention_mask=None,
                  attention_kwargs=None, return_dict=True):
@@ -84,23 +86,37 @@ class ReferenceForward:
         grid_h = int(position_ids[:, 1].max().item()) + 1
         grid_w = int(position_ids[:, 2].max().item()) + 1
         ref = self.ref
+        timing = os.environ.get("KREA2_TIMING") == "1"
+        def tick(label):
+            if timing:
+                torch.cuda.synchronize(); now = time.time()
+                if self.calls > 0:      # the first call also builds the Loom session
+                    self.stage_times[label] = self.stage_times.get(label, 0.0) + now - tick.t
+                tick.t = now
+        if timing:
+            torch.cuda.synchronize(); tick.t = time.time()
         with torch.no_grad():
             txt = ref.text_in(text); img = ref.image_in(hidden_states)
             x = torch.cat([txt, img], dim=1)
+            tick("text_in + image_in")
             temb, mod = ref.time_embed(timestep)
             cos, sin = R.rope_tables(R.position_ids(txt.shape[1], grid_h, grid_w, x.device))
+            tick("time_embed + rope tables")
             if self.backend == "loom":
                 if self.loom is None:
                     sys.path.insert(0, str(ROOT))
                     from krea2_loom import Krea2Blocks
                     self.loom = Krea2Blocks(tokens=x.shape[1], layers=ref.layers)
                 mods = torch.stack([ref.block_modulation(i, mod)[0, 0] for i in range(ref.layers)])
+                tick("block modulation (28 mod.lin)")
                 t0 = time.time()
                 y = self.loom.forward(x[0], mods, cos, sin)[None].to(x.device, x.dtype)
                 self.block_time += time.time() - t0
+                tick("loom forward incl. copies")
             else:
                 y = ref.blocks_forward(x, mod, cos, sin)
             out = ref.final(y[:, txt.shape[1]:], temb)
+            tick("final layer")
         if self.fixture is not None and self.calls == 0:
             mods = torch.stack([ref.block_modulation(i, mod)[0, 0] for i in range(ref.layers)])   # [28, 6, 6144]
             torch.save(dict(x=x[0].cpu(), mods=mods.cpu(), cos=cos.cpu(), sin=sin.cpu(), y=y[0].cpu(),
@@ -150,15 +166,21 @@ def main() -> None:
     ap.add_argument("--out", default="build/out.png")
     ap.add_argument("--fixture", default=None)
     ap.add_argument("--latents-out", default=None, help="save the final packed latents for PSNR comparisons")
+    ap.add_argument("--images", type=int, default=1, help="generate this many images in one process (the first pays the session build)")
     a = ap.parse_args()
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend)
-    gen = torch.Generator("cuda").manual_seed(a.seed)
-    t0 = time.time()
-    result = pipe(a.prompt, height=a.size, width=a.size, num_inference_steps=a.steps, guidance_scale=0.0,
-                  generator=gen, output_type="latent" if a.latents_out else "pil")
-    torch.cuda.synchronize()
-    dt = time.time() - t0
+    per_image = []
+    for image_index in range(a.images):
+        gen = torch.Generator("cuda").manual_seed(a.seed)
+        t0 = time.time()
+        result = pipe(a.prompt, height=a.size, width=a.size, num_inference_steps=a.steps, guidance_scale=0.0,
+                      generator=gen, output_type="latent" if a.latents_out else "pil")
+        torch.cuda.synchronize()
+        per_image.append(time.time() - t0)
+    dt = per_image[-1]
+    if a.images > 1:
+        print("per image (s): " + ", ".join(f"{t:.1f}" for t in per_image) + "  (the first includes the Loom session build)")
     if a.latents_out:
         torch.save(result.images.cpu(), a.latents_out)
         print(f"latents saved: {a.latents_out}")
@@ -168,6 +190,10 @@ def main() -> None:
         print(f"saved {a.out}")
     print(f"{a.steps} steps at {a.size}^2: {dt:.1f} s ({dt / a.steps:.2f} s/step incl. text encode and decode)")
     fwd = getattr(pipe.transformer, "forward", None)
+    if getattr(fwd, "stage_times", None):
+        print("per-call stage times (s), averaged over the calls:")
+        for k, v in fwd.stage_times.items():
+            print(f"  {k:32s} {v / max(fwd.calls - 1, 1):.3f}")
     if getattr(fwd, "loom", None) is not None:
         print(f"loom blocks: {fwd.block_time:.1f} s total, {fwd.block_time / fwd.calls:.2f} s per forward (with host copies)")
 
