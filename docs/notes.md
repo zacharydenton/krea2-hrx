@@ -208,3 +208,15 @@ of the quantiser compounding.
 | forward | 2313 | 2129 |
 
 The gate stride config only needs 8-element alignment (the qkv|gate stride is 15360).
+
+## 32-key attention tile -- lost (0.957x)
+
+Two score fragments per tile, one butterfly and one rescale per 32 keys, two probability
+fragments through a 1 KB scratch, sixteen matrix multiplies each way. With four Q
+fragments hoisted it spills (256 VGPRs, 140 B); with none hoisted it fits at 248 VGPRs
+but needs 40 KB of LDS (three workgroups per WGP instead of five). Interleaved A/B at
+4115 tokens: 24.65 vs 23.60 ms, 0.957x, and its output deviated from the reference
+(cosine 0.9987 against 0.99999996), which was not chased since it loses regardless. The
+generator keeps the `ATTN_TILE=32` path as the record of what was tried; the shipped
+16-key output is byte-identical. The lesson: at 240 registers the kernel is occupancy
+bound, and any lever that adds LDS or registers per wave has to pay for itself twice.

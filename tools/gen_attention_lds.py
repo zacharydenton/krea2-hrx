@@ -9,8 +9,11 @@ running statistics and epilogue are the tested 16-key kernel's."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-STEM = "attention_gqa_lds_f16_wmma"
-OUT = ROOT / f"kernels/{STEM}.loom"
+import os
+TILE = int(os.environ.get("ATTN_TILE", "16"))          # keys per staged tile (16 or 32)
+STEM = os.environ.get("ATTN_STEM", "attention_gqa_lds_f16_wmma")
+assert TILE in (16, 32)
+OUT = ROOT / ("kernels" if STEM == "attention_gqa_lds_f16_wmma" else "experiments") / f"{STEM}.loom"
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
 import os
@@ -18,7 +21,8 @@ HOIST = int(os.environ.get("ATTN_HOIST", "4"))   # Q fragments hoisted out of th
 QLDS = os.environ.get("ATTN_QLDS", "1") == "1"    # the other Q fragments staged once per wave in LDS
 QROW = (8 - HOIST) * 16 + 8 if QLDS and HOIST < 8 else 0   # halves per staged Q row
 assert HOIST % 2 == 0, "the Q staging loop moves 32 chunks per iteration: HOIST must be even"
-VROW = 24   # the V tile is staged transposed, [channel][key]: 16 keys + 8 pad halves per 48-byte row
+VROW = TILE + 8   # the V tile is staged transposed, [channel][key]: TILE keys + 8 pad halves per row
+SCRATCH = 512 * (TILE // 16)   # per-wave f16 probability scratch: one 16x16 tile per 16 keys
 
 
 K = f"""// GQA attention for Krea 2 with K/V tiles staged in LDS: one workgroup of four waves
@@ -80,14 +84,14 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %c112 = index.constant 112 : index
   %c128 = index.constant 128 : index
   %c{ROW} = index.constant {ROW} : index
-  %c0_offset = index.constant 0 : offset
+{"  %c31 = index.constant 31 : index" + chr(10) if TILE == 32 else ""}  %c0_offset = index.constant 0 : offset
   %k_tile_offset = index.constant 0 : offset
-  %v_tile_offset = index.constant {16 * ROW * 2} : offset
-  %scratch_offset = index.constant {16 * ROW * 2 + 128 * VROW * 2} : offset
+  %v_tile_offset = index.constant {TILE * ROW * 2} : offset
+  %scratch_offset = index.constant {TILE * ROW * 2 + 128 * VROW * 2} : offset
   // the result stage aliases the K/V tiles: it is used only after the loop's final barrier
   %result_offset = index.constant 0 : offset
-  %q_tile_offset = index.constant {16 * ROW * 2 + 128 * VROW * 2 + 4 * 512} : offset
-  %lds_bytes = index.constant {16 * ROW * 2 + 128 * VROW * 2 + 4 * 512 + 4 * 16 * QROW * 2} : offset
+  %q_tile_offset = index.constant {TILE * ROW * 2 + 128 * VROW * 2 + 4 * SCRATCH} : offset
+  %lds_bytes = index.constant {TILE * ROW * 2 + 128 * VROW * 2 + 4 * SCRATCH + 4 * 16 * QROW * 2} : offset
   %m = index.constant 16 : index
   %n = index.constant 16 : index
   %k_frag = index.constant 16 : index
@@ -141,7 +145,7 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %tiles_per_image = index.div %rounded, %c16 : index
   %tile_in_image = index.rem %tile_id, %tiles_per_image : index
   %query_origin0 = index.mul %tile_in_image, %c16 : index
-  %tile_origin_limit = index.sub %padded_tokens, %c16 : index
+  %tile_origin_limit = index.sub %padded_tokens, %c{TILE} : index
 
   %q_global = buffer.assume.memory_space<global> %q : buffer
   %k_global = buffer.assume.memory_space<global> %k : buffer
@@ -154,13 +158,13 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
 
   %lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer
   // K and V tiles: 16 keys x 128 channels, rows padded to {ROW} halves
-  %k_tile = buffer.view %lds[%k_tile_offset] : buffer -> view<16x{ROW}xf16>
+  %k_tile = buffer.view %lds[%k_tile_offset] : buffer -> view<{TILE}x{ROW}xf16>
   %v_tile = buffer.view %lds[%v_tile_offset] : buffer -> view<128x{VROW}xf16>
-  %wave_scratch_bytes = index.constant 512 : offset
+  %wave_scratch_bytes = index.constant {SCRATCH} : offset
   %wave_scratch_offset0 = index.scale %wave, %wave_scratch_bytes : index, offset -> offset
   %wave_scratch_offset = index.add %scratch_offset, %wave_scratch_offset0 : offset
   %scratch_view = buffer.view %lds[%wave_scratch_offset] : buffer -> view<16x16xf16>
-  %wave_result_bytes = index.constant 1024 : offset
+{"  %scratch_hi_offset = index.constant 512 : offset" + chr(10) + "  %wave_scratch_offset_hi = index.add %wave_scratch_offset, %scratch_hi_offset : offset" + chr(10) + "  %scratch_view_hi = buffer.view %lds[%wave_scratch_offset_hi] : buffer -> view<16x16xf16>" + chr(10) if TILE == 32 else ""}  %wave_result_bytes = index.constant 1024 : offset
   %wave_result_offset0 = index.scale %wave, %wave_result_bytes : index, offset -> offset
   %wave_result_offset = index.add %result_offset, %wave_result_offset0 : offset
   %result_view = buffer.view %lds[%wave_result_offset] : buffer -> view<16x16xf32>
@@ -180,8 +184,8 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %st_col_v0 = index.add %kv_base0, %st_chunk_v : index
   %st_col_v = index.assume %st_col_v0 [le(%st_col_v0, %kv_col_limit), mul(%st_col_v0, 16)] : index
   %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
-  %key_tile_count = index.add %tiles_per_image, %c0 : index
-
+{"  %key_tile_count = index.add %tiles_per_image, %c0 : index" if TILE == 16 else "  %key_rounded = index.add %tokens0, %c31 : index" + chr(10) + "  %key_tile_count = index.div %key_rounded, %c32 : index"}
+{"  %st_key_hi = index.add %st_key, %c16 : index" + chr(10) + "  %st_key_v_hi = index.add %st_key_v, %c16 : index" + chr(10) + "  %lane_column_hi = index.add %lane_column, %c16 : index" + chr(10) if TILE == 32 else ""}
 """
 if QROW:
     K += f"""  %wave_q_bytes = index.constant {16 * QROW * 2} : offset
@@ -212,8 +216,8 @@ for c in range(HOIST):
     K += (f"  %q_channel{c} = index.add %head_base0, %c{16*c} : index\n" if c else "  %q_channel0 = index.add %head_base0, %c0 : index\n")
     K += f"  %lhs{c} = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel{c}] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n"
 K += f"""  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%row_max = %negative_vector : vector<8xf32>, %row_sum = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> ({", ".join(["vector<8xf32>"] * 10)}) {{
-    %key_origin1 = index.mul %key_tile, %c16 : index
-    %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, 16)] : index
+    %key_origin1 = index.mul %key_tile, %c{TILE} : index
+    %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, {TILE})] : index
     // stage K and V tiles (rows past the sequence are zero headroom)
     %st_row0 = index.add %key_origin0, %st_key : index
     %st_row = index.assume %st_row0 [lt(%st_row0, %padded_tokens)] : index
@@ -221,8 +225,22 @@ K += f"""  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, 
     %st_row_v0 = index.add %key_origin0, %st_key_v : index
     %st_row_v = index.assume %st_row_v0 [lt(%st_row_v0, %padded_tokens)] : index
     %v_chunk = vector.load %v_view[%st_row_v, %st_col_v] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-    vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
-    %ve0 = vector.extract %v_chunk[0] : vector<16xf16> -> f16
+    vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<{TILE}x{ROW}xf16>
+"""
+if TILE == 32:
+    K += f"""    %st_row_hi0 = index.add %st_row0, %c16 : index
+    %st_row_hi = index.assume %st_row_hi0 [lt(%st_row_hi0, %padded_tokens)] : index
+    %k_chunk_hi = vector.load %k_view[%st_row_hi, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+    vector.store %k_chunk_hi, %k_tile[%st_key_hi, %st_chunk] : vector<16xf16>, view<{TILE}x{ROW}xf16>
+    %st_row_v_hi0 = index.add %st_row_v0, %c16 : index
+    %st_row_v_hi = index.assume %st_row_v_hi0 [lt(%st_row_v_hi0, %padded_tokens)] : index
+    %v_chunk_hi = vector.load %v_view[%st_row_v_hi, %st_col_v] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+"""
+    for j in range(16):
+        K += f"    %vf{j} = vector.extract %v_chunk_hi[{j}] : vector<16xf16> -> f16\n"
+        K += f"    %vs{j} = index.add %st_chunk_v, %cj{j} : index\n"
+        K += f"    view.store %vf{j}, %v_tile[%vs{j}, %st_key_v_hi] : f16, view<128x{VROW}xf16>\n"
+K += f"""    %ve0 = vector.extract %v_chunk[0] : vector<16xf16> -> f16
     %vr0 = index.add %st_chunk_v, %cj0 : index
     view.store %ve0, %v_tile[%vr0, %st_key_v] : f16, view<128x{VROW}xf16>
     %ve1 = vector.extract %v_chunk[1] : vector<16xf16> -> f16
@@ -275,7 +293,7 @@ K += f"""  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, 
 K += f"""
     %local_key = index.add %key_origin0, %lane_column : index
     %key_valid = index.cmp ult, %local_key, %tokens0 : index
-"""
+{"    %local_key_hi = index.add %local_key, %c16 : index" + chr(10) + "    %key_valid_hi = index.cmp ult, %local_key_hi, %tokens0 : index" + chr(10) if TILE == 32 else ""}"""
 # scores: 8 channel steps, q fragment from global, k rhs from the LDS row (lane = key)
 prev = "%init"
 for c in range(8):
@@ -285,20 +303,39 @@ for c in range(8):
     elif c >= HOIST:
         K += f"    %q_channel{c} = index.add %head_base0, %c{16*c} : index\n"
         K += f"    %lhs{c} = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel{c}] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n"
-    K += f"    %k_data{c} = vector.load %k_tile[%lane_column, %c{16*c}] : view<16x{ROW}xf16> -> vector<16xf16>\n" if c else f"    %k_data0 = vector.load %k_tile[%lane_column, %c0] : view<16x{ROW}xf16> -> vector<16xf16>\n"
+    K += f"    %k_data{c} = vector.load %k_tile[%lane_column, %c{16*c}] : view<{TILE}x{ROW}xf16> -> vector<16xf16>\n" if c else f"    %k_data0 = vector.load %k_tile[%lane_column, %c0] : view<{TILE}x{ROW}xf16> -> vector<16xf16>\n"
     K += f"    %rhs{c} = vector.fragment<rhs> %k_data{c} shape [%k_frag, %n] : vector<16xf16>\n"
     out = "%raw_scores" if c == 7 else f"%qk{c}"
     K += f"    {out} = vector.mma %lhs{c}, %rhs{c}, {prev} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
     prev = out
+if TILE == 32:
+    prev = "%init"
+    for c in range(8):
+        K += f"    %k_data_hi{c} = vector.load %k_tile[%lane_column_hi, %c{16*c}] : view<{TILE}x{ROW}xf16> -> vector<16xf16>\n" if c else f"    %k_data_hi0 = vector.load %k_tile[%lane_column_hi, %c0] : view<{TILE}x{ROW}xf16> -> vector<16xf16>\n"
+        K += f"    %rhs_hi{c} = vector.fragment<rhs> %k_data_hi{c} shape [%k_frag, %n] : vector<16xf16>\n"
+        out = "%raw_scores_hi" if c == 7 else f"%qk_hi{c}"
+        K += f"    {out} = vector.mma %lhs{c}, %rhs_hi{c}, {prev} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
+        prev = out
 K += """    %scaled0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_scores, %scale_vector : vector<8xf32>
     %scaled = scf.if %key_valid -> (vector<8xf32>) {
       scf.yield %scaled0 : vector<8xf32>
     } else {
       scf.yield %negative_vector : vector<8xf32>
     }
-    // Tile row max across the 16 lanes of this lane's half: an xor butterfly over
+"""
+if TILE == 32:
+    K += """    %scaled_hi0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_scores_hi, %scale_vector : vector<8xf32>
+    %scaled_hi = scf.if %key_valid_hi -> (vector<8xf32>) {
+      scf.yield %scaled_hi0 : vector<8xf32>
+    } else {
+      scf.yield %negative_vector : vector<8xf32>
+    }
+    %pair_max = vector.maxnumf %scaled, %scaled_hi : vector<8xf32>
+"""
+TM = "%pair_max" if TILE == 32 else "%scaled"
+K += f"""    // Tile row max across the 16 lanes of this lane's half: an xor butterfly over
     // offsets 1, 2, 4, 8 never crosses the halves, so no even/odd masking is needed.
-    %sh1, %ok1 = kernel.subgroup.shuffle<xor> %scaled, %i32_1, %i32_32 : vector<8xf32>, i32, i32
+    %sh1, %ok1 = kernel.subgroup.shuffle<xor> {TM}, %i32_1, %i32_32 : vector<8xf32>, i32, i32
     %tm1 = vector.maxnumf %scaled, %sh1 : vector<8xf32>
     %sh2, %ok2 = kernel.subgroup.shuffle<xor> %tm1, %i32_2, %i32_32 : vector<8xf32>, i32, i32
     %tm2 = vector.maxnumf %tm1, %sh2 : vector<8xf32>
@@ -314,7 +351,21 @@ K += """    %scaled0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_scores, 
     %old_delta = vector.subf<reassoc|nnan|ninf|nsz> %row_max, %next_max : vector<8xf32>
     %selected_old_scale = vector.expf<afn> %old_delta : vector<8xf32>
     %scaled_sum = vector.mulf<reassoc|nnan|ninf|nsz|contract> %row_sum, %selected_old_scale : vector<8xf32>
-    %next_sum = vector.addf<reassoc|nnan|ninf|nsz> %scaled_sum, %weight : vector<8xf32>
+"""
+if TILE == 32:
+    K += """    %delta_hi = vector.subf<reassoc|nnan|ninf|nsz> %scaled_hi, %next_max : vector<8xf32>
+    %weight_hi = vector.expf<afn> %delta_hi : vector<8xf32>
+    %next_sum_lo = vector.addf<reassoc|nnan|ninf|nsz> %scaled_sum, %weight : vector<8xf32>
+    %next_sum = vector.addf<reassoc|nnan|ninf|nsz> %next_sum_lo, %weight_hi : vector<8xf32>
+    // the f32 weights become f16 lhs fragments through this wave's 1 KB scratch
+    vector.fragment.store<result> %weight, %scratch_view[%c0, %c0] shape [%m, %n] : vector<8xf32>, view<16x16xf16>
+    vector.fragment.store<result> %weight_hi, %scratch_view_hi[%c0, %c0] shape [%m, %n] : vector<8xf32>, view<16x16xf16>
+    kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+    %probability = vector.fragment.load<lhs> %scratch_view[%c0, %c0] shape [%m, %k_frag] : view<16x16xf16> -> vector<16xf16>
+    %probability_hi = vector.fragment.load<lhs> %scratch_view_hi[%c0, %c0] shape [%m, %k_frag] : view<16x16xf16> -> vector<16xf16>
+"""
+else:
+    K += """    %next_sum = vector.addf<reassoc|nnan|ninf|nsz> %scaled_sum, %weight : vector<8xf32>
     // the f32 weights become an f16 lhs through this wave's 512-byte scratch
     vector.fragment.store<result> %weight, %scratch_view[%c0, %c0] shape [%m, %n] : vector<8xf32>, view<16x16xf16>
     kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
@@ -327,8 +378,17 @@ for c in range(8):
     K += f"    %v{c} = vector.fragment<rhs> %v_data{c} shape [%k_frag, %n] : vector<16xf16>\n"
 for c in range(8):
     K += f"    %rescaled{c} = vector.mulf<reassoc|nnan|ninf|nsz|contract> %acc{c}, %selected_old_scale : vector<8xf32>\n"
-for c in range(8):
-    K += f"    %next{c} = vector.mma %probability, %v{c}, %rescaled{c} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
+if TILE == 32:
+    for c in range(8):
+        K += f"    %v_data_hi{c} = vector.load %v_tile[%vrow{c}, %c16] : view<128x{VROW}xf16> -> vector<16xf16>\n"
+        K += f"    %v_hi{c} = vector.fragment<rhs> %v_data_hi{c} shape [%k_frag, %n] : vector<16xf16>\n"
+    for c in range(8):
+        K += f"    %mid{c} = vector.mma %probability, %v{c}, %rescaled{c} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
+    for c in range(8):
+        K += f"    %next{c} = vector.mma %probability_hi, %v_hi{c}, %mid{c} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
+else:
+    for c in range(8):
+        K += f"    %next{c} = vector.mma %probability, %v{c}, %rescaled{c} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
 K += "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
 K += "    scf.yield %next_max, %next_sum, " + ", ".join(f"%next{c}" for c in range(8)) + " : " + ", ".join(["vector<8xf32>"] * 10) + "\n  }\n"
 K += """  // the row sum: the per-lane partials of the 16 lanes of this half
