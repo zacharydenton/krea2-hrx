@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 from kernel_test import compile_kernel, launch, report, workdir, ROOT
 
 import os
-STEM = os.environ.get("ATTN", "attention_gqa_f16_wmma")
+STEM = os.environ.get("ATTN", "attention_gqa_lds_f16_wmma")
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 HEADS, KV, D = 48, 12, 128
 
@@ -27,14 +27,21 @@ def run(tmp: Path, tokens: int, heads=HEADS, kv=KV) -> bool:
     def pad(t):                              # 16 rows of headroom
         out = np.zeros((capacity, t.shape[1] * D), np.float16); out[:tokens] = t.reshape(tokens, -1).numpy(); return out
     hs = tmp / f"attn_{tokens}.hsaco"
-    compile_kernel(ROOT / f"kernels/{STEM}.loom", SYM,
-                   {f"{NS}.q_stride": heads * D, f"{NS}.kv_stride": kv * D, f"{NS}.kv_groups": groups, f"{NS}.tokens": tokens,
-                    f"{NS}.token_capacity": capacity, f"{NS}.scale": 1.0 / math.sqrt(D), f"{NS}.out_stride": heads * D}, hs)
+    cfg = {f"{NS}.q_stride": heads * D, f"{NS}.kv_stride": kv * D, f"{NS}.tokens": tokens,
+           f"{NS}.token_capacity": capacity, f"{NS}.scale": 1.0 / math.sqrt(D), f"{NS}.out_stride": heads * D}
+    if "lds" not in STEM:
+        cfg[f"{NS}.kv_groups"] = groups
+    compile_kernel((ROOT / "kernels" / f"{STEM}.loom") if (ROOT / "kernels" / f"{STEM}.loom").exists() else ROOT / "experiments" / f"{STEM}.loom", SYM, cfg, hs)
     tiles = (tokens + 15) // 16
-    vt = np.ascontiguousarray(pad(v).T)      # [kv_stride][capacity], zero past the sequence
-    (out,), t = launch(hs, SYM, (tiles, heads, 1), (32, 1, 1),
-                       [("i32", tokens), ("i32", heads), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", vt),
-                        ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
+    if "lds" in STEM:                        # a workgroup of the four query heads per key-value head
+        (out,), t = launch(hs, SYM, (tiles, kv, 1), (128, 1, 1),
+                           [("i32", tokens), ("i32", kv), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", pad(v)),
+                            ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
+    else:
+        vt = np.ascontiguousarray(pad(v).T)  # [kv_stride][capacity], zero past the sequence
+        (out,), t = launch(hs, SYM, (tiles, heads, 1), (32, 1, 1),
+                           [("i32", tokens), ("i32", heads), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", vt),
+                            ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
     us = t["per_launch_us"]
     flops = 4.0 * tokens * tokens * D * heads
     return report(f"{STEM} tokens={tokens} heads={heads}/{kv}  {us / 1e3:8.3f} ms  {flops / (us * 1e-6) / 1e12:5.1f} TFLOP/s",

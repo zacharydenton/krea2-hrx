@@ -35,7 +35,8 @@ def main() -> int:
             cfg = {f"{ns}.q_stride": HEADS * D, f"{ns}.kv_stride": KV * D, f"{ns}.tokens": tokens, f"{ns}.token_capacity": capacity, f"{ns}.scale": 1.0 / math.sqrt(D), f"{ns}.out_stride": HEADS * D}
             if "lds" not in stem:
                 cfg[f"{ns}.kv_groups"] = 4
-            compile_kernel(ROOT / f"kernels/{stem}.loom", sym, cfg, hs)
+            src = ROOT / "kernels" / f"{stem}.loom"
+            compile_kernel(src if src.exists() else ROOT / "experiments" / f"{stem}.loom", sym, cfg, hs)
             built[stem] = (hs, sym)
         best = {a_stem: 1e9, b_stem: 1e9}
         for r in range(rounds):

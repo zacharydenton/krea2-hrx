@@ -132,3 +132,18 @@ Same seed as the baseline: latent PSNR 10.09 dB / image 19.0 dB against bf16 (th
 W4A4 reference is 9.96 / 18.9), and 12.95 dB / 22.1 dB against the W4A4 reference,
 so the native pipeline lands in the same quality class as the arithmetic it
 implements. 7.85 s per forward then; the picture is build/loom_seed0.png.
+
+## Prefetching the next K/V tile into registers -- lost
+
+Carrying the next tile's two chunks per lane across the loop so their loads overlap
+the WMMAs: 248 VGPRs, 0.929x (43.4 vs 40.3 ms). Occupancy beats the overlap here, as
+the 4-wave GEMM did. Kept under experiments/.
+
+## End to end with the staged attention
+
+29.2 s for the 1024^2 image at 8 Turbo steps (3.65 s/step including the text encoder,
+the torch-side embeddings and the tiled decode; 2.89 s per forward of the 28 blocks),
+against 65.3 s for the official bf16 pipeline on the same box: 2.24x, with the PSNRs
+unchanged to the last digit (19.04 dB against bf16, 22.13 dB against the W4A4
+reference). A published int4 ConvRot checkpoint of this model that keeps 96 of 224
+block linears in int8 reports 18 s per image on an NVIDIA L4 at a minimum 17.7 dB.

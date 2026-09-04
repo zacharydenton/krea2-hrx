@@ -33,7 +33,7 @@ denoising step against the reference in both W4A4 and bf16.
 | torch bf16 (diffusers) | ~7 s | | |
 | reference W4A4 in torch | 87 s | 9.96 dB | 18.9 dB |
 | Loom W4A4, first attention | 7.85 s | 10.09 dB | 19.0 dB |
-| Loom W4A4, staged attention | 2.96 s | | |
+| Loom W4A4, staged attention | 2.89 s (29.2 s per image) | 10.09 dB | 19.04 dB |
 
 The three pictures (`build/bf16_seed0.png`, `build/w4a4_seed0.png`,
 `build/loom_seed0.png`) are the same fox in the same pose and light; the deviation is
