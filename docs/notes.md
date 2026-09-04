@@ -48,3 +48,39 @@ stay in torch through diffusers' official Krea2Pipeline; only `blocks_forward` m
   (`scf.for %i = [%lane to ...]`) inside a multi-wave workgroup; state the bound with an
   assume and loop over a uniform count with the lane added inside. A divergent
   `scf.if` before a loop is rejected too; put it after the last loop.
+
+## First end-to-end numbers (fixture: 4115 tokens, timestep 1.0)
+
+The native 28 blocks against the reference, cosine of the update the blocks make to
+the residual stream (the stream's own cosine hides everything behind the identity):
+
+| blocks | Loom vs reference W4A4 | Loom vs bf16 | reference W4A4 vs bf16 |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.99943 | 0.99899 | 0.99908 |
+| 2 | 0.99904 | 0.99862 | 0.99887 |
+| 4 | 0.99872 | 0.99833 | 0.99882 |
+| 8 | 0.99720 | 0.99684 | 0.99781 |
+| 16 | 0.97783 | 0.97912 | 0.98124 |
+| 28 | 0.96841 | 0.96815 | 0.97169 |
+
+The Loom blocks track the same-arithmetic reference at the rate that arithmetic
+tracks bf16, so the decay is the quantisation error compounding through the depth,
+not a kernel fault. Whether 0.97 after 28 blocks is acceptable is decided at the
+image level (latent PSNR and the pictures), below.
+
+Stage profile, 28 blocks, before the attention work:
+
+| stage | ms | share |
+| --- | ---: | ---: |
+| attention | 10839 | 86.6% |
+| gemm gate\|up | 658 | 5.3% |
+| gemm down + residual | 388 | 3.1% |
+| gemm qkv\|gate | 304 | 2.4% |
+| gemm wo + residual | 127 | 1.0% |
+| prepare (three kinds) | 175 | 1.4% |
+| qk norm + rope, v transpose | 24 | 0.2% |
+
+The four GEMMs run at 31-49 TOPS at M = 4115 (a tail tile row and the epilogue's
+token scale); the whole block minus attention is 60 ms. Attention at 390-560 ms per
+block is the entire problem: the 16-key online-softmax kernel pays two cross-lane
+reductions, an LDS round trip and two barriers per 16 keys.
