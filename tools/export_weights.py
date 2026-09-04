@@ -8,7 +8,7 @@ power, 1/16), quantised symmetrically per output row (scale = absmax / 7), and f
 the way the runtime launches them:
   qkvg : rows [ wq (6144) | wk (1536) | wv (1536) | gate (6144) ]   K = 6144  -> N = 15360
   wo   : [6144]                                                     K = 6144
-  gu   : rows [ mlp.gate (16384) | mlp.up (16384) ]                 K = 6144  -> N = 32768
+  gu   : rows [ gate o..o+15 | up o..o+15 ] x 1024 (interleaved)      K = 6144  -> N = 32768
   down : [6144]                                                     K = 16384
 plus f32 vectors: prenorm/postnorm scales, qnorm/knorm scales (128), the per-block
 modulation table (6 x 6144). Written as one weights.bin + manifest (name offset bytes)
@@ -38,6 +38,13 @@ def pack_i4(q: torch.Tensor) -> torch.Tensor:
     return (u[:, 0::2] | (u[:, 1::2] << 4)).contiguous()
 
 
+def interleave_gate_up(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """[2*inter][K] with rows in 16-row groups [gate o..o+15 | up o..o+15], so the fused
+    GEMM's waves hold the gate and up fragments of the same outputs side by side."""
+    inter, k = gate.shape
+    return torch.stack([gate.view(inter // 16, 16, k), up.view(inter // 16, 16, k)], dim=1).reshape(2 * inter, k)
+
+
 def quantize(w: torch.Tensor, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """bf16 [N][K] on the GPU -> (packed int4 [N][K/2] u8, scale [N] f32), rotated along K."""
     wr = R.rotate_groups(w.float(), h)
@@ -63,7 +70,7 @@ def main() -> None:
         p = f"blocks.{i}"
         qkvg = torch.cat([w[f"{p}.attn.wq.weight"], w[f"{p}.attn.wk.weight"], w[f"{p}.attn.wv.weight"], w[f"{p}.attn.gate.weight"]], dim=0)
         for name, mat in (("qkvg", qkvg), ("wo", w[f"{p}.attn.wo.weight"]),
-                          ("gu", torch.cat([w[f"{p}.mlp.gate.weight"], w[f"{p}.mlp.up.weight"]], dim=0)),
+                          ("gu", interleave_gate_up(w[f"{p}.mlp.gate.weight"], w[f"{p}.mlp.up.weight"])),
                           ("down", w[f"{p}.mlp.down.weight"])):
             q, s = quantize(mat, h)
             add(f"{p}.{name}.q", q); add(f"{p}.{name}.s", s)

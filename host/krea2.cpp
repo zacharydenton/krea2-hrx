@@ -106,9 +106,9 @@ public:
         auto load = [&](Kernel &k, const char *stem, const char *symbol) { k.load(kernels_dir + "/" + stem + ".hsaco", symbol); };
         load(k_prep_norm_, "prepare_norm_i4", "krea2_prepare_norm_i4");
         load(k_prep_gated_, "prepare_gated_i4", "krea2_prepare_gated_i4");
-        load(k_prep_swiglu_, "prepare_swiglu_i4", "krea2_prepare_swiglu_i4");
+        load(k_prep_swiglu_, "prepare_plain_i4", "krea2_prepare_plain_i4");
         load(k_gemm_qkvg_, "gemm_qkvg", "krea2_gemm_i4");
-        load(k_gemm_gu_, "gemm_gu", "krea2_gemm_i4");
+        load(k_gemm_gu_, "gemm_gu", "krea2_gemm_i4_swiglu");
         load(k_gemm_wo_, "gemm_wo", "krea2_gemm_i4_resid");
         load(k_gemm_down_, "gemm_down", "krea2_gemm_i4_resid");
         load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
@@ -125,7 +125,7 @@ public:
         HIP_CHECK(hipMemset(q_, 0, T * HIDDEN * 2));
         HIP_CHECK(hipMemset(k_, 0, size_t(KV_HEADS * HEAD_DIM) * T * 2));
         HIP_CHECK(hipMalloc(&attn_, T * HIDDEN * 2));
-        HIP_CHECK(hipMalloc(&gu_, T * 2 * INTER * 2));
+        HIP_CHECK(hipMalloc(&gu_, T * INTER * 2));   // silu(gate) * up, fused into the GEMM epilogue
         HIP_CHECK(hipMalloc(&mods_, size_t(layers) * 6 * HIDDEN * 4));
         HIP_CHECK(hipMalloc(&cos_, T * HEAD_DIM * 4));
         HIP_CHECK(hipMalloc(&sin_, T * HEAD_DIM * 4));
@@ -216,9 +216,9 @@ private:
         gemm(k_gemm_wo_, "gemm wo + residual", b.wo_q, b.wo_s, HIDDEN, x_, pregate);
         { KernArgs a; a.scalar_i32(T); a.pointer(x_); a.pointer(b.postnorm); a.pointer(postscale); a.pointer(postshift); a.pointer(a_q_); a.pointer(a_s_);
           launch(k_prep_norm_, "prepare norm", T, 1, THREADS, a); }
-        gemm(k_gemm_gu_, "gemm gate|up", b.gu_q, b.gu_s, 2 * INTER, gu_, nullptr);
+        gemm(k_gemm_gu_, "gemm gate|up + swiglu", b.gu_q, b.gu_s, 2 * INTER, gu_, nullptr);
         { KernArgs a; a.scalar_i32(T); a.pointer(gu_); a.pointer(a_q_); a.pointer(a_s_);
-          launch(k_prep_swiglu_, "prepare swiglu", T, 1, THREADS, a); }
+          launch(k_prep_swiglu_, "prepare down input", T, 1, THREADS, a); }
         gemm(k_gemm_down_, "gemm down + residual", b.down_q, b.down_s, HIDDEN, x_, postgate);
     }
 

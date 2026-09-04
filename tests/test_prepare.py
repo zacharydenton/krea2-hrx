@@ -1,4 +1,4 @@
-"""prepare_{norm,gated,swiglu}_i4 vs the reference's own quantisation (krea2_ref):
+"""prepare_{norm,gated,plain}_i4 vs the reference's own quantisation (krea2_ref):
 the int4 codes must match exactly except at rounding ties, and the scales to f32."""
 import sys
 from pathlib import Path
@@ -34,7 +34,7 @@ def check(name, tmp, tokens, width, x_expected, args, cfg):
     scale_err = np.abs(s - ss.numpy().ravel()).max() / np.abs(ss.numpy()).max()
     # the SwiGLU variant keeps its 16384-wide row as f16 in LDS: a few more ties and a
     # scale rounded at f16 precision, both far inside int4's step
-    tol_codes, tol_scale = (5e-3, 2e-3) if name == "swiglu" else (2e-3, 1e-5)
+    tol_codes, tol_scale = (5e-3, 2e-3) if name == "plain" else (2e-3, 1e-5)
     ok = bad.sum() == 0 and mism.mean() < tol_codes and scale_err < tol_scale
     print(f"  {'PASS' if ok else 'FAIL'} prepare_{name}: tokens={tokens} width={width}  {t['per_launch_us'] / 1e3:.3f} ms  "
           f"codes differ {mism.mean() * 100:.3f}% (all by 1, ties) scale rel err {scale_err:.1e}")
@@ -65,13 +65,10 @@ def main() -> int:
         x = attn.astype(np.float32) / (1 + np.exp(-g))
         ok &= check("gated", tmp, tokens, width, x.astype(np.float32),
                     [("in_f16", attn), ("in_f16", fused)], {"krea2.prepare_gated_i4.gate_stride": gate_stride})
-        # swiglu: the fused gate|up output [tokens][2*inter]; width = inter
+        # plain: the fused GEMM's silu(g)*u output [tokens][inter] as is
         inter = 16384
-        gu = (rng.standard_normal((tokens, 2 * inter)) * 0.5).astype(np.float16)
-        gg, uu = gu[:, :inter].astype(np.float32), gu[:, inter:].astype(np.float32)
-        x = gg / (1 + np.exp(-gg)) * uu
-        ok &= check("swiglu", tmp, tokens, inter, x.astype(np.float32),
-                    [("in_f16", gu)], {"krea2.prepare_swiglu_i4.gate_stride": 2 * inter})
+        x = (rng.standard_normal((tokens, inter)) * 0.5).astype(np.float16)
+        ok &= check("plain", tmp, tokens, inter, x.astype(np.float32), [("in_f16", x)], {})
     return 0 if ok else 1
 
 

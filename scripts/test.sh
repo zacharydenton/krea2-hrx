@@ -16,7 +16,7 @@ step "generated kernels match their generators" bash -c '
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_prepare.py" > tools/gen_prepare.py &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#; s#OUT = Path(__file__).resolve().parent.parent / \"kernels\"#OUT = Path(\"$tmpdir\") / \"kernels\"#" "$OLDPWD/tools/gen_attention_lds.py" > tools/gen_attention_lds.py &&
   python3 tools/gen_prepare.py >/dev/null && python3 tools/gen_attention_lds.py >/dev/null &&
-  for f in prepare_norm_i4 prepare_gated_i4 prepare_swiglu_i4 attention_gqa_lds_f16_wmma; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
+  for f in prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 attention_gqa_lds_f16_wmma; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
 step "build host"                 ./scripts/build_host.sh
 step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && env -u LD_LIBRARY_PATH python3 tests/test_ref_vs_diffusers.py'
 step "prepare kernels"            bash -c 'env -u LD_LIBRARY_PATH python3 tests/test_prepare.py'

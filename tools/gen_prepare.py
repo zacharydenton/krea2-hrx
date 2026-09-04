@@ -121,26 +121,15 @@ FORM = {
     vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
 """),
-    "swiglu": dict(
-        args="%gu: buffer",
-        views="""  %gu_global = buffer.assume.memory_space<global> %gu : buffer
-  %gu_view = buffer.view %gu_global[%c0_offset] : buffer -> view<[%tokens_b]x[%gate_stride]xf16>
+    "plain": dict(
+        args="%h: buffer",
+        views="""  %h_global = buffer.assume.memory_space<global> %h : buffer
+  %h_view = buffer.view %h_global[%c0_offset] : buffer -> view<[%tokens_b]x[%width]xf16>
 """,
-        form="""  // the fused gate|up GEMM output: gate at column i, up at column width + i
+        form="""  // the row as produced (the gate|up GEMM's fused silu(g)*u output)
   scf.for %m_j = [%c0 to %chunks_per_lane step %c1] {
-""" + chunk("m") + """    %m_iu0 = index.add %m_i, %width : index
-    %m_iu = index.assume %m_iu0 [le(%m_iu0, %gate_last), mul(%m_iu0, 8)] : index
-    %m_ig = index.assume %m_i [le(%m_i, %gate_last), mul(%m_i, 8)] : index
-    %m_g16 = vector.load %gu_view[%row, %m_ig] : view<[%tokens_b]x[%gate_stride]xf16> -> vector<8xf16>
-    %m_u16 = vector.load %gu_view[%row, %m_iu] : view<[%tokens_b]x[%gate_stride]xf16> -> vector<8xf16>
-    %m_g = vector.extf %m_g16 : vector<8xf16> to vector<8xf32>
-    %m_u = vector.extf %m_u16 : vector<8xf16> to vector<8xf32>
-    %m_neg_g = vector.subf %zero8, %m_g : vector<8xf32>
-    %m_e = vector.expf<afn> %m_neg_g : vector<8xf32>
-    %m_den = vector.addf %one8, %m_e : vector<8xf32>
-    %m_sig = vector.divf %one8, %m_den : vector<8xf32>
-    %m_silu = vector.mulf %m_g, %m_sig : vector<8xf32>
-    %m_out = vector.mulf %m_silu, %m_u : vector<8xf32>
+""" + chunk("m") + """    %m_v16 = vector.load %h_view[%row, %m_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
+    %m_out = vector.extf %m_v16 : vector<8xf16> to vector<8xf32>
     vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
 """),
@@ -149,12 +138,12 @@ FORM = {
 
 def kernel(name: str) -> str:
     f = FORM[name]
-    lds = "f16" if name == "swiglu" else "f32"
+    lds = "f16" if name == "plain" else "f32"
     lds_bytes = 2 if lds == "f16" else 4
     ns, sym = f"krea2.prepare_{name}_i4", f"krea2_prepare_{name}_i4"
-    extra_cfg = "" if name == "norm" else f"\nconfig.decl @{ns}.gate_stride : %value: index where [range(%value, 256, 65536), mul(%value, 256)]\n"
-    extra_get = "" if name == "norm" else f"  %gate_stride = config.get @{ns}.gate_stride : index\n"
-    gate_last = "" if name == "norm" else "  %gate_last = index.sub %gate_stride, %c8 : index\n"
+    extra_cfg = "" if name in ("norm", "plain") else f"\nconfig.decl @{ns}.gate_stride : %value: index where [range(%value, 256, 65536), mul(%value, 256)]\n"
+    extra_get = "" if name in ("norm", "plain") else f"  %gate_stride = config.get @{ns}.gate_stride : index\n"
+    gate_last = "" if name in ("norm", "plain") else "  %gate_last = index.sub %gate_stride, %c8 : index\n"
     eps_cfg = f"\nconfig.decl @{ns}.eps : f32\n" if name == "norm" else ""
     eps_get = f"  %eps = config.get @{ns}.eps : f32\n" if name == "norm" else ""
     return f"""// GEMM input preparation ({name}), one workgroup of 256 lanes per token: form the
@@ -341,5 +330,5 @@ def uniform_loops(text: str) -> str:
                         "  %quads_per_lane = index.div %quads, %c256 : index\n  %chunks_per_lane = index.div %word_width, %c256 : index\n")
 
 for name in FORM:
-    (OUT / f"prepare_{name}_i4.loom").write_text(uniform_loops(lds_type(kernel(name), "f16" if name == "swiglu" else "f32")))
+    (OUT / f"prepare_{name}_i4.loom").write_text(uniform_loops(lds_type(kernel(name), "f16" if name == "plain" else "f32")))
     print("wrote", f"prepare_{name}_i4.loom")

@@ -41,9 +41,9 @@ def build(tokens: int) -> Path:
     jobs = [
         ("prepare_norm_i4", "krea2_prepare_norm_i4", "prepare_norm_i4", {"krea2.prepare_norm_i4.width": HIDDEN, "krea2.prepare_norm_i4.eps": 1e-5}),
         ("prepare_gated_i4", "krea2_prepare_gated_i4", "prepare_gated_i4", {"krea2.prepare_gated_i4.width": HIDDEN, "krea2.prepare_gated_i4.gate_stride": QKVG}),
-        ("prepare_swiglu_i4", "krea2_prepare_swiglu_i4", "prepare_swiglu_i4", {"krea2.prepare_swiglu_i4.width": INTER, "krea2.prepare_swiglu_i4.gate_stride": 2 * INTER}),
+                ("prepare_plain_i4", "krea2_prepare_plain_i4", "prepare_plain_i4", {"krea2.prepare_plain_i4.width": INTER}),
         ("gemm_i4", "krea2_gemm_i4", "gemm_qkvg", {"krea2.gemm_i4.k_size": HIDDEN, "krea2.gemm_i4.n_size": QKVG, "krea2.gemm_i4.m_group": m_group}),
-        ("gemm_i4", "krea2_gemm_i4", "gemm_gu", {"krea2.gemm_i4.k_size": HIDDEN, "krea2.gemm_i4.n_size": 2 * INTER, "krea2.gemm_i4.m_group": m_group}),
+        ("gemm_i4_swiglu", "krea2_gemm_i4_swiglu", "gemm_gu", {"krea2.gemm_i4_swiglu.k_size": HIDDEN, "krea2.gemm_i4_swiglu.n_size": 2 * INTER, "krea2.gemm_i4_swiglu.m_group": m_group}),
         ("gemm_i4_resid", "krea2_gemm_i4_resid", "gemm_wo", {"krea2.gemm_i4_resid.k_size": HIDDEN, "krea2.gemm_i4_resid.n_size": HIDDEN, "krea2.gemm_i4_resid.m_group": m_group}),
         ("gemm_i4_resid", "krea2_gemm_i4_resid", "gemm_down", {"krea2.gemm_i4_resid.k_size": INTER, "krea2.gemm_i4_resid.n_size": HIDDEN, "krea2.gemm_i4_resid.m_group": m_group}),
         ("rope_qknorm_f16", "krea2_rope_qknorm_f16", "rope_qknorm", {"krea2.rope_qknorm_f16.row_stride": QKVG, "krea2.rope_qknorm_f16.q_heads": 48, "krea2.rope_qknorm_f16.kv_heads": KV, "krea2.rope_qknorm_f16.k_offset": HIDDEN, "krea2.rope_qknorm_f16.eps": 1e-5}),
