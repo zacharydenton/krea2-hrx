@@ -6,16 +6,19 @@ kv_head*4 + w. Per 16-key tile the workgroup loads the K tile [16][128] and the 
 LDS, and all four waves take their operands from there: K's rhs by hand (lane = key,
 16 contiguous channels), V's rhs as dense fragment loads from the tile rows. The online softmax,
 running statistics and epilogue are the tested 16-key kernel's."""
-import sys
 from pathlib import Path
 
-PREFETCH = "--prefetch" in sys.argv
-
 ROOT = Path(__file__).resolve().parent.parent
-STEM = "attention_gqa_ldsp_f16_wmma" if PREFETCH else "attention_gqa_lds_f16_wmma"
+STEM = "attention_gqa_lds_f16_wmma"
 OUT = ROOT / f"kernels/{STEM}.loom"
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
+import os
+HOIST = int(os.environ.get("ATTN_HOIST", "4"))   # Q fragments hoisted out of the key loop
+QLDS = os.environ.get("ATTN_QLDS", "1") == "1"    # the other Q fragments staged once per wave in LDS
+QROW = (8 - HOIST) * 16 + 8 if QLDS and HOIST < 8 else 0   # halves per staged Q row
+assert HOIST % 2 == 0, "the Q staging loop moves 32 chunks per iteration: HOIST must be even"
+VROW = 24   # the V tile is staged transposed, [channel][key]: 16 keys + 8 pad halves per 48-byte row
 
 
 K = f"""// GQA attention for Krea 2 with K/V tiles staged in LDS: one workgroup of four waves
@@ -80,15 +83,38 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %c0_offset = index.constant 0 : offset
   %k_tile_offset = index.constant 0 : offset
   %v_tile_offset = index.constant {16 * ROW * 2} : offset
-  %scratch_offset = index.constant {2 * 16 * ROW * 2} : offset
-  %result_offset = index.constant {2 * 16 * ROW * 2 + 4 * 512} : offset
-  %lds_bytes = index.constant {2 * 16 * ROW * 2 + 4 * 512 + 4 * 1024} : offset
+  %scratch_offset = index.constant {16 * ROW * 2 + 128 * VROW * 2} : offset
+  // the result stage aliases the K/V tiles: it is used only after the loop's final barrier
+  %result_offset = index.constant 0 : offset
+  %q_tile_offset = index.constant {16 * ROW * 2 + 128 * VROW * 2 + 4 * 512} : offset
+  %lds_bytes = index.constant {16 * ROW * 2 + 128 * VROW * 2 + 4 * 512 + 4 * 16 * QROW * 2} : offset
   %m = index.constant 16 : index
   %n = index.constant 16 : index
   %k_frag = index.constant 16 : index
   %zero_f32 = scalar.constant 0.0 : f32
   %negative_large = scalar.constant -1000000000.0 : f32
   %zero_acc = vector.constant 0.0 : vector<8xf32>
+  %cj0 = index.constant 0 : index
+  %cj1 = index.constant 1 : index
+  %cj2 = index.constant 2 : index
+  %cj3 = index.constant 3 : index
+  %cj4 = index.constant 4 : index
+  %cj5 = index.constant 5 : index
+  %cj6 = index.constant 6 : index
+  %cj7 = index.constant 7 : index
+  %cj8 = index.constant 8 : index
+  %cj9 = index.constant 9 : index
+  %cj10 = index.constant 10 : index
+  %cj11 = index.constant 11 : index
+  %cj12 = index.constant 12 : index
+  %cj13 = index.constant 13 : index
+  %cj14 = index.constant 14 : index
+  %cj15 = index.constant 15 : index
+  %i32_1 = scalar.constant 1 : i32
+  %i32_2 = scalar.constant 2 : i32
+  %i32_4 = scalar.constant 4 : i32
+  %i32_8 = scalar.constant 8 : i32
+  %i32_32 = scalar.constant 32 : i32
   %zero_vector = vector.splat %zero_f32 : vector<8xf32>
   %negative_vector = vector.splat %negative_large : vector<8xf32>
   %scale_vector = vector.splat %scale : vector<8xf32>
@@ -129,7 +155,7 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer
   // K and V tiles: 16 keys x 128 channels, rows padded to {ROW} halves
   %k_tile = buffer.view %lds[%k_tile_offset] : buffer -> view<16x{ROW}xf16>
-  %v_tile = buffer.view %lds[%v_tile_offset] : buffer -> view<16x{ROW}xf16>
+  %v_tile = buffer.view %lds[%v_tile_offset] : buffer -> view<128x{VROW}xf16>
   %wave_scratch_bytes = index.constant 512 : offset
   %wave_scratch_offset0 = index.scale %wave, %wave_scratch_bytes : index, offset -> offset
   %wave_scratch_offset = index.add %scratch_offset, %wave_scratch_offset0 : offset
@@ -145,57 +171,105 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %st_chunk = index.mul %st_chunk0, %c16 : index
   %st_col0 = index.add %kv_base0, %st_chunk : index
   %kv_col_limit = index.sub %kv_stride0, %c16 : index
+  %q_col_limit = index.sub %q_stride0, %c16 : index
   %st_col = index.assume %st_col0 [le(%st_col0, %kv_col_limit), mul(%st_col0, 16)] : index
+  // V staging: lane -> (key = workitem mod 16, channel chunk = workitem / 16), transposed into LDS
+  %st_key_v = index.rem %workitem, %c16 : index
+  %st_chunk_v0 = index.div %workitem, %c16 : index
+  %st_chunk_v = index.mul %st_chunk_v0, %c16 : index
+  %st_col_v0 = index.add %kv_base0, %st_chunk_v : index
+  %st_col_v = index.assume %st_col_v0 [le(%st_col_v0, %kv_col_limit), mul(%st_col_v0, 16)] : index
   %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
   %key_tile_count = index.add %tiles_per_image, %c0 : index
 
-  %zero_chunk = vector.constant 0.0 : vector<16xf16>
 """
-if PREFETCH:
-    K += f"""  // The first tile's chunks, loaded before the loop; every iteration stores the chunks
-  // it was handed, barriers, loads the next tile's while the WMMAs run.
-  %st_row_first0 = index.add %c0, %st_key : index
-  %st_row_first = index.assume %st_row_first0 [lt(%st_row_first0, %padded_tokens)] : index
-  %k_first = vector.load %k_view[%st_row_first, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-  %v_first = vector.load %v_view[%st_row_first, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-  %final_max_even, %final_sum_even, %final_max_odd, %final_sum_odd, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7, %k_last, %v_last = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%max_even = %negative_vector : vector<8xf32>, %sum_even = %zero_vector : vector<8xf32>, %max_odd = %negative_vector : vector<8xf32>, %sum_odd = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>, %k_cur = %k_first : vector<16xf16>, %v_cur = %v_first : vector<16xf16>) -> ({", ".join(["vector<8xf32>"] * 12)}, vector<16xf16>, vector<16xf16>) {{
-    %key_origin1 = index.mul %key_tile, %c16 : index
-    %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, 16)] : index
-    vector.store %k_cur, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
-    vector.store %v_cur, %v_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
-    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-    // next tile's chunks (zero past the last tile)
-    %next_tile = index.add %key_tile, %c1 : index
-    %has_next = index.cmp ult, %next_tile, %key_tile_count : index
-    %next_origin1 = index.mul %next_tile, %c16 : index
-    %next_origin2 = scf.select %has_next, %next_origin1, %c0 : index
-    %next_origin = index.assume %next_origin2 [le(%next_origin2, %tile_origin_limit), mul(%next_origin2, 16)] : index
-    %st_row_next0 = index.add %next_origin, %st_key : index
-    %st_row_next = index.assume %st_row_next0 [lt(%st_row_next0, %padded_tokens)] : index
-    %k_next = scf.if %has_next -> (vector<16xf16>) {{
-      %kl = vector.load %k_view[%st_row_next, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-      scf.yield %kl : vector<16xf16>
-    }} else {{
-      scf.yield %zero_chunk : vector<16xf16>
-    }}
-    %v_next = scf.if %has_next -> (vector<16xf16>) {{
-      %vl = vector.load %v_view[%st_row_next, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-      scf.yield %vl : vector<16xf16>
-    }} else {{
-      scf.yield %zero_chunk : vector<16xf16>
-    }}
+if QROW:
+    K += f"""  %wave_q_bytes = index.constant {16 * QROW * 2} : offset
+  %wave_q_offset0 = index.scale %wave, %wave_q_bytes : index, offset -> offset
+  %wave_q_offset = index.add %q_tile_offset, %wave_q_offset0 : offset
+  %q_tile = buffer.view %lds[%wave_q_offset] : buffer -> view<16x{QROW}xf16>
+  // stage this wave's 16 query rows x {(8 - HOIST) * 16} channels once: {(8 - HOIST) // 2} chunks of 16 halves per lane
+  %q_chunks = index.constant {8 - HOIST} : index
+  %q_chunk_iters = index.constant {(8 - HOIST) // 2} : index
+  scf.for %qi = [%c0 to %q_chunk_iters step %c1] {{
+    %qid0 = index.mul %qi, %c32 : index
+    %qid = index.add %qid0, %lane : index
+    %qrow = index.div %qid, %q_chunks : index
+    %qchunk0 = index.rem %qid, %q_chunks : index
+    %qchunk = index.mul %qchunk0, %c16 : index
+    %qrow_global0 = index.add %query_origin0, %qrow : index
+    %qrow_global = index.assume %qrow_global0 [lt(%qrow_global0, %padded_tokens)] : index
+    %qcol0 = index.add %head_base0, %qchunk : index
+    %qcol1 = index.add %qcol0, %c{HOIST * 16} : index
+    %qcol = index.assume %qcol1 [le(%qcol1, %q_col_limit), mul(%qcol1, 16)] : index
+    %q_chunk = vector.load %q_view[%qrow_global, %qcol] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
+    vector.store %q_chunk, %q_tile[%qrow, %qchunk] : vector<16xf16>, view<16x{QROW}xf16>
+  }}
+  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
 """
-else:
-    K += f"""  %final_max_even, %final_sum_even, %final_max_odd, %final_sum_odd, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%max_even = %negative_vector : vector<8xf32>, %sum_even = %zero_vector : vector<8xf32>, %max_odd = %negative_vector : vector<8xf32>, %sum_odd = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> ({", ".join(["vector<8xf32>"] * 12)}) {{
+# the first HOIST Q fragments live in registers for the whole loop (each is 8 VGPRs)
+for c in range(HOIST):
+    K += (f"  %q_channel{c} = index.add %head_base0, %c{16*c} : index\n" if c else "  %q_channel0 = index.add %head_base0, %c0 : index\n")
+    K += f"  %lhs{c} = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel{c}] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n"
+K += f"""  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%row_max = %negative_vector : vector<8xf32>, %row_sum = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> ({", ".join(["vector<8xf32>"] * 10)}) {{
     %key_origin1 = index.mul %key_tile, %c16 : index
     %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, 16)] : index
     // stage K and V tiles (rows past the sequence are zero headroom)
     %st_row0 = index.add %key_origin0, %st_key : index
     %st_row = index.assume %st_row0 [lt(%st_row0, %padded_tokens)] : index
     %k_chunk = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-    %v_chunk = vector.load %v_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+    %st_row_v0 = index.add %key_origin0, %st_key_v : index
+    %st_row_v = index.assume %st_row_v0 [lt(%st_row_v0, %padded_tokens)] : index
+    %v_chunk = vector.load %v_view[%st_row_v, %st_col_v] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
-    vector.store %v_chunk, %v_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x{ROW}xf16>
+    %ve0 = vector.extract %v_chunk[0] : vector<16xf16> -> f16
+    %vr0 = index.add %st_chunk_v, %cj0 : index
+    view.store %ve0, %v_tile[%vr0, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve1 = vector.extract %v_chunk[1] : vector<16xf16> -> f16
+    %vr1 = index.add %st_chunk_v, %cj1 : index
+    view.store %ve1, %v_tile[%vr1, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve2 = vector.extract %v_chunk[2] : vector<16xf16> -> f16
+    %vr2 = index.add %st_chunk_v, %cj2 : index
+    view.store %ve2, %v_tile[%vr2, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve3 = vector.extract %v_chunk[3] : vector<16xf16> -> f16
+    %vr3 = index.add %st_chunk_v, %cj3 : index
+    view.store %ve3, %v_tile[%vr3, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve4 = vector.extract %v_chunk[4] : vector<16xf16> -> f16
+    %vr4 = index.add %st_chunk_v, %cj4 : index
+    view.store %ve4, %v_tile[%vr4, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve5 = vector.extract %v_chunk[5] : vector<16xf16> -> f16
+    %vr5 = index.add %st_chunk_v, %cj5 : index
+    view.store %ve5, %v_tile[%vr5, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve6 = vector.extract %v_chunk[6] : vector<16xf16> -> f16
+    %vr6 = index.add %st_chunk_v, %cj6 : index
+    view.store %ve6, %v_tile[%vr6, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve7 = vector.extract %v_chunk[7] : vector<16xf16> -> f16
+    %vr7 = index.add %st_chunk_v, %cj7 : index
+    view.store %ve7, %v_tile[%vr7, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve8 = vector.extract %v_chunk[8] : vector<16xf16> -> f16
+    %vr8 = index.add %st_chunk_v, %cj8 : index
+    view.store %ve8, %v_tile[%vr8, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve9 = vector.extract %v_chunk[9] : vector<16xf16> -> f16
+    %vr9 = index.add %st_chunk_v, %cj9 : index
+    view.store %ve9, %v_tile[%vr9, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve10 = vector.extract %v_chunk[10] : vector<16xf16> -> f16
+    %vr10 = index.add %st_chunk_v, %cj10 : index
+    view.store %ve10, %v_tile[%vr10, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve11 = vector.extract %v_chunk[11] : vector<16xf16> -> f16
+    %vr11 = index.add %st_chunk_v, %cj11 : index
+    view.store %ve11, %v_tile[%vr11, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve12 = vector.extract %v_chunk[12] : vector<16xf16> -> f16
+    %vr12 = index.add %st_chunk_v, %cj12 : index
+    view.store %ve12, %v_tile[%vr12, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve13 = vector.extract %v_chunk[13] : vector<16xf16> -> f16
+    %vr13 = index.add %st_chunk_v, %cj13 : index
+    view.store %ve13, %v_tile[%vr13, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve14 = vector.extract %v_chunk[14] : vector<16xf16> -> f16
+    %vr14 = index.add %st_chunk_v, %cj14 : index
+    view.store %ve14, %v_tile[%vr14, %st_key_v] : f16, view<128x{VROW}xf16>
+    %ve15 = vector.extract %v_chunk[15] : vector<16xf16> -> f16
+    %vr15 = index.add %st_chunk_v, %cj15 : index
+    view.store %ve15, %v_tile[%vr15, %st_key_v] : f16, view<128x{VROW}xf16>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
 """
 K += f"""
@@ -205,8 +279,12 @@ K += f"""
 # scores: 8 channel steps, q fragment from global, k rhs from the LDS row (lane = key)
 prev = "%init"
 for c in range(8):
-    K += (f"    %q_channel{c} = index.add %head_base0, %c{16*c} : index\n" if c else "    %q_channel0 = index.add %head_base0, %c0 : index\n")
-    K += f"    %lhs{c} = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel{c}] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n"
+    if c >= HOIST and QROW:
+        K += f"    %q_data{c} = vector.load %q_tile[%lane_column, %c{16*(c-HOIST)}] : view<16x{QROW}xf16> -> vector<16xf16>\n"
+        K += f"    %lhs{c} = vector.fragment<lhs> %q_data{c} shape [%m, %k_frag] : vector<16xf16>\n"
+    elif c >= HOIST:
+        K += f"    %q_channel{c} = index.add %head_base0, %c{16*c} : index\n"
+        K += f"    %lhs{c} = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel{c}] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>\n"
     K += f"    %k_data{c} = vector.load %k_tile[%lane_column, %c{16*c}] : view<16x{ROW}xf16> -> vector<16xf16>\n" if c else f"    %k_data0 = vector.load %k_tile[%lane_column, %c0] : view<16x{ROW}xf16> -> vector<16xf16>\n"
     K += f"    %rhs{c} = vector.fragment<rhs> %k_data{c} shape [%k_frag, %n] : vector<16xf16>\n"
     out = "%raw_scores" if c == 7 else f"%qk{c}"
@@ -218,80 +296,51 @@ K += """    %scaled0 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %raw_scores, 
     } else {
       scf.yield %negative_vector : vector<8xf32>
     }
-    %even_scores = scf.if %lane_group_even -> (vector<8xf32>) {
-      scf.yield %scaled : vector<8xf32>
-    } else {
-      scf.yield %negative_vector : vector<8xf32>
-    }
-    %odd_scores = scf.if %lane_group_even -> (vector<8xf32>) {
-      scf.yield %negative_vector : vector<8xf32>
-    } else {
-      scf.yield %scaled : vector<8xf32>
-    }
-    %tile_max_even = kernel.subgroup.reduce<maxnumf> %even_scores : vector<8xf32>
-    %tile_max_odd = kernel.subgroup.reduce<maxnumf> %odd_scores : vector<8xf32>
-    %next_max_even = vector.maxnumf %max_even, %tile_max_even : vector<8xf32>
-    %next_max_odd = vector.maxnumf %max_odd, %tile_max_odd : vector<8xf32>
-    %selected_max = scf.if %lane_group_even -> (vector<8xf32>) {
-      scf.yield %next_max_even : vector<8xf32>
-    } else {
-      scf.yield %next_max_odd : vector<8xf32>
-    }
-    %delta = vector.subf<reassoc|nnan|ninf|nsz> %scaled, %selected_max : vector<8xf32>
-    %raw_weight = vector.expf<afn> %delta : vector<8xf32>
-    %weight = scf.if %key_valid -> (vector<8xf32>) {
-      scf.yield %raw_weight : vector<8xf32>
-    } else {
-      scf.yield %zero_vector : vector<8xf32>
-    }
-    %even_weight = scf.if %lane_group_even -> (vector<8xf32>) {
-      scf.yield %weight : vector<8xf32>
-    } else {
-      scf.yield %zero_vector : vector<8xf32>
-    }
-    %odd_weight = scf.if %lane_group_even -> (vector<8xf32>) {
-      scf.yield %zero_vector : vector<8xf32>
-    } else {
-      scf.yield %weight : vector<8xf32>
-    }
-    %tile_sum_even = kernel.subgroup.reduce<addf> %even_weight : vector<8xf32>
-    %tile_sum_odd = kernel.subgroup.reduce<addf> %odd_weight : vector<8xf32>
-    %old_delta_even = vector.subf<reassoc|nnan|ninf|nsz> %max_even, %next_max_even : vector<8xf32>
-    %old_delta_odd = vector.subf<reassoc|nnan|ninf|nsz> %max_odd, %next_max_odd : vector<8xf32>
-    %old_scale_even = vector.expf<afn> %old_delta_even : vector<8xf32>
-    %old_scale_odd = vector.expf<afn> %old_delta_odd : vector<8xf32>
-    %scaled_sum_even = vector.mulf<reassoc|nnan|ninf|nsz|contract> %sum_even, %old_scale_even : vector<8xf32>
-    %scaled_sum_odd = vector.mulf<reassoc|nnan|ninf|nsz|contract> %sum_odd, %old_scale_odd : vector<8xf32>
-    %next_sum_even = vector.addf<reassoc|nnan|ninf|nsz> %scaled_sum_even, %tile_sum_even : vector<8xf32>
-    %next_sum_odd = vector.addf<reassoc|nnan|ninf|nsz> %scaled_sum_odd, %tile_sum_odd : vector<8xf32>
-    %selected_old_scale = scf.if %lane_group_even -> (vector<8xf32>) {
-      scf.yield %old_scale_even : vector<8xf32>
-    } else {
-      scf.yield %old_scale_odd : vector<8xf32>
-    }
+    // Tile row max across the 16 lanes of this lane's half: an xor butterfly over
+    // offsets 1, 2, 4, 8 never crosses the halves, so no even/odd masking is needed.
+    %sh1, %ok1 = kernel.subgroup.shuffle<xor> %scaled, %i32_1, %i32_32 : vector<8xf32>, i32, i32
+    %tm1 = vector.maxnumf %scaled, %sh1 : vector<8xf32>
+    %sh2, %ok2 = kernel.subgroup.shuffle<xor> %tm1, %i32_2, %i32_32 : vector<8xf32>, i32, i32
+    %tm2 = vector.maxnumf %tm1, %sh2 : vector<8xf32>
+    %sh4, %ok4 = kernel.subgroup.shuffle<xor> %tm2, %i32_4, %i32_32 : vector<8xf32>, i32, i32
+    %tm4 = vector.maxnumf %tm2, %sh4 : vector<8xf32>
+    %sh8, %ok8 = kernel.subgroup.shuffle<xor> %tm4, %i32_8, %i32_32 : vector<8xf32>, i32, i32
+    %tm8 = vector.maxnumf %tm4, %sh8 : vector<8xf32>
+    %next_max = vector.maxnumf %row_max, %tm8 : vector<8xf32>
+    %delta = vector.subf<reassoc|nnan|ninf|nsz> %scaled, %next_max : vector<8xf32>
+    // an invalid key's score is -inf, so its weight is exp(-inf) = 0 without a mask
+    %weight = vector.expf<afn> %delta : vector<8xf32>
+    // the row sum stays a per-lane partial (this lane's key column) until after the loop
+    %old_delta = vector.subf<reassoc|nnan|ninf|nsz> %row_max, %next_max : vector<8xf32>
+    %selected_old_scale = vector.expf<afn> %old_delta : vector<8xf32>
+    %scaled_sum = vector.mulf<reassoc|nnan|ninf|nsz|contract> %row_sum, %selected_old_scale : vector<8xf32>
+    %next_sum = vector.addf<reassoc|nnan|ninf|nsz> %scaled_sum, %weight : vector<8xf32>
     // the f32 weights become an f16 lhs through this wave's 512-byte scratch
     vector.fragment.store<result> %weight, %scratch_view[%c0, %c0] shape [%m, %n] : vector<8xf32>, view<16x16xf16>
     kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
     %probability = vector.fragment.load<lhs> %scratch_view[%c0, %c0] shape [%m, %k_frag] : view<16x16xf16> -> vector<16xf16>
 """
 for c in range(8):
-    # B[k = key][n = channel] is the V tile's own row layout: a dense rhs load
-    K += f"    %v{c} = vector.fragment.load<rhs> %v_tile[%c0, %c{16*c}] shape [%k_frag, %n] : view<16x{ROW}xf16> -> vector<16xf16>\n" if c else \
-         f"    %v0 = vector.fragment.load<rhs> %v_tile[%c0, %c0] shape [%k_frag, %n] : view<16x{ROW}xf16> -> vector<16xf16>\n"
+    # B[k = key][n = channel]: lane n reads channel row 16c + n of the transposed tile, 16 keys contiguous
+    K += f"    %vrow{c} = index.add %lane_column, %c{16*c} : index\n"
+    K += f"    %v_data{c} = vector.load %v_tile[%vrow{c}, %c0] : view<128x{VROW}xf16> -> vector<16xf16>\n"
+    K += f"    %v{c} = vector.fragment<rhs> %v_data{c} shape [%k_frag, %n] : vector<16xf16>\n"
 for c in range(8):
     K += f"    %rescaled{c} = vector.mulf<reassoc|nnan|ninf|nsz|contract> %acc{c}, %selected_old_scale : vector<8xf32>\n"
 for c in range(8):
     K += f"    %next{c} = vector.mma %probability, %v{c}, %rescaled{c} : vector<16xf16>, vector<16xf16>, vector<8xf32>\n"
 K += "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
-if PREFETCH:
-    K += "    scf.yield %next_max_even, %next_sum_even, %next_max_odd, %next_sum_odd, " + ", ".join(f"%next{c}" for c in range(8)) + ", %k_next, %v_next : " + ", ".join(["vector<8xf32>"] * 12) + ", vector<16xf16>, vector<16xf16>\n  }\n"
-else:
-    K += "    scf.yield %next_max_even, %next_sum_even, %next_max_odd, %next_sum_odd, " + ", ".join(f"%next{c}" for c in range(8)) + " : " + ", ".join(["vector<8xf32>"] * 12) + "\n  }\n"
-K += """  %selected_sum = scf.if %lane_group_even -> (vector<8xf32>) {
-    scf.yield %final_sum_even : vector<8xf32>
-  } else {
-    scf.yield %final_sum_odd : vector<8xf32>
-  }
+K += "    scf.yield %next_max, %next_sum, " + ", ".join(f"%next{c}" for c in range(8)) + " : " + ", ".join(["vector<8xf32>"] * 10) + "\n  }\n"
+K += """  // the row sum: the per-lane partials of the 16 lanes of this half
+  %fsh1, %fok1 = kernel.subgroup.shuffle<xor> %final_sum, %i32_1, %i32_32 : vector<8xf32>, i32, i32
+  %fs1 = vector.addf<reassoc|nnan|ninf|nsz> %final_sum, %fsh1 : vector<8xf32>
+  %fsh2, %fok2 = kernel.subgroup.shuffle<xor> %fs1, %i32_2, %i32_32 : vector<8xf32>, i32, i32
+  %fs2 = vector.addf<reassoc|nnan|ninf|nsz> %fs1, %fsh2 : vector<8xf32>
+  %fsh4, %fok4 = kernel.subgroup.shuffle<xor> %fs2, %i32_4, %i32_32 : vector<8xf32>, i32, i32
+  %fs4 = vector.addf<reassoc|nnan|ninf|nsz> %fs2, %fsh4 : vector<8xf32>
+  %fsh8, %fok8 = kernel.subgroup.shuffle<xor> %fs4, %i32_8, %i32_32 : vector<8xf32>, i32, i32
+  %fs8 = vector.addf<reassoc|nnan|ninf|nsz> %fs4, %fsh8 : vector<8xf32>
+  %selected_sum = vector.addf<reassoc|nnan|ninf|nsz> %fs8, %zero_vector : vector<8xf32>
 """
 for c in range(8):
     K += f"  %out{c} = vector.divf<nnan|ninf|nsz|arcp> %final{c}, %selected_sum : vector<8xf32>\n"

@@ -166,3 +166,26 @@ the larger), so 33 rows raster in groups of 3 with no ghosts. Interleaved A/B, 2
 The down GEMM's spread (its 1 MB W tiles are the L2-sensitive case) is the box's noise;
 the other three gain 7-8%, the whole forward 3-4%. `KREA2_M_GROUP` overrides both sides
 for A/Bs.
+
+## Attention round two: what actually stalled the staged kernel
+
+Instruction histogram of the 16-key loop (per tile per wave, 483 instructions around 16
+WMMAs) and four generator toggles, each A/B'd at 4115 tokens (noise < 1%):
+
+| change | kernel ms | TFLOP/s | VGPRs | verdict |
+| --- | ---: | ---: | ---: | --- |
+| shipped this morning (subgroup reduces, V rhs from the tile view) | 40.4 | 10.3 | 226 | baseline |
+| xor-butterfly row max over the 16-lane half, per-lane partial sums | 41.3 | 10.1 | 248 | neutral: kept for the register drop below |
+| V staged transposed [channel][key] in LDS, rhs from two wide loads | 37.0 | 11.3 | 208 | won 1.09x: the V `fragment.load<rhs>` from LDS was 128 two-byte loads per tile |
+| two accumulator chains for the scores; no weight mask | 37.4 | 11.1 | 208 | neutral (mask removal kept) |
+| Q: 4 of 8 fragments hoisted into registers | 28.5 | 14.6 | 240 | won 1.31x: the per-tile Q re-fetch from global was the stall |
+| Q: all 8 hoisted (spills 76 B) | 34.3 | 12.1 | 256 | 1.08x, spills |
+| Q: 4 hoisted + other 4 staged once per wave in LDS, result stage aliased onto the K/V tiles | 20.9 | 20.0 | 240 | **won 1.39x more; shipped** |
+| Q: 0 hoisted, 8 from LDS | 22.1 | 18.8 | 208 | 0.94x of the above |
+| Q: 5 or 6 hoisted | 21.2 / 40.7 | | 248 / 256 | worse; 6 spills |
+
+Cumulative: 40.4 -> 20.9 ms on the kernel (1.93x), 28-block forward 2949 -> 2313 ms;
+attention is 28% of the forward, the four GEMMs 63%. LDS 21760 B per workgroup of four
+waves. The lesson repeats dinov3's: a `fragment.load` from a view whose contiguous axis
+is not the fragment's k axis lowers to per-element loads, on LDS as on global; assemble
+the operand from wide loads yourself.
