@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 from kernel_test import compile_kernel, launch, report, workdir, ROOT
 
 import os
+import subprocess
 STEM = os.environ.get("ATTN", "attention_gqa_lds_f16_wmma")
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 HEADS, KV, D = 48, 12, 128
@@ -49,10 +50,24 @@ def run(tmp: Path, tokens: int, heads=HEADS, kv=KV) -> bool:
 
 
 def main() -> int:
+    global ROOT, STEM, NS, SYM
     ok = True
     with workdir() as tmp:
         for tokens in (100, 4608):
             ok &= run(Path(tmp), tokens)
+        # Exercise the optional 32-key generator without rewriting shipped kernels.
+        project = ROOT
+        generated = Path(tmp) / "generated"
+        (generated / "tools").mkdir(parents=True)
+        (generated / "experiments").mkdir()
+        generator = generated / "tools/gen_attention_lds.py"
+        generator.write_text((project / "tools/gen_attention_lds.py").read_text())
+        STEM = "attention_test_lds32"
+        NS, SYM = "krea2." + STEM, "krea2_" + STEM
+        subprocess.run([sys.executable, str(generator)], check=True,
+                       env=dict(os.environ, ATTN_TILE="32", ATTN_STEM=STEM, ATTN_HOIST="4", ATTN_QLDS="1"), stdout=subprocess.DEVNULL)
+        ROOT = generated
+        ok &= run(Path(tmp), 100)
     return 0 if ok else 1
 
 

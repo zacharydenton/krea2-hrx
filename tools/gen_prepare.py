@@ -5,7 +5,7 @@ s = absmax/7), nibbles packed low first, f32 scale beside -- and differs in how 
 row is formed first:
   norm   : (1 + mod_scale) * rmsnorm(h) * (1 + norm_scale) + mod_shift    (block inputs)
   gated  : sigmoid(gate) * attn                                            (the wo input)
-  swiglu : silu(g) * u                                                     (the down input)
+  plain  : the fused GEMM's silu(g) * u output                             (the down input)
 """
 import re
 from pathlib import Path
@@ -13,7 +13,7 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parent.parent / "kernels"
 
 def stage(d: int, lds: str = "f32") -> str:
-    return f"""  scf.for %t0 = [%lane to %quads step %c256] {{
+    text = f"""  scf.for %t0 = [%lane to %quads step %c256] {{
     %t = index.assume %t0 [lt(%t0, %quads)] : index
     %g = index.div %t, %c64 : index
     %within = index.rem %t, %c64 : index
@@ -46,6 +46,12 @@ def stage(d: int, lds: str = "f32") -> str:
   }}
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
 """
+    if lds == "f16":
+        # H4 / 4 is an average of signed inputs, so no stage can exceed
+        # the input range. The resulting H256 / 256 is rescaled by 16 below.
+        for i in range(4):
+            text = text.replace(f"    view.store %o{i},", f"    %o{i}_scaled = scalar.mulf %o{i}, %quarter : f32\n    view.store %o{i}_scaled,")
+    return text
 
 CHUNK = """    %{p}_lane_step = index.mul %{p}_j, %c256 : index
     %{p}_chunk = index.add %{p}_lane_step, %lane : index
@@ -147,8 +153,9 @@ def kernel(name: str) -> str:
     eps_cfg = f"\nconfig.decl @{ns}.eps : f32\n" if name == "norm" else ""
     eps_get = f"  %eps = config.get @{ns}.eps : f32\n" if name == "norm" else ""
     return f"""// GEMM input preparation ({name}), one workgroup of 256 lanes per token: form the
-// row in f32 in LDS, rotate it by the group-256 Hadamard (H4 (x) H4 (x) H4 (x) H4 as four
-// radix-4 stages of strides 1, 4, 16, 64; the 1/16 folds into the scale), take the
+// row with f32 arithmetic and {lds} LDS storage, rotate it by the group-256 Hadamard
+// (H4 (x) H4 (x) H4 (x) H4 as four
+// radix-4 stages of strides 1, 4, 16, 64), take the
 // token's absmax, and write symmetric int4 (q = round(x / s), s = absmax / 7, nibbles
 // low first) with the f32 scale beside it -- the operand the int4 GEMM consumes.
 //
@@ -176,7 +183,9 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   %zero = scalar.constant 0.0 : f32
   %seven = scalar.constant 7.0 : f32
   %neg_seven = scalar.constant -7.0 : f32
-  %sixteenth = scalar.constant 0.0625 : f32
+  %quarter = scalar.constant 0.25 : f32
+  // f16 stages divide by 4 to bound intermediates; restore the orthonormal scale.
+  %rotation_scale = scalar.constant {16.0 if lds == "f16" else 0.0625} : f32
   %tiny = scalar.constant 1e-30 : f32
   %fifteen = scalar.constant 15 : i32
   %sh4 = scalar.constant 4 : i32
@@ -212,7 +221,7 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
 
   // Hadamard: four radix-4 stages; each lane owns whole quads, so no barrier inside a stage.
 {stage(1, lds)}{stage(4, lds)}{stage(16, lds)}{stage(64, lds)}
-  // absmax (the 1/16 normalisation folded into the scale), quantise, pack 8 nibbles per lane per step
+  // absmax with the remaining rotation scale, quantise, pack 8 nibbles per lane per step
   %amax_v = scf.for %a_j = [%c0 to %chunks_per_lane step %c1](%a_acc = %zero8 : vector<8xf32>) -> (vector<8xf32>) {{
     %a_lane_step = index.mul %a_j, %c256 : index
     %a_chunk = index.add %a_lane_step, %lane : index
@@ -225,10 +234,10 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   }}
   %amax = vector.reduce<maxnumf> %amax_v, %zero : vector<8xf32>, f32
   %row_max0 = kernel.workgroup.reduce<maxnumf> %amax : f32
-  %row_max = scalar.mulf %row_max0, %sixteenth : f32
+  %row_max = scalar.mulf %row_max0, %rotation_scale : f32
   %row_max_safe = scalar.maxnumf %row_max, %tiny : f32
   %s = scalar.divf %row_max_safe, %seven : f32
-  %inv_s = scalar.divf %sixteenth, %s : f32
+  %inv_s = scalar.divf %rotation_scale, %s : f32
   %inv_s8 = vector.splat %inv_s : vector<8xf32>
   scf.for %q_j = [%c0 to %chunks_per_lane step %c1] {{
     %q_lane_step = index.mul %q_j, %c256 : index

@@ -10,23 +10,195 @@ A sibling of [dinov3-loom](https://github.com/zacharydenton/dinov3-loom),
 
 ## What runs where
 
-The 28 blocks (98% of the FLOPs) run in Loom through a small C runtime, ten launches per
-block. Everything around them stays in torch through diffusers' official `Krea2Pipeline`:
-the Qwen3-VL-4B text encoder, the text-fusion stack, embeddings and the final layer, the
-flow-match scheduler, the Qwen-Image VAE. `tools/pipeline.py --backend loom` is the
-whole thing; `--quant w4a4` runs the same arithmetic in torch for comparison; the
-default is the bf16 reference.
+There are two entry points:
+
+- **Standalone C ABI:** `libkrea2_pipeline.so` runs prompt-to-RGB inference without
+  Python, Torch or diffusers. The 28 quantized transformer blocks use Loom; the
+  text encoder, text fusion, embeddings, final layer and VAE use native HIP and
+  hipBLAS. Tokenization runs in C++; the flow-match scheduler updates latents on the GPU.
+- **Python reference/integration:** `tools/pipeline.py --backend loom` uses the
+  same Loom blocks inside diffusers. `--quant w4a4` and the default bf16 backend
+  remain available for comparison.
+
+The standalone path supports the single-image Turbo model, without classifier-free
+guidance, on Linux with a Radeon 8060S (gfx1151). Dimensions must be multiples of
+16 in 64–2048; practical memory and latency depend on resolution. This is a native
+runtime with a C interface, not a port of every auxiliary GPU operation to Loom.
+
+## Standalone build and use
+
+Build dependencies are ROCm HIP/hipBLAS, a C/C++ compiler, nlohmann JSON headers,
+PCRE2, ICU and OpenSSL. Python/Torch are needed to prepare the model bundle and run
+reference tests, but are not runtime dependencies of the native library or CLI.
+The model layout defaults to `~/krea2-models/{krea2_turbo_bf16.safetensors,qwen3-vl-4b,qwen-image/vae}`.
+
+```sh
+# Once, if build/weights has not already been exported:
+env -u LD_LIBRARY_PATH .venv/bin/python tools/export_weights.py
+# Export to a new directory; existing bundles are never overwritten.
+env -u LD_LIBRARY_PATH .venv/bin/python tools/export_native.py
+scripts/build_native.sh
+
+export LOOM_COMPILE="$HOME/code/hrx-system/build-cuda/loom/src/loom/tools/loom-compile/loom-compile"
+env -u LD_LIBRARY_PATH build/krea2-generate \
+  --bundle build/native --prompt "a red fox in the snow" \
+  --width 1024 --height 1024 --steps 8 --seed 0 --out build/native-fox.ppm
+```
+
+The exporter copies all weights into a self-contained bundle (about 15 GB).
+`--models`, `--blocks` and `--out` override preparation paths; `--link-blocks` creates
+smaller development bundles whose weight symlinks must be dereferenced for deployment.
+Export publishes the bundle only after preparation succeeds.
+
+The first request for a new total token count invokes the native `loom-compile`
+executable and caches the GPU binaries inside the bundle. Completed caches have
+source/configuration fingerprints and artifact checksums. A populated cache can be
+used from a read-only bundle without a compiler. New token counts need both a
+compiler and a writable cache directory. Compiler upgrades do not automatically
+invalidate native caches; remove the bundle's `kernels` directory to rebuild them.
+
+Any language with C FFI can use [host/krea2_pipeline.h](host/krea2_pipeline.h):
+create a session, call `krea2_generate` into a caller-owned RGB8 buffer, then destroy
+the session. Component APIs expose tokenization, text encoding, transformer inference
+and VAE decoding. Calls on one session are serialized; destruction must not race a
+call. Errors return a nonzero status and a caller-owned error string.
+[examples/generate.c](examples/generate.c) is compiled as C into
+`build/krea2-c-example`; it generates a 256×256 eight-step image:
+
+```sh
+env -u LD_LIBRARY_PATH build/krea2-c-example build/native "a red fox" build/c-fox.ppm
+```
+
+Deploy the bundle, the shared library, your executable and their native dependencies;
+no Python environment or source checkpoints are needed. RGB encoding belongs to the
+caller; the example CLI writes PPM. Native seeds are repeatable within this backend
+but do not reproduce Torch's RNG. Pass identical packed initial latents through the
+C API when comparing backends.
+
+## gfx1151 attention
+
+The native runtime always uses tuned SA2-style INT4 QK with fp16 PV and fp32
+softmax/accumulation. HIP/hipBLAS preprocessing and Loom attention run entirely
+on the GPU. V is transposed once per block. Below 8,192 tokens, eight waves share
+K/V across two query tiles with alternating LDS slots; longer sequences use four
+waves with explicit prefetch. Kernel selection and GEMM grouping are automatic.
+
+```sh
+scripts/build_native.sh
+export LOOM_COMPILE="$HOME/code/hrx-system/build-cuda/loom/src/loom/tools/loom-compile/loom-compile"
+env -u LD_LIBRARY_PATH build/krea2-generate \
+  --bundle build/native --prompt "a red fox in the snow" \
+  --width 1024 --height 1024 --steps 8 --seed 0 --out build/fox.ppm
+```
+
+Export bundles with the current sources using `tools/export_native.py`. Both the
+native pipeline and Python block wrapper use the same fixed attention path and
+version-2 launch metadata. The supported range is 16–16,896 total tokens. The
+score correction uses `4 * 48 * ceil(tokens/64) * capacity` bytes of GPU workspace.
+INT4 QK changes image bytes relative to FP16 QK; measured quality and timing are
+recorded in [the implementation notes](docs/native-attention.md).
+
+## Native performance
+
+Each native pipeline retains one device copy of block weights across resolution changes. The
+initial upload reads an mmap of the weight file without a full host vector. Block
+modulation is assembled on the GPU from resident tables, and scheduler updates
+stay on the GPU with the real pipeline’s bf16 delta/product rounding.
+
+Sessions reuse temporary GPU buffers, retaining at most 512 MiB of unused buffers
+until session destruction. Active tensors and model weights are additional memory.
+Rotary-position data is cached by image geometry and text-token count. The native
+pipeline keeps its residual stream on the GPU and converts between bf16 and fp16
+there, removing the previous CPU conversions and full-stream transfers per step.
+The earlier buffer/rotary-reuse pass preserved numerical operations. In its
+1024×1024 eight-step comparison, two warm runs averaged 30.89 seconds before and
+27.72 seconds after buffer/rotary reuse
+(about 10% less latency), with identical RGB checksums. See `docs/notes.md` for the
+measurement conditions.
+
+For stage timings, set `KREA2_NATIVE_PROFILE=1` when running the CLI. This adds
+synchronization and prints text encoding, denoising, VAE and transformer-stage
+timings to stderr. Leave it unset for performance comparisons.
+
+```sh
+env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE python3 tools/bench_native.py \
+  --bundle build/native --size 1024 --steps 8 --runs 3
+```
+
+This standard-library-only Python benchmark calls the native C API and prints
+loading time, per-image time and an RGB checksum. The first image includes block
+session preparation; later images reuse the resident session. `--library` selects
+a saved library for comparisons. The native runtime itself still needs no Python.
+
+## Local comparison UI
+
+Run `python tools/compare_web.py` and open `http://localhost:7865`. The UI also
+listens on the local network. Generate a shared-prompt, shared-noise pair with
+the native Loom runtime and the installed ComfyUI INT8 ConvRot setup, inspect
+the images side by side or with a wipe slider, and download the original PNGs.
+History, images and worker logs are saved under `build/comparison-ui/`.
+
+This uses the same local ComfyUI container, models and dependency overlay as
+[the performance comparison](docs/comfyui-performance.md). It starts the
+`amd-strix-halo-comfyui` container when needed and leaves it available for
+subsequent requests. Backends run sequentially in separate processes to release
+model memory between them. Each generation starts fresh, so displayed times
+include first-run preparation and are not warm throughput measurements.
+The Python web server calls Loom's native C API; native inference still has no
+Torch dependency. Precision, text encoding and sampler arithmetic differ between
+the pipelines even though their initial float32 noise is identical.
+
+## Validation and Python integration
+
+`scripts/test.sh --quick` checks the host, Python API and kernels, including failure
+cleanup, both tuned attention kernels against the quantization oracle, and the
+FP16 research reference. `scripts/test.sh` also checks
+the full block stack using `build/fixture_step0.pt`, exported weights and the model files.
+`scripts/test.sh --native` additionally builds and compares the standalone tokenizer,
+text encoder, outer transformer layers, full transformer, tiled VAE and scheduler
+against the installed Python references. It requires `build/native`,
+`build/native-deploy` and the models. For the focused scheduler, modulation and
+weight-reuse checks without loading a Torch model, run
+`env -u LD_LIBRARY_PATH .venv/bin/python tests/test_native_regressions.py` after
+`scripts/build_native.sh`.
+
+After changes to the block host, `scripts/build_host.sh` rebuilds `libkrea2.so` and
+the kernel test runner. The block API uses ABI 2; the full pipeline API uses ABI 1.
+`Krea2Blocks` builds or reuses a fingerprinted kernel bundle automatically.
+Both builders choose among 4, 3 and 2 to minimize padded GEMM tile rows. Launch metadata fixes the choice for each session.
+
+The Python pipeline processes batches sample by sample, uses each prompt's padding
+mask, recreates the resident block session when token counts change, preserves fp32
+normalization weights and enables tiled VAE decoding.
 
 ## Correctness
 
 `reference/krea2_ref.py` is diffusers' model transcribed onto the ComfyUI checkpoint
-names, validated bit-for-bit against diffusers at toy size. Every kernel is tested
-against it: the three prepare kernels reproduce its int4 codes exactly, the attention
-kernel matches torch's to cosine 0.99999996 at the real sequence length, and
+names, validated bit-for-bit against diffusers at toy size. The prepare kernels are
+checked against its quantization, allowing occasional one-code differences from
+fp16 preparation rounding. The tuned attention kernels match the smoothed INT4 Torch oracle above
+0.9999 cosine similarity and produce identical outputs to each other.
 `tests/test_blocks.py` runs the native blocks on a fixture captured from a real
-denoising step against the reference in both W4A4 and bf16.
+denoising step against `reference/loom_ref.py` (W4A4 projections, smoothed INT4 attention, native fp16 storage and
+fp32 fused operations) and the original bf16 model. Every block is checked on
+identical inputs with the original 0.99 update-cosine threshold, and composing
+individual native blocks must exactly reproduce a complete native forward. The
+bf16 trajectory comparison includes quantization and fusion/storage differences.
+
+The standalone component checks measure text-encoder cosine 0.99986, text-fusion
+cosine 0.99998 and VAE RGB mean absolute errors around 1/255 at tested sizes.
+Before the fixed INT4-attention path, the full independent quantized transformer
+reached 0.98455 cosine. The earlier scheduler exactness claim used CPU sigmas
+and did not test the real pipeline’s CUDA rounding. The corrected test uses CUDA
+sigmas: all 5,050 steps across step counts 1–100 match exactly, as does a
+64×64 two-step image driven by the native components. See
+`docs/notes.md` for thresholds and the remaining image-quality measurement.
 
 ## Results so far (1024x1024, 8 Turbo steps, seed 0)
+
+These are historical measurements from before the manual loader was corrected to
+preserve fp32 normalization weights. Quality figures need a new baseline with the
+corrected loader; the scripts now propagate failures before reporting completion.
 
 | | per forward of the 28 blocks | latent PSNR vs bf16 | image PSNR vs bf16 |
 | --- | ---: | ---: | ---: |

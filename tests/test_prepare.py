@@ -69,6 +69,12 @@ def main() -> int:
         inter = 16384
         x = (rng.standard_normal((tokens, inter)) * 0.5).astype(np.float16)
         ok &= check("plain", tmp, tokens, inter, x.astype(np.float32), [("in_f16", x)], {})
+        # Signed Hadamard basis rows exercise the largest intermediates; constants
+        # previously overflowed even though their normalized rotation fits in f16.
+        h256 = R.hadamard(256).numpy()
+        x = np.stack([np.full(inter, 5000), np.tile(h256[0] * 16 * 65504, inter // 256),
+                      np.full(inter, -65504), np.zeros(inter)]).astype(np.float16)
+        ok &= check("plain", tmp, len(x), inter, x.astype(np.float32), [("in_f16", x)], {})
     return 0 if ok else 1
 
 

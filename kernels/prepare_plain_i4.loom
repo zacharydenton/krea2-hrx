@@ -1,6 +1,7 @@
 // GEMM input preparation (plain), one workgroup of 256 lanes per token: form the
-// row in f32 in LDS, rotate it by the group-256 Hadamard (H4 (x) H4 (x) H4 (x) H4 as four
-// radix-4 stages of strides 1, 4, 16, 64; the 1/16 folds into the scale), take the
+// row with f32 arithmetic and f16 LDS storage, rotate it by the group-256 Hadamard
+// (H4 (x) H4 (x) H4 (x) H4 as four
+// radix-4 stages of strides 1, 4, 16, 64), take the
 // token's absmax, and write symmetric int4 (q = round(x / s), s = absmax / 7, nibbles
 // low first) with the f32 scale beside it -- the operand the int4 GEMM consumes.
 //
@@ -28,7 +29,9 @@ kernel.def target(@krea2_prepare_plain_i4_gfx11) export("krea2_prepare_plain_i4"
   %zero = scalar.constant 0.0 : f32
   %seven = scalar.constant 7.0 : f32
   %neg_seven = scalar.constant -7.0 : f32
-  %sixteenth = scalar.constant 0.0625 : f32
+  %quarter = scalar.constant 0.25 : f32
+  // f16 stages divide by 4 to bound intermediates; restore the orthonormal scale.
+  %rotation_scale = scalar.constant 16.0 : f32
   %tiny = scalar.constant 1.0000000000000001e-30 : f32
   %fifteen = scalar.constant 15 : i32
   %sh4 = scalar.constant 4 : i32
@@ -111,14 +114,18 @@ kernel.def target(@krea2_prepare_plain_i4_gfx11) export("krea2_prepare_plain_i4"
     %o1 = scalar.subf %s01, %d23 : f32
     %o2 = scalar.addf %d01, %s23 : f32
     %o3 = scalar.subf %s23, %d01 : f32
-    %o0_h = scalar.fptrunc %o0 : f32 to f16
-    view.store %o0_h, %x_view[%base] : f16, view<[%width]xf16>
-    %o1_h = scalar.fptrunc %o1 : f32 to f16
-    view.store %o1_h, %x_view[%i1] : f16, view<[%width]xf16>
-    %o2_h = scalar.fptrunc %o2 : f32 to f16
-    view.store %o2_h, %x_view[%i2] : f16, view<[%width]xf16>
-    %o3_h = scalar.fptrunc %o3 : f32 to f16
-    view.store %o3_h, %x_view[%i3] : f16, view<[%width]xf16>
+    %o0_scaled = scalar.mulf %o0, %quarter : f32
+    %o0_scaled_h = scalar.fptrunc %o0_scaled : f32 to f16
+    view.store %o0_scaled_h, %x_view[%base] : f16, view<[%width]xf16>
+    %o1_scaled = scalar.mulf %o1, %quarter : f32
+    %o1_scaled_h = scalar.fptrunc %o1_scaled : f32 to f16
+    view.store %o1_scaled_h, %x_view[%i1] : f16, view<[%width]xf16>
+    %o2_scaled = scalar.mulf %o2, %quarter : f32
+    %o2_scaled_h = scalar.fptrunc %o2_scaled : f32 to f16
+    view.store %o2_scaled_h, %x_view[%i2] : f16, view<[%width]xf16>
+    %o3_scaled = scalar.mulf %o3, %quarter : f32
+    %o3_scaled_h = scalar.fptrunc %o3_scaled : f32 to f16
+    view.store %o3_scaled_h, %x_view[%i3] : f16, view<[%width]xf16>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   scf.for %t_j = [%c0 to %quads_per_lane step %c1] {
@@ -153,14 +160,18 @@ kernel.def target(@krea2_prepare_plain_i4_gfx11) export("krea2_prepare_plain_i4"
     %o1 = scalar.subf %s01, %d23 : f32
     %o2 = scalar.addf %d01, %s23 : f32
     %o3 = scalar.subf %s23, %d01 : f32
-    %o0_h = scalar.fptrunc %o0 : f32 to f16
-    view.store %o0_h, %x_view[%base] : f16, view<[%width]xf16>
-    %o1_h = scalar.fptrunc %o1 : f32 to f16
-    view.store %o1_h, %x_view[%i1] : f16, view<[%width]xf16>
-    %o2_h = scalar.fptrunc %o2 : f32 to f16
-    view.store %o2_h, %x_view[%i2] : f16, view<[%width]xf16>
-    %o3_h = scalar.fptrunc %o3 : f32 to f16
-    view.store %o3_h, %x_view[%i3] : f16, view<[%width]xf16>
+    %o0_scaled = scalar.mulf %o0, %quarter : f32
+    %o0_scaled_h = scalar.fptrunc %o0_scaled : f32 to f16
+    view.store %o0_scaled_h, %x_view[%base] : f16, view<[%width]xf16>
+    %o1_scaled = scalar.mulf %o1, %quarter : f32
+    %o1_scaled_h = scalar.fptrunc %o1_scaled : f32 to f16
+    view.store %o1_scaled_h, %x_view[%i1] : f16, view<[%width]xf16>
+    %o2_scaled = scalar.mulf %o2, %quarter : f32
+    %o2_scaled_h = scalar.fptrunc %o2_scaled : f32 to f16
+    view.store %o2_scaled_h, %x_view[%i2] : f16, view<[%width]xf16>
+    %o3_scaled = scalar.mulf %o3, %quarter : f32
+    %o3_scaled_h = scalar.fptrunc %o3_scaled : f32 to f16
+    view.store %o3_scaled_h, %x_view[%i3] : f16, view<[%width]xf16>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   scf.for %t_j = [%c0 to %quads_per_lane step %c1] {
@@ -195,14 +206,18 @@ kernel.def target(@krea2_prepare_plain_i4_gfx11) export("krea2_prepare_plain_i4"
     %o1 = scalar.subf %s01, %d23 : f32
     %o2 = scalar.addf %d01, %s23 : f32
     %o3 = scalar.subf %s23, %d01 : f32
-    %o0_h = scalar.fptrunc %o0 : f32 to f16
-    view.store %o0_h, %x_view[%base] : f16, view<[%width]xf16>
-    %o1_h = scalar.fptrunc %o1 : f32 to f16
-    view.store %o1_h, %x_view[%i1] : f16, view<[%width]xf16>
-    %o2_h = scalar.fptrunc %o2 : f32 to f16
-    view.store %o2_h, %x_view[%i2] : f16, view<[%width]xf16>
-    %o3_h = scalar.fptrunc %o3 : f32 to f16
-    view.store %o3_h, %x_view[%i3] : f16, view<[%width]xf16>
+    %o0_scaled = scalar.mulf %o0, %quarter : f32
+    %o0_scaled_h = scalar.fptrunc %o0_scaled : f32 to f16
+    view.store %o0_scaled_h, %x_view[%base] : f16, view<[%width]xf16>
+    %o1_scaled = scalar.mulf %o1, %quarter : f32
+    %o1_scaled_h = scalar.fptrunc %o1_scaled : f32 to f16
+    view.store %o1_scaled_h, %x_view[%i1] : f16, view<[%width]xf16>
+    %o2_scaled = scalar.mulf %o2, %quarter : f32
+    %o2_scaled_h = scalar.fptrunc %o2_scaled : f32 to f16
+    view.store %o2_scaled_h, %x_view[%i2] : f16, view<[%width]xf16>
+    %o3_scaled = scalar.mulf %o3, %quarter : f32
+    %o3_scaled_h = scalar.fptrunc %o3_scaled : f32 to f16
+    view.store %o3_scaled_h, %x_view[%i3] : f16, view<[%width]xf16>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   scf.for %t_j = [%c0 to %quads_per_lane step %c1] {
@@ -237,18 +252,22 @@ kernel.def target(@krea2_prepare_plain_i4_gfx11) export("krea2_prepare_plain_i4"
     %o1 = scalar.subf %s01, %d23 : f32
     %o2 = scalar.addf %d01, %s23 : f32
     %o3 = scalar.subf %s23, %d01 : f32
-    %o0_h = scalar.fptrunc %o0 : f32 to f16
-    view.store %o0_h, %x_view[%base] : f16, view<[%width]xf16>
-    %o1_h = scalar.fptrunc %o1 : f32 to f16
-    view.store %o1_h, %x_view[%i1] : f16, view<[%width]xf16>
-    %o2_h = scalar.fptrunc %o2 : f32 to f16
-    view.store %o2_h, %x_view[%i2] : f16, view<[%width]xf16>
-    %o3_h = scalar.fptrunc %o3 : f32 to f16
-    view.store %o3_h, %x_view[%i3] : f16, view<[%width]xf16>
+    %o0_scaled = scalar.mulf %o0, %quarter : f32
+    %o0_scaled_h = scalar.fptrunc %o0_scaled : f32 to f16
+    view.store %o0_scaled_h, %x_view[%base] : f16, view<[%width]xf16>
+    %o1_scaled = scalar.mulf %o1, %quarter : f32
+    %o1_scaled_h = scalar.fptrunc %o1_scaled : f32 to f16
+    view.store %o1_scaled_h, %x_view[%i1] : f16, view<[%width]xf16>
+    %o2_scaled = scalar.mulf %o2, %quarter : f32
+    %o2_scaled_h = scalar.fptrunc %o2_scaled : f32 to f16
+    view.store %o2_scaled_h, %x_view[%i2] : f16, view<[%width]xf16>
+    %o3_scaled = scalar.mulf %o3, %quarter : f32
+    %o3_scaled_h = scalar.fptrunc %o3_scaled : f32 to f16
+    view.store %o3_scaled_h, %x_view[%i3] : f16, view<[%width]xf16>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
 
-  // absmax (the 1/16 normalisation folded into the scale), quantise, pack 8 nibbles per lane per step
+  // absmax with the remaining rotation scale, quantise, pack 8 nibbles per lane per step
   %amax_v = scf.for %a_j = [%c0 to %chunks_per_lane step %c1](%a_acc = %zero8 : vector<8xf32>) -> (vector<8xf32>) {
     %a_lane_step = index.mul %a_j, %c256 : index
     %a_chunk = index.add %a_lane_step, %lane : index
@@ -262,10 +281,10 @@ kernel.def target(@krea2_prepare_plain_i4_gfx11) export("krea2_prepare_plain_i4"
   }
   %amax = vector.reduce<maxnumf> %amax_v, %zero : vector<8xf32>, f32
   %row_max0 = kernel.workgroup.reduce<maxnumf> %amax : f32
-  %row_max = scalar.mulf %row_max0, %sixteenth : f32
+  %row_max = scalar.mulf %row_max0, %rotation_scale : f32
   %row_max_safe = scalar.maxnumf %row_max, %tiny : f32
   %s = scalar.divf %row_max_safe, %seven : f32
-  %inv_s = scalar.divf %sixteenth, %s : f32
+  %inv_s = scalar.divf %rotation_scale, %s : f32
   %inv_s8 = vector.splat %inv_s : vector<8xf32>
   scf.for %q_j = [%c0 to %chunks_per_lane step %c1] {
     %q_lane_step = index.mul %q_j, %c256 : index

@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 *.hsaco
 *.log
+
+# Historical workflow marker names
+/build_*.done

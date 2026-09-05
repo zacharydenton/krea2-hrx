@@ -13,6 +13,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -21,6 +25,11 @@
 #include <vector>
 
 #include "krea2.h"
+#include "sage.h"
+#include "krea2_device.h"
+#include <hip/hip_bfloat16.h>
+#include <hip/hip_fp16.h>
+#include <memory>
 
 namespace {
 
@@ -33,6 +42,15 @@ constexpr int THREADS = 256;
     throw std::runtime_error(std::string(#call) + ": " + hipGetErrorString(e_)); } while (0)
 
 struct Span { size_t offset, bytes; };
+
+__global__ void bf16_to_f16(const hip_bfloat16 *input, __half *output, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) output[i] = __float2half(float(input[i]));
+}
+__global__ void f16_to_bf16(const __half *input, hip_bfloat16 *output, size_t count) {
+    size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) output[i] = hip_bfloat16(__half2float(input[i]));
+}
 
 std::map<std::string, Span> read_manifest(const std::string &path) {
     std::map<std::string, Span> spans;
@@ -47,14 +65,39 @@ std::map<std::string, Span> read_manifest(const std::string &path) {
     return spans;
 }
 
-std::vector<char> read_file(const std::string &path) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in) throw std::runtime_error("cannot read " + path);
-    std::vector<char> buffer(in.tellg());
-    in.seekg(0);
-    in.read(buffer.data(), buffer.size());
-    return buffer;
+} // namespace
+
+struct krea2_weights {
+    std::map<std::string, Span> spans;
+    std::shared_ptr<void> storage;
+    explicit krea2_weights(const std::string &directory) {
+        spans = read_manifest(directory + "/manifest.txt");
+        const auto path = directory + "/weights.bin";
+        int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) throw std::runtime_error("cannot read " + path);
+        struct File { int fd; ~File() { close(fd); } } file{fd};
+        struct stat info;
+        if (fstat(fd, &info) || info.st_size <= 0)
+            throw std::runtime_error("invalid weight file: " + path);
+        size_t bytes = size_t(info.st_size);
+        for (const auto &[name, span] : spans)
+            if (span.offset > bytes || span.bytes > bytes - span.offset)
+                throw std::runtime_error("manifest span '" + name + "' runs past " + path);
+        void *mapped = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (mapped == MAP_FAILED) throw std::runtime_error("cannot map " + path);
+        struct Mapping { void *p; size_t bytes; ~Mapping() { munmap(p, bytes); } } mapping{mapped, bytes};
+        void *device = nullptr;
+        HIP_CHECK(hipMalloc(&device, bytes));
+        storage = std::shared_ptr<void>(device, [](void *p) { (void)hipFree(p); });
+        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)device, mapped, bytes));
+    }
+};
+
+std::shared_ptr<krea2_weights> krea2_load_weights(const std::string &directory) {
+    return std::make_shared<krea2_weights>(directory);
 }
+
+namespace {
 
 struct Kernel {
     hipModule_t module = nullptr; hipFunction_t function = nullptr;
@@ -72,25 +115,27 @@ struct KernArgs {
 
 class Session {
 public:
-    Session(const std::string &weights_dir, const std::string &kernels_dir, int tokens, int layers)
+    Session(const std::string &weights_dir, const std::string &kernels_dir, int tokens, int layers, std::shared_ptr<krea2_weights> weights = {})
         : tokens_(tokens), layers_(layers) {
-        if (tokens < 16 || tokens > 65536) throw std::invalid_argument("tokens must be 16..65536");
+        try {
+        if (tokens < 16 || tokens > 16896) throw std::invalid_argument("tokens must be 16..16896");
         if (layers < 1 || layers > 28) throw std::invalid_argument("layers must be 1..28");
         HIP_CHECK(hipInit(0));
         capacity_ = std::max<size_t>((tokens + 16 + 31) / 32 * 32, (tokens + 63) / 64 * 64);   // tokens+16 headroom, whole 64-key blocks
-        auto spans = read_manifest(weights_dir + "/manifest.txt");
-        auto blob = read_file(weights_dir + "/weights.bin");
-        for (const auto &e : spans)
-            if (e.second.offset + e.second.bytes > blob.size())
-                throw std::runtime_error("manifest span '" + e.first + "' runs past weights.bin");
-        HIP_CHECK(hipMalloc(&weights_, blob.size()));
-        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)weights_, blob.data(), blob.size()));
+        std::ifstream metadata(kernels_dir + "/launch.txt");
+        unsigned version = 0, compiled_tokens = 0; size_t compiled_capacity = 0;
+        if (!(metadata >> version >> compiled_tokens >> m_group_ >> compiled_capacity >> attention_waves_) ||
+            version != 2 || compiled_tokens != unsigned(tokens) || compiled_capacity != capacity_ ||
+            m_group_ < 2 || m_group_ > 4 || attention_waves_ != (tokens < 8192 ? 8u : 4u))
+            throw std::invalid_argument("invalid kernel launch metadata; rebuild with scripts/build_kernels.py");
+        weights_ = weights ? std::move(weights) : krea2_load_weights(weights_dir);
+        const auto &spans = weights_->spans;
         auto need = [&](const std::string &name, size_t bytes) {
             auto it = spans.find(name);
             if (it == spans.end()) throw std::runtime_error("missing tensor " + name);
             if (it->second.bytes != bytes)
                 throw std::runtime_error("tensor " + name + " has " + std::to_string(it->second.bytes) + " bytes, expected " + std::to_string(bytes));
-            return (char *)weights_ + it->second.offset;
+            return (char *)weights_->storage.get() + it->second.offset;
         };
         for (int i = 0; i < layers; ++i) {
             std::string p = "blocks." + std::to_string(i);
@@ -112,7 +157,9 @@ public:
         load(k_gemm_wo_, "gemm_wo", "krea2_gemm_i4_resid");
         load(k_gemm_down_, "gemm_down", "krea2_gemm_i4_resid");
         load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
-        load(k_attention_, "attention", "krea2_attention_gqa_lds_f16_wmma");
+        load(k_attention_, "attention", attention_waves_ == 8 ?
+             "krea2_attention_sage_i4_fast" : "krea2_attention_sage_i4_fast_prefetch");
+        sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_));
         const size_t T = capacity_;
         HIP_CHECK(hipMalloc(&x_, T * HIDDEN * 2));
         HIP_CHECK(hipMalloc(&a_q_, T * INTER / 2));            // the widest prepared operand (down's K = 16384)
@@ -131,32 +178,61 @@ public:
         HIP_CHECK(hipMalloc(&sin_, T * HEAD_DIM * 4));
         HIP_CHECK(hipMemset(fused_, 0, T * QKVG * 2));        // headroom rows stay zero
         HIP_CHECK(hipMemset(x_, 0, T * HIDDEN * 2));
+        } catch (...) {
+            release();
+            throw;
+        }
     }
-    ~Session() {
-        for (void *p : {x_, a_q_, a_s_, fused_, q_, k_, v_, attn_, gu_, mods_, cos_, sin_, weights_}) if (p) (void)hipFree(p);
+    ~Session() { release(); }
+
+private:
+    void release() noexcept {
+        for (void *p : {x_, a_q_, a_s_, fused_, q_, k_, v_, attn_, gu_, mods_, cos_, sin_}) if (p) (void)hipFree(p);
         for (Kernel *k : {&k_prep_norm_, &k_prep_gated_, &k_prep_swiglu_, &k_gemm_qkvg_, &k_gemm_gu_, &k_gemm_wo_, &k_gemm_down_, &k_rope_, &k_attention_})
             if (k->module) (void)hipModuleUnload(k->module);
     }
 
-    void run(uint16_t *x, size_t x_elements, const float *mods, size_t mods_elements, const float *cos, const float *sin, size_t rope_elements) {
+public:
+    void run(uint16_t *x, size_t x_elements, const float *mods, size_t mods_elements, const float *cos, const float *sin, size_t rope_elements,
+             int first_block = 0, int block_count = -1, bool device_bf16 = false) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (first_block < 0 || first_block >= layers_)
+            throw std::invalid_argument("block range must be within the loaded layers");
+        if (block_count == -1) block_count = layers_ - first_block;
+        if (block_count < 1 || block_count > layers_ - first_block)
+            throw std::invalid_argument("block range must be within the loaded layers");
         const size_t T = tokens_;
         if (x_elements != T * HIDDEN) throw std::invalid_argument("x has " + std::to_string(x_elements) + " elements, expected " + std::to_string(T * HIDDEN));
         if (mods_elements != size_t(layers_) * 6 * HIDDEN) throw std::invalid_argument("mods has the wrong element count");
         if (rope_elements != T * HEAD_DIM) throw std::invalid_argument("cos/sin have the wrong element count");
-        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)x_, x, T * HIDDEN * 2));
-        HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)mods_, mods, mods_elements * 4));
+        if (device_bf16) {
+            bf16_to_f16<<<(x_elements + 255) / 256, 256>>>((const hip_bfloat16 *)x, (__half *)x_, x_elements);
+            HIP_CHECK(hipGetLastError());
+        } else {
+            HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)x_, x, T * HIDDEN * 2));
+        }
+        const float *device_mods = mods;
+        if (!device_bf16) {
+            HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)mods_, mods, mods_elements * 4));
+            device_mods = (const float *)mods_;
+        }
         HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)cos_, cos, rope_elements * 4));
         HIP_CHECK(hipMemcpyHtoD((hipDeviceptr_t)sin_, sin, rope_elements * 4));
-        for (int i = 0; i < layers_; ++i) block(i);
-        HIP_CHECK(hipDeviceSynchronize());
-        HIP_CHECK(hipMemcpyDtoH(x, (hipDeviceptr_t)x_, T * HIDDEN * 2));
+        for (int i = first_block; i < first_block + block_count; ++i) block(i, device_mods);
+        if (device_bf16) {
+            f16_to_bf16<<<(x_elements + 255) / 256, 256>>>((const __half *)x_, (hip_bfloat16 *)x, x_elements);
+            HIP_CHECK(hipGetLastError());
+            HIP_CHECK(hipDeviceSynchronize());
+        } else {
+            HIP_CHECK(hipDeviceSynchronize());
+            HIP_CHECK(hipMemcpyDtoH(x, (hipDeviceptr_t)x_, T * HIDDEN * 2));
+        }
         if (profile) {
             double total = 0; for (auto &e : stage_us) total += e.second;
             std::vector<std::pair<double, std::string>> rows;
             for (auto &e : stage_us) rows.push_back({e.second, e.first});
             std::sort(rows.rbegin(), rows.rend());
-            fprintf(stderr, "stage profile over %d block(s), %zu tokens:\n", layers_, T);
+            fprintf(stderr, "stage profile over %d block(s), %zu tokens:\n", block_count, T);
             for (auto &r : rows) fprintf(stderr, "  %-24s %9.3f ms  %5.1f%%\n", r.second.c_str(), r.first / 1000.0, 100.0 * r.first / total);
             fprintf(stderr, "  %-24s %9.3f ms\n", "total", total / 1000.0);
             stage_us.clear();
@@ -179,16 +255,7 @@ private:
             stage_us[stage] += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
         }
     }
-    // m-tiles per raster group: of 4, 3, 2 the one that pads the tile rows least (ties to the
-    // larger); scripts/build_kernels.py compiles the GEMMs with the same rule for this token count.
-    static unsigned gemm_m_group(size_t m) {
-        if (const char* e = std::getenv("KREA2_M_GROUP")) return unsigned(std::atoi(e));   // A/B override, mirrored in the builder
-        const size_t tiles = (m + 127) / 128;
-        unsigned best = 4; size_t best_pad = (tiles + 3) / 4 * 4;
-        for (unsigned g : {3u, 2u}) { const size_t pad = (tiles + g - 1) / g * g; if (pad < best_pad) { best = g; best_pad = pad; } }
-        return best;
-    }
-    static unsigned gemm_grid_y(size_t m) { const unsigned g = gemm_m_group(m); return unsigned(((m + 127) / 128 + g - 1) / g * g); }
+    unsigned gemm_grid_y(size_t m) const { return unsigned(((m + 127) / 128 + m_group_ - 1) / m_group_ * m_group_); }
 
     void gemm(Kernel &k, const char *stage, char *w_q, char *w_s, int n, void *out, const float *gate) {
         KernArgs a;
@@ -198,9 +265,9 @@ private:
         launch(k, stage, unsigned(n / 128), gemm_grid_y(tokens_), THREADS, a);
     }
 
-    void block(int i) {
+    void block(int i, const float *mods) {
         const Block &b = blocks_[i];
-        const float *mod = (const float *)mods_ + size_t(i) * 6 * HIDDEN;
+        const float *mod = mods + size_t(i) * 6 * HIDDEN;
         const float *prescale = mod, *preshift = mod + HIDDEN, *pregate = mod + 2 * HIDDEN;
         const float *postscale = mod + 3 * HIDDEN, *postshift = mod + 4 * HIDDEN, *postgate = mod + 5 * HIDDEN;
         const unsigned T = unsigned(tokens_);
@@ -209,8 +276,20 @@ private:
         gemm(k_gemm_qkvg_, "gemm qkv|gate", b.qkvg_q, b.qkvg_s, QKVG, fused_, nullptr);
         { KernArgs a; a.scalar_i32(T); a.pointer(fused_); a.pointer(b.qnorm); a.pointer(b.knorm); a.pointer(cos_); a.pointer(sin_); a.pointer(q_); a.pointer(k_); a.pointer(v_);
           launch(k_rope_, "qk norm + rope", T, 1, THREADS, a); }
-        { KernArgs a; a.scalar_i32(T); a.scalar_i32(KV_HEADS); a.pointer(q_); a.pointer(k_); a.pointer(v_); a.pointer(attn_);
-          launch(k_attention_, "attention", unsigned((T + 15) / 16), KV_HEADS, 128, a); }
+        {
+          auto start = std::chrono::steady_clock::now();
+          if (profile) { HIP_CHECK(hipDeviceSynchronize()); start = std::chrono::steady_clock::now(); }
+          sage_->run(q_, k_, v_);
+          if (profile) {
+            HIP_CHECK(hipDeviceSynchronize());
+            stage_us["SA2 preprocessing"] += std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now()-start).count();
+          }
+          KernArgs a; a.scalar_i32(T); a.scalar_i32(KV_HEADS);
+          a.pointer(sage_->q4); a.pointer(sage_->k4); a.pointer(sage_->v_transposed);
+          a.pointer(sage_->qscale); a.pointer(sage_->kscale); a.pointer(sage_->correction); a.pointer(attn_);
+          unsigned rows = 16 * (attention_waves_ / 4);
+          launch(k_attention_, "SA2 attention", unsigned((T + rows - 1) / rows), KV_HEADS, 32 * attention_waves_, a);
+        }
         { KernArgs a; a.scalar_i32(T); a.pointer(attn_); a.pointer((char *)fused_ + GATE_OFFSET * 2); a.pointer(a_q_); a.pointer(a_s_);
           launch(k_prep_gated_, "prepare gated", T, 1, THREADS, a); }
         gemm(k_gemm_wo_, "gemm wo + residual", b.wo_q, b.wo_s, HIDDEN, x_, pregate);
@@ -224,9 +303,12 @@ private:
 
     int tokens_, layers_;
     size_t capacity_ = 0;
+    unsigned m_group_ = 0, attention_waves_ = 4;
     std::mutex mutex_;
     std::vector<Block> blocks_;
-    void *weights_ = nullptr, *x_ = nullptr, *a_q_ = nullptr, *a_s_ = nullptr, *fused_ = nullptr, *q_ = nullptr, *k_ = nullptr, *v_ = nullptr,
+    std::unique_ptr<SagePreparation> sage_;
+    std::shared_ptr<krea2_weights> weights_;
+    void *x_ = nullptr, *a_q_ = nullptr, *a_s_ = nullptr, *fused_ = nullptr, *q_ = nullptr, *k_ = nullptr, *v_ = nullptr,
          *attn_ = nullptr, *gu_ = nullptr, *mods_ = nullptr, *cos_ = nullptr, *sin_ = nullptr;
     Kernel k_prep_norm_, k_prep_gated_, k_prep_swiglu_, k_gemm_qkvg_, k_gemm_gu_, k_gemm_wo_, k_gemm_down_, k_rope_, k_attention_;
 };
@@ -237,7 +319,23 @@ void write_error(char *error, size_t capacity, const char *message) noexcept {
 
 }  // namespace
 
-struct krea2_session { Session value; krea2_session(const char *w, const char *k, int t, int l) : value(w, k, t, l) {} };
+struct krea2_session {
+    Session value;
+    krea2_session(const std::string &w, const std::string &k, int t, int l,
+                  std::shared_ptr<krea2_weights> weights = {}) : value(w, k, t, l, std::move(weights)) {}
+};
+krea2_session *krea2_create_shared(const std::shared_ptr<krea2_weights> &weights,
+                                    const std::string &kernels, int tokens, int layers) {
+    if (!weights) throw std::invalid_argument("missing shared block weights");
+    return new krea2_session("", kernels, tokens, layers, weights);
+}
+
+void krea2_run_device_bf16(krea2_session *s, uint16_t *x, size_t elements,
+                           const float *mods, size_t mods_elements,
+                           const float *cos, const float *sin, size_t rope_elements) {
+    if (!s || !x || !mods || !cos || !sin) throw std::invalid_argument("null device bridge argument");
+    s->value.run(x, elements, mods, mods_elements, cos, sin, rope_elements, 0, -1, true);
+}
 
 extern "C" uint32_t krea2_abi_version(void) { return KREA2_ABI_VERSION; }
 extern "C" void krea2_destroy(krea2_session *s) { delete s; }
@@ -258,10 +356,16 @@ extern "C" int krea2_create(const char *weights_dir, const char *kernels_dir, in
 
 extern "C" int krea2_run(krea2_session *s, uint16_t *x, size_t x_elements, const float *mods, size_t mods_elements,
                          const float *cos, const float *sin, size_t rope_elements, char *error, size_t cap) {
+    return krea2_run_range(s, 0, -1, x, x_elements, mods, mods_elements, cos, sin, rope_elements, error, cap);
+}
+
+extern "C" int krea2_run_range(krea2_session *s, int first_block, int block_count,
+                               uint16_t *x, size_t x_elements, const float *mods, size_t mods_elements,
+                               const float *cos, const float *sin, size_t rope_elements, char *error, size_t cap) {
     if (error && cap) error[0] = 0;
     try {
         if (!s || !x || !mods || !cos || !sin) throw std::invalid_argument("null argument");
-        s->value.run(x, x_elements, mods, mods_elements, cos, sin, rope_elements);
+        s->value.run(x, x_elements, mods, mods_elements, cos, sin, rope_elements, first_block, block_count);
         return KREA2_OK;
     } catch (const std::invalid_argument &e) { write_error(error, cap, e.what()); return KREA2_INVALID_ARGUMENT; }
       catch (const std::exception &e) { write_error(error, cap, e.what()); return KREA2_ERROR; }

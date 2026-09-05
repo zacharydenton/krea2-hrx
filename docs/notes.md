@@ -1,9 +1,10 @@
 # krea2-loom notes
 
-Krea 2 Turbo's 28 transformer blocks (12.9B single-stream DiT, width 6144, 48/12 heads
-of 128, SwiGLU 16384) in Loom on the Radeon 8060S, W4A4 ConvRot. Text fusion, the
-embeddings, the final layer, the text encoder (Qwen3-VL-4B), the scheduler and the VAE
-stay in torch through diffusers' official Krea2Pipeline; only `blocks_forward` moves.
+Development history for Krea 2 Turbo on the Radeon 8060S: 28 transformer blocks,
+12.9B single-stream DiT, width 6144, 48/12 heads of 128, SwiGLU 16384, W4A4 ConvRot.
+The early measurements below used Torch outside the Loom blocks. The current
+native pipeline also implements text encoding, embeddings, scheduler and VAE
+through the C ABI; see the native sections below and the README.
 
 ## Decisions
 
@@ -266,3 +267,238 @@ Kept: exact, 270 MB per block less traffic, and silu on the unrounded f32 produc
 Measurement note for this evening: another session's GPU job inflated every stage of the
 block profile by 1.3-1.7x (attention, unchanged, read 705-847 ms against 562 on a calm
 box); the interleaved kernel A/Bs are the only numbers that survived that.
+
+## Review corrections and validation
+
+Kernel bundles now include source/configuration fingerprints and immutable launch
+metadata. The native host uses that metadata instead of rereading the raster-group
+environment variable. ABI 2 also exposes a contiguous block range for verification.
+Constructor failures release allocations and modules, and the host build includes
+the test runner.
+
+Plain preparation divides each radix-4 stage by four before storing fp16 values and
+restores the orthonormal factor in the quantization scale. This bounds intermediates
+by the input magnitude. Constant 5000, maximum-magnitude signed Hadamard basis rows,
+negative 65504 and zero all pass the GPU regression without nonfinite scales. The
+32-key attention generator's first reduction now includes both score fragments;
+its 100-token test improves from cosine 0.99776765 to 0.99999996.
+
+The Python adapter preserves input tensors, processes batch masks individually,
+recreates sessions when token counts change, preserves fp32 norm weights in the
+baseline loader, and enables VAE tiling. Quality scripts stop on failures and remove
+stale completion markers before starting. Historical image PSNR figures above used
+the earlier baseline loader and need remeasurement.
+
+The old full-depth 0.99 comparison conflated kernel accuracy with divergence of
+independent quantized trajectories. Merely switching the reference to fp16 was
+insufficient. A Torch oracle with explicit native fusion/storage boundaries improved
+one-block agreement to 0.999947, but independent 28-block trajectories still reached
+only 0.96886. The test now checks every block on the same native input with the
+unchanged 0.99 threshold, and requires bit-exact agreement between composing those
+native blocks and running the complete stack. All 28 blocks pass (minimum cosine
+0.996997); composition is exact at both requested depths, 1 and 28. The full native
+trajectory's update cosine versus the bf16 model is 0.96763, above its existing 0.9
+quality threshold. Image-level quality remains a separate measurement.
+
+The full suite and final quick rerun pass. One-step 1024x1024 image-generation
+smoke tests also complete for both the Loom backend and the corrected bf16 baseline,
+including tiled VAE decoding. These smoke tests do not remeasure eight-step PSNR.
+
+## Standalone prompt-to-image C API
+
+`host/krea2_pipeline.h` adds a separate ABI 1 for complete Turbo inference. Its
+implementation is native C++ with HIP/hipBLAS for the Qwen3-VL text encoder,
+text-fusion stack, embeddings, final layer and Qwen-Image VAE. The existing 28
+W4A4 blocks still use Loom and the block ABI 2. The native byte-level BPE tokenizer
+uses PCRE2 and ICU NFC; the scheduler runs in C++. Python and Torch remain export
+and reference-test dependencies only. This does not make every auxiliary kernel a
+Loom kernel.
+
+The text encoder computes the twelve required hidden-state taps through layer 35,
+compacts padding, and uses the same prefix/suffix and 512-token truncation as the
+reference. First-frame causal VAE convolutions reduce to their final temporal tap;
+temporal upsamplers skip their temporal convolution for this single-image path.
+Spatial decoding uses 32-latent tiles with stride 24 only when an axis exceeds 32,
+and reproduces the reference's sequential bf16 overlap blending.
+
+The new component tests compare against the installed model implementations:
+
+| Comparison | Measured result |
+| --- | ---: |
+| Tokenizer, including Unicode normalization, specials and long text | exact IDs |
+| Qwen text encoder taps | cosine 0.99985760 |
+| Text fusion on identical tapped states | cosine 0.99997914 |
+| Time embedding / projection | cosine approximately 1.0 |
+| Final layer on identical inputs | cosine 0.99999636 |
+| Full transformer, independent quantized trajectory | cosine 0.98455369 |
+| VAE RGB MAE, 64×64 | 1.0571 / 255 |
+| VAE RGB MAE, 256×256, untiled boundary | 0.9343 / 255 |
+| VAE RGB MAE, 320×272, tiled with short edges | 0.9552 / 255 |
+| Historical two-step generation versus components with CPU sigmas | exact RGB bytes (not the real pipeline's rounding) |
+
+The full-transformer test uses a 0.95 trajectory threshold, while the identical-input
+outer-layer tests require 0.999. These are distinct from the existing per-block
+0.99 update-cosine checks. Eight-step image PSNR versus the corrected bf16 baseline
+has not been remeasured.
+
+The original scheduler test incorrectly used CPU sigmas and the description above
+misidentified it as a GPU scheduler comparison. That exactness claim is withdrawn.
+With CUDA sigmas, Torch rounds the delta to bf16 before multiplying the bf16
+velocity; the product rounds again before addition to the fp32 sample. CPU scalar
+promotion preserves the fp32 delta instead. The native implementation originally
+missed the first rounding boundary. Native RNG seeds intentionally differ from
+Torch; the API accepts shared initial latents for comparisons.
+
+`tools/export_native.py` stages and publishes a self-contained bundle, refusing to
+overwrite existing output. A development-only flag links existing block weights.
+The native compiler wrapper uses argument vectors, a process lock, atomic cache
+publication and SHA-256 source/configuration fingerprints plus artifact checksums.
+Cached inference needs no compiler and can read a bundle without write access.
+Compiler changes require explicitly clearing the native cache.
+
+The C example was compiled with `cc`, then generated a 256×256 eight-step image
+with `PATH=/nonexistent`. An exec trace contained the C program and the nine native
+Loom compiler invocations, with no Python process. The shared library dependency
+list contains HIP/hipBLAS, PCRE2, ICU, OpenSSL and standard native libraries, without
+Torch or Python.
+
+The standalone CLI also completed an eight-step 1024×1024 image in 45.55 seconds,
+including model loading and first-use compilation under process tracing. This is
+an end-to-end smoke measurement, not a steady-state performance benchmark. Repeating
+the C example against a read-only bundle with an invalid compiler path produced
+identical image bytes; its trace contained only the C executable. The generated
+previews are `build/native-c-fox.png` and `build/native-fox-1024.png`.
+
+Final validation: `scripts/test.sh --quick --native` passes, including all native
+component, scheduler, input-validation, host cleanup and kernel regressions.
+
+## Native allocation and rotary-cache optimization
+
+A per-session temporary-buffer pool removes repeated `hipMalloc`/`hipFree` calls
+from the text encoder, outer transformer operations and VAE tiles. It reuses a
+buffer only after the last tensor view releases it, and retains at most 512 MiB
+of unused GPU storage. Live tensors and model weights are additional. Weights are
+loaded outside the pool, and session destruction releases the cached storage.
+All operations use the default HIP stream; serialized session calls preserve
+ordering even when invoked from different host threads. Error paths restore the
+calling thread's previous allocator scope.
+
+Rotary-position arrays are computed once per image geometry and text-token count.
+The key includes width and height separately, so equal-area rectangular grids
+cannot accidentally reuse each other's phases. Neither change alters the C ABI,
+quantization, scheduler arithmetic or image bytes.
+
+`KREA2_NATIVE_PROFILE=1` enables synchronized per-stage wall-clock timing. The first
+before/after profiles measured VAE decoding at 10.48/3.81 seconds, but also showed
+variation in the unchanged Loom blocks and session loading. These profiles are
+useful for finding work, not for estimating the overall speedup.
+
+A separate comparison with profiling disabled used `tools/bench_native.py`, the
+same prompt ("a red fox in the snow"), native seed 0, eight steps, 1024×1024,
+and three sequential images per library in a resident session:
+
+| Native library | First generation | Warm generation 1 | Warm generation 2 | Warm mean |
+| --- | ---: | ---: | ---: | ---: |
+| Before buffer/rotary reuse | 32.35 s | 31.90 s | 29.88 s | 30.89 s |
+| After buffer/rotary reuse | 32.62 s | 27.17 s | 28.27 s | 27.72 s |
+
+This is a measured 10.3% reduction in warm generation latency (1.11× throughput),
+from two warm samples per version; hardware timing varies. Model loading is
+excluded and the first generation includes block-session preparation. All six RGB
+buffers have SHA-256 `36293aa77377f808462b5b56112424d254cf89d434db47b8b938911c3e724ff7`.
+The separate profiled PPM files also compare byte-for-byte equal.
+
+The remaining dominant cost is the Loom block stack. GPU-side conversion of its
+residual stream could remove the remaining host round trips; further block GEMM
+and attention tuning would target the larger part of runtime.
+
+The allocation/rotary optimization passes the native component suite, including
+new equal-area rectangle and cross-thread session regressions. The follow-up
+[SA2 implementation and FA3-inspired prefetch](native-attention.md) adds opt-in
+native INT4 QK attention, 64-token Q smoothing, sequence-wide K smoothing and
+fp16 PV. The ping-pong variant prefetches through alternating LDS slots. Both
+variants keep the C ABI and use no Torch runtime; fp16 attention remains the
+default. Correctness tests cover partial tiles, zero-range quantization and
+byte-identical outputs between the two variants. Timing measurements encountered
+other GPU workloads and do not establish a speedup.
+
+## H3-derived tuning and native device bridge
+
+`sa2-fast` transposes V once, uses eight waves and alternating LDS slots below
+8,192 tokens, and switches to four-wave prefetch above that boundary. Q mean and
+quantization now run separately; K quantization also produces the centered K
+copy. Native residual conversions stay on the GPU, and native GEMM raster groups
+now minimize padding as the Python builder already did. These changes preserve
+the existing SA2 arithmetic and the saved native RGB checksums.
+
+Two warm 1024×1024 eight-step `sa2-fast` generations measured 21.78 and 21.53 s.
+Shared GPU work and memory pressure prevent an isolated speedup claim. The full
+Torch-reference suite was stopped after the transformer/rectangle/VAE checks
+because RAM and swap were exhausted; native-only image comparisons completed.
+See [the schedule sweep, timing conditions and validation](native-attention.md).
+
+
+## Fixed gfx1151 runtime
+
+The tuned INT4 attention path is now unconditional. Runtime attention selectors,
+FP16 fallback, the two original SA2 variants and the GEMM group override were
+removed. Both builders choose eight waves below 8,192 tokens and four-wave
+prefetch above that boundary, always transpose V, and write version-2 launch
+metadata. Old launch metadata is rejected. Only the two tuned attention kernels
+are exported; the FP16 comparison source lives in `experiments/`. Native HIP
+builds explicitly target gfx1151. The C API remains callable without Torch/Python.
+
+The quick suite passes, including generator checks, cache publication/corruption,
+constructor cleanup, preparation, RoPE, and both tuned kernels against the
+quantization oracle. A real first-block fixture check with the updated smoothed
+INT4 storage oracle gives update cosine 0.999946, exact native composition and
+0.99897 update cosine against the original bf16 model. The block test now loads
+only the checkpoint blocks it exercises.
+
+A default C-API 1024×1024 eight-step generation, red-fox prompt and seed 0,
+produced the saved tuned RGB checksum
+`31a19cff459feb1f3ac36b496b50ad7b8a40e9bf4810d7b61591ce90f7ce26da`.
+Both the first and warm calls matched that checksum. They took 208.95 and
+88.24 seconds with concurrent video-model and game workloads; these runs verify
+dispatch, session reuse and output preservation, not isolated throughput.
+The full Torch-reference pipeline suite was not rerun in this pass.
+
+
+## Native runtime review fixes
+
+The scheduler now rounds both the delta and its velocity product to bf16, then
+adds to the fp32 sample and rounds the result to bf16. The shifted-sigma calculation
+also preserves NumPy's float32 boundaries. Using the earlier double-precision
+shift crossed a bf16 delta rounding boundary at a few steps, even though the
+bf16 transformer timesteps agreed. The update runs as a HIP kernel on resident
+latents and velocities, removing the remaining scheduler downloads and upload.
+
+One immutable device weight allocation now belongs to each native pipeline and
+is shared with its shape-specific block sessions. Changing token count rebuilds
+scratch buffers and kernels without reading or uploading the weight blob again.
+The initial upload uses a read-only mmap instead of a full host vector. This does
+not introduce a global weight cache or retain scratch buffers for every resolution.
+Block modulation tables are packed on-device at model creation; each forward
+assembles the float32 modulation buffer with the original bf16 addition rounding
+in one GPU kernel, with no per-table host downloads.
+
+The native raster-group rule and GPU residual bridge were already present when
+these findings were applied: both builders choose group 3 at 4,115 tokens, and
+residual conversion stays on the GPU. The direct `<map>` include was also already
+present; `<algorithm>` is now included by the native compiler. Missing JSON files
+now report their paths. Tracked completion markers were removed, their old names
+are ignored, and workflow markers and logs now live under `build/`.
+
+Validation: the quick suite passes, including actual HIP constructor cleanup and
+workflow failure handling. The public block API also passes the real first-block
+fixture at 0.999946 update cosine, with exact native composition. The focused native regression suite checks 1,292,800
+output elements over all 5,050 steps across inference counts 1 through 100 against
+Diffusers with CUDA sigmas, with exact bf16 results and matching bf16 transformer
+timesteps. Its fixture also detects the old unrounded-delta bug. All 28 device
+modulation tables match independent bf16 Torch additions exactly. A pipeline
+runs 64×64 → 64×128 → 64×64 with its private weight and manifest links removed
+after the first call; returning to the first shape reproduces the output exactly.
+A 64×64 two-step image matches independently scheduled native component calls
+using the CUDA Diffusers scheduler exactly. These checks load no full Torch model.
+The full Torch-model comparison suite and image-quality sweep were not rerun;
+historical image hashes and timings predate the scheduler correction.

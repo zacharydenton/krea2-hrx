@@ -79,6 +79,23 @@ class ReferenceForward:
 
     def __call__(self, hidden_states, encoder_hidden_states, timestep, position_ids, encoder_attention_mask=None,
                  attention_kwargs=None, return_dict=True):
+        batch = hidden_states.shape[0]
+        if encoder_hidden_states.shape[0] != batch or (encoder_attention_mask is not None and encoder_attention_mask.shape[0] != batch):
+            raise ValueError("image, text and mask batch sizes must agree")
+        timestep = timestep.reshape(-1)
+        if timestep.numel() not in (1, batch):
+            raise ValueError("timestep must have one value or one per sample")
+        timestep = timestep.expand(batch)
+        # Each prompt has its own compacted text length. Keep one resident native
+        # session at a time so batched prompts do not duplicate all model weights.
+        outputs = [self._forward_one(hidden_states[i:i + 1], encoder_hidden_states[i:i + 1], timestep[i:i + 1],
+                                     position_ids, None if encoder_attention_mask is None else encoder_attention_mask[i:i + 1],
+                                     attention_kwargs, return_dict=False)[0] for i in range(batch)]
+        out = torch.cat(outputs, dim=0)
+        return (out,) if not return_dict else type("O", (), {"sample": out})()
+
+    def _forward_one(self, hidden_states, encoder_hidden_states, timestep, position_ids, encoder_attention_mask=None,
+                     attention_kwargs=None, return_dict=True):
         text = encoder_hidden_states
         if encoder_attention_mask is not None:
             keep = encoder_attention_mask[0].bool()
@@ -103,6 +120,9 @@ class ReferenceForward:
             cos, sin = R.rope_tables(R.position_ids(txt.shape[1], grid_h, grid_w, x.device))
             tick("time_embed + rope tables")
             if self.backend == "loom":
+                if self.loom is not None and self.loom.tokens != x.shape[1]:
+                    self.loom.close()
+                    self.loom = None
                 if self.loom is None:
                     sys.path.insert(0, str(ROOT))
                     from krea2_loom import Krea2Blocks
@@ -126,6 +146,19 @@ class ReferenceForward:
         return (out,) if not return_dict else type("O", (), {"sample": out})()
 
 
+def cast_transformer_bf16(transformer):
+    """Honor diffusers' fp32 parameter exceptions when loading with assign=True."""
+    keep = set(transformer._keep_in_fp32_modules)
+    norms = {name: p.detach().float() for name, p in transformer.named_parameters() if keep.intersection(name.split(".")[:-1])}
+    # Apply the base cast: ModelMixin.to warns because it cannot preserve these
+    # exceptions itself. Restore the saved fp32 tensors immediately afterward.
+    torch.nn.Module.to(transformer, dtype=torch.bfloat16)
+    with torch.no_grad():
+        for name, value in norms.items():
+            transformer.get_parameter(name).data = value
+    return transformer
+
+
 def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch"):
     from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
@@ -141,13 +174,14 @@ def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch
     missing, unexpected = transformer.load_state_dict(diffusers_state(comfy), strict=False, assign=True)
     assert not unexpected, unexpected[:5]
     assert not missing, missing[:5]
-    transformer = transformer.to(dtype=torch.bfloat16)
+    transformer = cast_transformer_bf16(transformer)
     if quant != "none" or fixture is not None or backend != "torch":
         ref = R.Krea2Ref(comfy, quant=quant, device=device, dtype=torch.bfloat16)
         transformer.forward = ReferenceForward(ref, fixture, backend)
     text_encoder = Qwen3VLModel.from_pretrained(str(QWEN), torch_dtype=torch.bfloat16).to(device)
     tokenizer = AutoTokenizer.from_pretrained(str(QWEN))
     vae = AutoencoderKLQwenImage.from_pretrained(str(VAE), torch_dtype=torch.bfloat16).to(device)
+    vae.enable_tiling()
     scheduler = FlowMatchEulerDiscreteScheduler(**SCHEDULER)
     pipe = Krea2Pipeline(scheduler=scheduler, vae=vae, text_encoder=text_encoder, tokenizer=tokenizer,
                          transformer=transformer, is_distilled=True)

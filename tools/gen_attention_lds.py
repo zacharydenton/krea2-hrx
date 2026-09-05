@@ -1,4 +1,4 @@
-"""kernels/attention_gqa_lds_f16_wmma.loom: GQA attention with K/V tiles staged in LDS.
+"""experiments/attention_gqa_lds_f16_wmma.loom: GQA attention with K/V tiles staged in LDS.
 
 One workgroup of four waves per (16 query rows, key-value head): wave w is query head
 kv_head*4 + w. Per 16-key tile the workgroup loads the K tile [16][128] and the V tile
@@ -13,7 +13,7 @@ import os
 TILE = int(os.environ.get("ATTN_TILE", "16"))          # keys per staged tile (16 or 32)
 STEM = os.environ.get("ATTN_STEM", "attention_gqa_lds_f16_wmma")
 assert TILE in (16, 32)
-OUT = ROOT / ("kernels" if STEM == "attention_gqa_lds_f16_wmma" else "experiments") / f"{STEM}.loom"
+OUT = ROOT / "experiments" / f"{STEM}.loom"
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
 import os
@@ -336,7 +336,7 @@ TM = "%pair_max" if TILE == 32 else "%scaled"
 K += f"""    // Tile row max across the 16 lanes of this lane's half: an xor butterfly over
     // offsets 1, 2, 4, 8 never crosses the halves, so no even/odd masking is needed.
     %sh1, %ok1 = kernel.subgroup.shuffle<xor> {TM}, %i32_1, %i32_32 : vector<8xf32>, i32, i32
-    %tm1 = vector.maxnumf %scaled, %sh1 : vector<8xf32>
+    %tm1 = vector.maxnumf {TM}, %sh1 : vector<8xf32>
     %sh2, %ok2 = kernel.subgroup.shuffle<xor> %tm1, %i32_2, %i32_32 : vector<8xf32>, i32, i32
     %tm2 = vector.maxnumf %tm1, %sh2 : vector<8xf32>
     %sh4, %ok4 = kernel.subgroup.shuffle<xor> %tm2, %i32_4, %i32_32 : vector<8xf32>, i32, i32
@@ -441,5 +441,6 @@ K += f"""    vector.fragment.store<result> {sel}, %result_view[%c0, %c0] shape [
   kernel.return
 }}
 """
-OUT.write_text(K)
-print("wrote", OUT)
+if os.environ.get("ATTN_NO_WRITE") != "1":
+    OUT.write_text(K)
+    print("wrote", OUT)
