@@ -12,7 +12,7 @@ quantization groups matched to CUDA MMA threads, and FP8 PV. This implementation
 adapts its Q/K smoothing and INT4 QK approach to gfx11 WMMA. It uses per-token
 scales and fp16 PV; it is not an exact port of upstream SageAttention2.
 
-`host/sage.cpp` prepares Q/K on the GPU using HIP and hipBLAS:
+`host/sage.cpp` dispatches Loom preprocessing through the native HRX C API:
 
 1. Compute the K mean over the actual sequence, independently per head/channel.
 2. Center Q within 64-token groups, excluding padded rows from the mean.

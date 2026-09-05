@@ -5,8 +5,8 @@
 #include "native_models.h"
 #include "native_profile.h"
 #include "native_schedule.h"
+#include <cstdlib>
 #include <cstring>
-#include <hip/hip_fp16.h>
 #include <mutex>
 #include <random>
 
@@ -22,8 +22,7 @@ struct krea2_pipeline {
   krea2_session *blocks = nullptr;
   int block_tokens = 0;
   krea2_pipeline(std::string b, std::string c)
-      : bundle(std::move(b)), compiler(std::move(c)),
-        models(bundle) {}
+      : bundle(std::move(b)), compiler(std::move(c)), models(bundle) {}
   ~krea2_pipeline() { krea2_destroy(blocks); }
   Tensor forward(const Tensor &latents, const Tensor &text, float t, int width,
                  int height) {
@@ -33,10 +32,9 @@ struct krea2_pipeline {
     auto [temb, mod] = models.time(t);
     auto image = models.image_in(latents);
     Tensor x(tokens, 6144);
-    hip_check(
-        hipMemcpy(x.ptr, text.ptr, text.size() * 2, hipMemcpyDeviceToDevice));
-    hip_check(hipMemcpy(x.ptr + text.size(), image.ptr, image.size() * 2,
-                        hipMemcpyDeviceToDevice));
+
+    gpu::copy(x.ptr, text.ptr, text.size() * 2);
+    gpu::copy(x.ptr + text.size(), image.ptr, image.size() * 2);
     timing.mark("embeddings");
     if (tokens != block_tokens) {
       krea2_destroy(blocks);
@@ -79,8 +77,8 @@ struct krea2_pipeline {
     }
     timing.mark("modulation and rope");
     krea2_run_device_bf16(blocks, (uint16_t *)x.ptr, x.size(), mods.get(),
-                          Models::modulation_elements, rope_cos.data(), rope_sin.data(),
-                          rope_cos.size());
+                          Models::modulation_elements, rope_cos.data(),
+                          rope_sin.data(), rope_cos.size());
     timing.mark("blocks");
     auto output = x.view(image_tokens, 6144, size_t(text.rows) * 6144);
     output = models.final(output, temb);
@@ -123,7 +121,7 @@ template <class F> int guard(krea2_pipeline *p, char *e, size_t n, F f) {
     std::lock_guard<std::mutex> lock(p->mutex);
     PoolScope buffers(p->pool);
     f();
-    hip_check(hipDeviceSynchronize());
+    gpu::synchronize();
     return 0;
   } catch (const std::exception &ex) {
     if (e && n)
@@ -150,12 +148,14 @@ extern "C" int krea2_pipeline_create(const char *b, const char *c,
       throw std::invalid_argument("bundle and output pointer are required");
     std::ifstream f(std::string(b) + "/native.json");
     if (!f)
-      throw std::runtime_error("cannot read " + std::string(b) + "/native.json");
+      throw std::runtime_error("cannot read " + std::string(b) +
+                               "/native.json");
     json j;
     f >> j;
     if (j.at("version") != 1 || j.at("model") != "krea2-turbo")
       throw std::invalid_argument("unsupported native bundle");
     const char *env = getenv("LOOM_COMPILE");
+    native_compiler(c ? c : env ? env : "loom-compile");
     *out = new krea2_pipeline(b, c ? c : env ? env : "loom-compile");
     return 0;
   } catch (const std::exception &ex) {

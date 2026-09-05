@@ -1,11 +1,11 @@
 #include "native_compile.h"
+#include "sha256.h"
 #include <algorithm>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
-#include <openssl/sha.h>
 #include <spawn.h>
 #include <stdexcept>
 #include <sys/file.h>
@@ -14,17 +14,7 @@
 #include <vector>
 extern char **environ;
 namespace krea_native {
-static std::string digest(const std::string &bytes) {
-  unsigned char hash[SHA256_DIGEST_LENGTH];
-  SHA256((const unsigned char *)bytes.data(), bytes.size(), hash);
-  std::string result;
-  const char *hex = "0123456789abcdef";
-  for (unsigned char b : hash) {
-    result += hex[b >> 4];
-    result += hex[b & 15];
-  }
-  return result;
-}
+static std::string digest(const std::string &bytes) { return sha256(bytes); }
 static std::string contents(const std::filesystem::path &path) {
   std::ifstream input(path, std::ios::binary);
   if (!input)
@@ -48,7 +38,8 @@ std::string prepare_kernels(const std::string &bundle,
       m_group = candidate;
   auto group = std::to_string(m_group);
   std::string metadata = "2 " + std::to_string(tokens) + " " + group + " " +
-                         std::to_string(capacity) + " " + std::to_string(attention_waves) + "\n";
+                         std::to_string(capacity) + " " +
+                         std::to_string(attention_waves) + "\n";
   struct Job {
     std::string source, symbol, stem;
     std::map<std::string, std::string> cfg;
@@ -88,7 +79,8 @@ std::string prepare_kernels(const std::string &bundle,
        {"out_stride", "6144"}});
   // Bundles are deployable without the build-machine compiler. Source/config
   // fingerprints select immutable artifacts; compiler provenance is recorded.
-  std::string signature = "native-kernels-v2:gfx1151:sage-prep-v2:64:vt\n" + metadata;
+  std::string signature =
+      "native-kernels-v2:gfx1151:sage-prep-v2:64:vt\n" + metadata;
   for (const auto &j : jobs) {
     std::ifstream source(fs::path(bundle) / "sources" / (j.source + ".loom"));
     if (!source)

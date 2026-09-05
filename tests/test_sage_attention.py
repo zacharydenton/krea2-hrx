@@ -1,4 +1,5 @@
 """Smoothed INT4 QK kernel: correctness and timings include native preprocessing."""
+import os
 import json
 import math
 from pathlib import Path
@@ -8,6 +9,7 @@ import tempfile
 import numpy as np
 import torch
 ROOT = Path(__file__).resolve().parent.parent
+BIN = Path(os.environ.get("KREA2_TEST_BIN", ROOT / "build"))
 sys.path.insert(0, str(ROOT / "tools"))
 from kernel_test import compile_kernel
 from probe_attention_i4 import quantize
@@ -28,7 +30,7 @@ def run(q, k, v, directory, stem="attention_sage_i4_fast", repeat=5):
         padded[:tokens] = array.cpu().numpy()
         padded.tofile(directory / f"{name}.bin")
     torch.cuda.synchronize()  # Keep oracle GPU work out of native timings.
-    result = subprocess.run([str(ROOT / "build/sage-runner"), str(hsaco), "krea2_" + stem,
+    result = subprocess.run([str(BIN / "sage-runner"), str(hsaco), "krea2_" + stem,
                              str(tokens), str(heads), str(kv), str(capacity), str(directory), str(repeat)],
                             check=True, text=True, capture_output=True)
     if result.stderr:

@@ -1,41 +1,15 @@
 #include "native_models.h"
 namespace krea_native {
-__global__ void embedding_kernel(const B *w, const int32_t *ids, B *out,
-                                 size_t n, int dim) {
-  size_t i = blockIdx.x * 256 + threadIdx.x;
-  if (i < n)
-    out[i] = w[size_t(ids[i / dim]) * dim + i % dim];
-}
-__global__ void tap_kernel(const B *x, B *y, int tokens, int tap) {
-  size_t i = blockIdx.x * 256 + threadIdx.x;
-  if (i < size_t(tokens) * 2560)
-    y[(i / 2560 * 12 + tap) * 2560 + i % 2560] =
-        x[(i / 2560 + 34) * 2560 + i % 2560];
-}
-__global__ void fuse_project(const B *x, const B *w, B *y, int tokens) {
-  size_t i = blockIdx.x * 256 + threadIdx.x;
-  if (i < size_t(tokens) * 2560) {
-    float s = 0;
-    for (int j = 0; j < 12; ++j)
-      s += float(x[(i / 2560 * 12 + j) * 2560 + i % 2560]) * float(w[j]);
-    y[i] = B(s);
-  }
-}
-__global__ void add_one(const B *x, B *y, size_t n) {
-  size_t i = blockIdx.x * 256 + threadIdx.x;
-  if (i < n)
-    y[i] = B(1 + float(x[i]));
-}
-__global__ void gather_columns(const B *x, B *y, int rows, int width, int start,
-                               int cols) {
-  size_t i = blockIdx.x * 256 + threadIdx.x;
-  if (i < size_t(rows) * cols)
-    y[i] = x[(i / cols) * width + start + i % cols];
-}
 static Tensor columns(const Tensor &x, int start, int n) {
   Tensor y(x.rows, n);
-  gather_columns<<<(y.size() + 255) / 256, 256>>>(x.ptr, y.ptr, x.rows, x.cols,
-                                                  start, n);
+  gpu::Args a;
+  a.i32(y.size()).ptr(x.ptr).ptr(y.ptr);
+  native_launch("columns",
+                {{"xsize", x.size()},
+                 {"cols", size_t(n)},
+                 {"width", size_t(x.cols)},
+                 {"start1", size_t(start + 1)}},
+                a, (y.size() + 255) / 256);
   return y;
 }
 Tensor Models::encode(const std::vector<int32_t> &ids) {
@@ -48,12 +22,20 @@ Tensor Models::encode(const std::vector<int32_t> &ids) {
   Tensor x(s, 2560), taps(tokens * 12, 2560);
   auto idbuf = device_storage(ids.size() * 4);
   void *p = idbuf.get();
-  hip_check(hipMemcpy(p, ids.data(), ids.size() * 4, hipMemcpyHostToDevice));
+  gpu::copy(p, ids.data(), ids.size() * 4);
   for (int id : ids)
     if (id < 0 || id >= text["embed_tokens.weight"].shape[0])
       throw std::invalid_argument("token id out of range");
-  embedding_kernel<<<(x.size() + 255) / 256, 256>>>(
-      text["embed_tokens.weight"].t.ptr, (int32_t *)p, x.ptr, x.size(), 2560);
+  gpu::Args embedding;
+  embedding.i32(x.size())
+      .ptr(text["embed_tokens.weight"].t.ptr)
+      .ptr(p)
+      .ptr(x.ptr);
+  native_launch("embedding",
+                {{"wsize", text["embed_tokens.weight"].t.size()},
+                 {"rows", ids.size()},
+                 {"cols", 2560}},
+                embedding, (x.size() + 255) / 256);
   for (int i = 0; i < 35; ++i) {
     std::string layer = "layers." + std::to_string(i),
                 att = layer + ".self_attn";
@@ -77,11 +59,16 @@ Tensor Models::encode(const std::vector<int32_t> &ids) {
          u = lin(norm, text, layer + ".mlp.up_proj");
     x = ops.binary(x, lin(ops.binary(g, u, 1), text, layer + ".mlp.down_proj"),
                    0);
-    if (i % 3 == 1)
-      tap_kernel<<<(size_t(tokens) * 2560 + 255) / 256, 256>>>(
-          x.ptr, taps.ptr, tokens, (i - 1) / 3);
-  }
-  hip_check(hipGetLastError());
+    if (i % 3 == 1) {
+      gpu::Args tap;
+      tap.i32(tokens * 2560).ptr(x.ptr).ptr(taps.ptr);
+      native_launch("tap",
+                    {{"xsize", x.size()},
+                     {"ysize", taps.size()},
+                     {"tap1", size_t((i - 1) / 3 + 1)}},
+                    tap, (size_t(tokens) * 2560 + 255) / 256);
+    }
+  };
   return taps;
 }
 Tensor Models::fusion_block(const Tensor &x, const std::string &p, int batch,
@@ -116,9 +103,13 @@ Tensor Models::text_fusion(const Tensor &taps) {
     x = fusion_block(x, "txtfusion.layerwise_blocks." + std::to_string(i),
                      tokens, 12);
   Tensor projected(tokens, 2560);
-  fuse_project<<<(projected.size() + 255) / 256, 256>>>(
-      x.ptr, transformer["txtfusion.projector.weight"].t.ptr, projected.ptr,
-      tokens);
+  gpu::Args fuse;
+  fuse.i32(projected.size())
+      .ptr(x.ptr)
+      .ptr(transformer["txtfusion.projector.weight"].t.ptr)
+      .ptr(projected.ptr);
+  native_launch("fuse", {{"xsize", x.size()}, {"wsize", 12}}, fuse,
+                (projected.size() + 255) / 256);
   x = projected;
   for (int i = 0; i < 2; ++i)
     x = fusion_block(x, "txtfusion.refiner_blocks." + std::to_string(i), 1,
@@ -145,27 +136,26 @@ Models::Models(const std::string &root)
       vae(root + "/vae"), tokenizer(root + "/tokenizer.json"),
       block_tables(28 * 6, 6144) {
   for (int i = 0; i < 28; ++i) {
-    const auto &table = transformer["blocks." + std::to_string(i) + ".mod.lin"].t;
+    const auto &table =
+        transformer["blocks." + std::to_string(i) + ".mod.lin"].t;
     if (table.size() != 6 * 6144)
       throw std::invalid_argument("block modulation dimensions");
-    hip_check(hipMemcpy(block_tables.ptr + size_t(i) * 6 * 6144, table.ptr,
-                        table.size() * sizeof(B), hipMemcpyDeviceToDevice));
+    gpu::copy(block_tables.ptr + size_t(i) * 6 * 6144, table.ptr,
+              table.size() * sizeof(B));
   }
-}
-__global__ void modulation_kernel(const B *mod, const B *tables, float *out,
-                                  size_t n) {
-  size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (i < n)
-    out[i] = float(B(float(mod[i % (6 * 6144)]) + float(tables[i])));
 }
 std::shared_ptr<float> Models::modulation(const Tensor &mod) {
   if (mod.size() != 6 * 6144)
     throw std::invalid_argument("modulation dimensions");
   auto storage = device_storage(modulation_elements * sizeof(float));
   auto result = std::shared_ptr<float>(storage, (float *)storage.get());
-  modulation_kernel<<<(modulation_elements + 255) / 256, 256>>>(
-      mod.ptr, block_tables.ptr, result.get(), modulation_elements);
-  hip_check(hipGetLastError());
+  gpu::Args args;
+  args.i32(modulation_elements)
+      .ptr(mod.ptr)
+      .ptr(block_tables.ptr)
+      .ptr(result.get());
+  native_launch("modulation", {{"xsize", mod.size()}}, args,
+                (modulation_elements + 255) / 256);
   return result;
 }
 Tensor Models::final(const Tensor &x, const Tensor &e) {
@@ -173,13 +163,15 @@ Tensor Models::final(const Tensor &x, const Tensor &e) {
     throw std::invalid_argument("final layer dimensions");
   auto table = transformer["last.modulation.lin"].t.view(2, 6144);
   Tensor expanded(2, 6144);
-  hip_check(hipMemcpy(expanded.ptr, e.ptr, 6144 * 2, hipMemcpyDeviceToDevice));
-  hip_check(
-      hipMemcpy(expanded.ptr + 6144, e.ptr, 6144 * 2, hipMemcpyDeviceToDevice));
+  gpu::copy(expanded.ptr, e.ptr, 6144 * 2);
+
+  gpu::copy(expanded.ptr + 6144, e.ptr, 6144 * 2);
   auto m = ops.binary(expanded, table, 0);
   auto scale = m.view(1, 6144), shift = m.view(1, 6144, 6144);
   Tensor factor(1, 6144);
-  add_one<<<24, 256>>>(scale.ptr, factor.ptr, 6144);
+  gpu::Args add;
+  add.i32(6144).ptr(scale.ptr).ptr(factor.ptr);
+  native_launch("unary_one", {}, add, 24);
   auto norm = ops.norm(x, transformer["last.norm.scale"].t);
   return lin(ops.binary(ops.binary(norm, factor, 1), shift, 0), transformer,
              "last.linear");

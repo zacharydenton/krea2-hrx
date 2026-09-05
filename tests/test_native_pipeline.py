@@ -1,5 +1,6 @@
 """Compare native pipeline components with installed model implementations."""
 import ctypes as C
+import gc
 import os
 from pathlib import Path
 import sys
@@ -10,12 +11,13 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parent.parent
+BIN = Path(os.environ.get("KREA2_TEST_BIN", ROOT / "build"))
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "reference"))
 
 
 def main():
-    lib = C.CDLL(str(ROOT / "build/libkrea2_pipeline.so"))
+    lib = C.CDLL(str(BIN / "libkrea2_pipeline.so"))
     ptr, size, char = C.c_void_p, C.c_size_t, C.c_char_p
     lib.krea2_pipeline_create.argtypes = [char, char, C.POINTER(ptr), char, size]
     lib.krea2_pipeline_destroy.argtypes = [ptr]
@@ -40,8 +42,21 @@ def main():
             want = tokenizer.encode(text, add_special_tokens=False)
             assert ids[:written.value].tolist() == want, (text, ids[:written.value].tolist(), want)
         print("PASS native tokenizer", flush=True)
-        from tools.pipeline import build, ReferenceForward
-        pipe = build("none", None)
+        from tools.pipeline import ReferenceForward
+        # Only text encoding and VAE methods are needed from the pipeline.
+        # Keep a meta transformer for its configuration, avoiding a second
+        # resident 13B transformer alongside the independent reference.
+        from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
+        from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
+        from transformers import Qwen3VLModel
+        from tools.pipeline import QWEN, VAE, SCHEDULER
+        with torch.device("meta"):
+            config_transformer = Krea2Transformer2DModel()
+        text_encoder = Qwen3VLModel.from_pretrained(str(QWEN), torch_dtype=torch.bfloat16).cuda()
+        pipe = Krea2Pipeline(scheduler=FlowMatchEulerDiscreteScheduler(**SCHEDULER),
+                            vae=None, text_encoder=text_encoder, tokenizer=tokenizer,
+                            transformer=config_transformer, is_distilled=True)
+        del text_encoder, config_transformer
         prompt = "a red fox"
         with torch.no_grad():
             states, mask = pipe.get_text_hidden_states(prompt)
@@ -55,6 +70,9 @@ def main():
         cosine = float(np.dot(taps.ravel(), want.ravel()) / (np.linalg.norm(taps) * np.linalg.norm(want)))
         print(f"text encoder cosine {cosine:.8f}, max_abs {np.max(np.abs(taps-want)):.5g}", flush=True)
         assert cosine > 0.995
+        pipe.text_encoder = None
+        gc.collect()
+        torch.cuda.empty_cache()
         # Feed identical text states and latents to isolate the full transformer.
         from safetensors.torch import load_file
         import krea2_ref as R
@@ -66,7 +84,7 @@ def main():
             want.tofile(td / "text.bin")
             hidden = torch.linspace(-2, 2, 6144, device="cuda").bfloat16()[None, None]
             hidden.float().cpu().numpy().tofile(td / "hidden.bin")
-            subprocess.run([str(ROOT / "build/krea2-native-components"), str(ROOT / "build/native"), str(td)], check=True)
+            subprocess.run([str(BIN / "krea2-native-components"), str(ROOT / "build/native"), str(td)], check=True)
             e, m = reference.time_embed(torch.tensor([0.75], device="cuda", dtype=torch.bfloat16))
             for name, expected_component in (("condition", reference.text_in(states)), ("temb", e), ("mod", m), ("final", reference.final(hidden, e))):
                 a = np.fromfile(td / f"{name}.bin", np.float32)
@@ -112,6 +130,14 @@ def main():
             b = rectangle_expected[0].float().cpu().numpy().ravel()
             assert float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b))) > 0.95
         print("PASS native rotary cache across equal-area rectangles", flush=True)
+        if adapter.loom is not None:
+            adapter.loom.close()
+        del adapter, reference, weights
+        gc.collect()
+        torch.cuda.empty_cache()
+        # Load the VAE only for its phase, after releasing transformer weights.
+        pipe.vae = AutoencoderKLQwenImage.from_pretrained(str(VAE), torch_dtype=torch.bfloat16).cuda()
+        pipe.vae.enable_tiling()
         # Check the untiled boundary, then overlapping tiles and short edges.
         for height, width in ((64, 64), (256, 256), (272, 320)):
             decode_latents = torch.randn(1, height // 16 * (width // 16), 64, device="cuda", dtype=torch.bfloat16)
@@ -126,6 +152,13 @@ def main():
             wanted = np.array(pipe.image_processor.postprocess(image, output_type="pil")[0])
             mae = np.abs(rgb.astype(float) - wanted.astype(float)).mean()
             print(f"VAE {width}x{height} RGB mean absolute error {mae:.4f}/255", flush=True)
+            # Preserve identical-input evidence when an oracle comparison fails.
+            if mae >= 3:
+                failure = ROOT / "build/native-validation"
+                failure.mkdir(exist_ok=True)
+                host_decode.tofile(failure / f"input-{width}x{height}.bin")
+                rgb.tofile(failure / f"native-{width}x{height}.bin")
+                wanted.tofile(failure / f"reference-{width}x{height}.bin")
             assert mae < 3
         # Compare generation with an independently scheduled sequence of component
         # calls, using identical initial noise and native text states.

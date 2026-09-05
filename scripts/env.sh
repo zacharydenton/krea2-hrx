@@ -6,7 +6,8 @@ export LOOM_FORMAT="$LOOM_TOOLS/loom-format/loom-format"
 export LOOM_CHECK="$LOOM_TOOLS/loom-check/loom-check"
 export IREE_TEST_LOOM="$LOOM_TOOLS/iree-test-loom/iree-test-loom"
 export IREE_BENCHMARK_LOOM="$LOOM_TOOLS/iree-benchmark-loom/iree-benchmark-loom"
-# Arch's hsa-rocr is built with _GLIBCXX_ASSERTIONS and aborts the moment HRX opens
-# a queue; this is the ROCm 7.14 runtime extracted from the kyuz0 toolbox.
-export LD_LIBRARY_PATH="$HOME/.local/rocm-hrx${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Tests that combine Torch and HRX must load the same HSA provider at startup.
+# Standalone C callers locate the packaged provider without an environment change.
+KREA2_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export LD_LIBRARY_PATH="$KREA2_ROOT/build/runtime:$HOME/.local/rocm-hrx${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LOOM_TARGET="${LOOM_TARGET:-gfx1151}"

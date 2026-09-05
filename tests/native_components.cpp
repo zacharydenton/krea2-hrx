@@ -37,8 +37,7 @@ int main(int argc, char **argv) {
     write(dir / "mod.bin", m);
     auto modulation = model.modulation(m);
     std::vector<float> tables(Models::modulation_elements);
-    hip_check(hipMemcpy(tables.data(), modulation.get(), tables.size() * 4,
-                        hipMemcpyDeviceToHost));
+    gpu::copy(tables.data(), modulation.get(), tables.size() * 4);
     std::ofstream mod_file(dir / "block_mod.bin", std::ios::binary);
     mod_file.write((char *)tables.data(), tables.size() * 4);
     write(dir / "final.bin", model.final(read(dir / "hidden.bin", 6144), e));

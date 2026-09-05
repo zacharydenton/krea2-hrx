@@ -15,6 +15,7 @@ import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 
 ROOT = Path(__file__).resolve().parent.parent
+BIN = Path(os.environ.get("KREA2_TEST_BIN", ROOT / "build"))
 sys.path.insert(0, str(ROOT))
 from tools.pipeline import SCHEDULER
 
@@ -25,7 +26,7 @@ def scheduler_check(root):
     velocity = (rng.normal(size=samples.shape) * 32).astype(np.float32)
     samples.tofile(root / "samples.bin")
     velocity.tofile(root / "velocity.bin")
-    subprocess.run([str(ROOT / "build/krea2-scheduler-test"), str(root)], check=True)
+    subprocess.run([str(BIN / "krea2-scheduler-test"), str(root)], check=True)
     got = np.fromfile(root / "result.bin", np.float32).reshape(samples.shape)
     x = torch.from_numpy(samples).cuda().bfloat16()
     v = torch.from_numpy(velocity).cuda().bfloat16()
@@ -54,7 +55,7 @@ def modulation_check(root, bundle):
     rng = np.random.default_rng(33)
     rng.normal(size=(12, 2560)).astype(np.float32).tofile(root / "text.bin")
     rng.normal(size=(16, 6144)).astype(np.float32).tofile(root / "hidden.bin")
-    subprocess.run([str(ROOT / "build/krea2-native-components"), str(bundle), str(root)], check=True)
+    subprocess.run([str(BIN / "krea2-native-components"), str(bundle), str(root)], check=True)
     mod = torch.from_numpy(np.fromfile(root / "mod.bin", np.float32)).cuda().bfloat16()
     meta = json.loads((bundle / "transformer/weights.json").read_text())
     expected = []
@@ -71,7 +72,7 @@ def modulation_check(root, bundle):
 
 
 def pipeline_check(root, bundle):
-    lib = C.CDLL(str(ROOT / "build/libkrea2_pipeline.so"))
+    lib = C.CDLL(str(BIN / "libkrea2_pipeline.so"))
     ptr, size, char = C.c_void_p, C.c_size_t, C.c_char_p
     lib.krea2_pipeline_create.argtypes = [char, char, C.POINTER(ptr), char, size]
     lib.krea2_pipeline_destroy.argtypes = [ptr]

@@ -1,30 +1,45 @@
 #pragma once
+#include "gpu.h"
+#include "native_kernels.h"
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <fcntl.h>
 #include <fstream>
-#include <hip/hip_bfloat16.h>
-#include <hip/hip_runtime.h>
-#include <hipblas/hipblas.h>
 #include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace krea_native {
-using B = hip_bfloat16;
+// Host representation of IEEE BF16, round-to-nearest ties-to-even.
+struct B {
+  uint16_t bits = 0;
+  B() = default;
+  explicit B(float value) {
+    uint32_t u;
+    std::memcpy(&u, &value, 4);
+    bits = uint16_t(((u & 0x7fffffff) > 0x7f800000)
+                        ? ((u >> 16) | 0x40)
+                        : ((u + 0x7fff + ((u >> 16) & 1)) >> 16));
+  }
+  operator float() const {
+    uint32_t u = uint32_t(bits) << 16;
+    float f;
+    std::memcpy(&f, &u, 4);
+    return f;
+  }
+};
+static_assert(sizeof(B) == 2);
 using json = nlohmann::json;
-inline void hip_check(hipError_t e) {
-  if (e != hipSuccess)
-    throw std::runtime_error(hipGetErrorString(e));
-}
-inline void blas_check(hipblasStatus_t e) {
-  if (e != HIPBLAS_STATUS_SUCCESS)
-    throw std::runtime_error("hipBLAS error " + std::to_string(e));
-}
 // Temporary buffers are reused only within one serialized pipeline session.
-// Every operation uses HIP's default stream, so subsequent uses are ordered
-// after earlier kernels without a hipFree synchronization between each
+// Every operation uses the ordered HRX stream, so subsequent uses are ordered
+// after earlier kernels without a release synchronization between each
 // operation.
 struct BufferPool {
   static constexpr size_t limit = 512ull * 1024 * 1024;
@@ -32,7 +47,7 @@ struct BufferPool {
   std::multimap<size_t, void *> free;
   ~BufferPool() {
     for (auto [bytes, pointer] : free)
-      (void)hipFree(pointer);
+      (void)gpu::release(pointer);
   }
   void *take(size_t &bytes) {
     auto it = free.lower_bound(bytes);
@@ -44,7 +59,7 @@ struct BufferPool {
       return pointer;
     }
     void *pointer = nullptr;
-    hip_check(hipMalloc(&pointer, bytes));
+    pointer = gpu::allocate(bytes);
     return pointer;
   }
   void put(void *pointer, size_t bytes) noexcept {
@@ -56,7 +71,7 @@ struct BufferPool {
       } catch (...) {
       } // Allocation failure must not escape a buffer deleter.
     }
-    (void)hipFree(pointer);
+    (void)gpu::release(pointer);
   }
 };
 inline thread_local std::shared_ptr<BufferPool> active_pool;
@@ -75,8 +90,8 @@ inline std::shared_ptr<void> device_storage(size_t bytes) {
     return {pointer, [pool, bytes](void *p) { pool->put(p, bytes); }};
   }
   void *pointer = nullptr;
-  hip_check(hipMalloc(&pointer, bytes));
-  return {pointer, [](void *p) { (void)hipFree(p); }};
+  pointer = gpu::allocate(bytes);
+  return {pointer, [](void *p) { (void)gpu::release(p); }};
 }
 struct Tensor {
   int rows = 0, cols = 0;
@@ -104,12 +119,12 @@ struct Tensor {
     if (v.size() != size_t(r) * c)
       throw std::invalid_argument("upload size");
     Tensor t(r, c);
-    hip_check(hipMemcpy(t.ptr, v.data(), v.size() * 2, hipMemcpyHostToDevice));
+    gpu::copy(t.ptr, v.data(), v.size() * 2);
     return t;
   }
   std::vector<B> download() const {
     std::vector<B> v(size());
-    hip_check(hipMemcpy(v.data(), ptr, size() * 2, hipMemcpyDeviceToHost));
+    gpu::copy(v.data(), ptr, size() * 2);
     return v;
   }
 };
@@ -125,12 +140,19 @@ struct Weights {
       throw std::runtime_error("cannot read " + directory + "/weights.json");
     json entries;
     meta >> entries;
-    std::ifstream f(directory + "/weights.bin",
-                    std::ios::binary | std::ios::ate);
-    if (!f)
-      throw std::runtime_error("cannot open weights: " + directory);
-    size_t bytes = f.tellg();
-    f.seekg(0);
+    const auto path = directory + "/weights.bin";
+    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+      throw std::runtime_error("cannot open " + path);
+    struct File {
+      int fd;
+      ~File() { close(fd); }
+    } file{fd};
+    struct stat info;
+    if (fstat(fd, &info) || info.st_size <= 0 || info.st_size % sizeof(B))
+      throw std::runtime_error("invalid weight file: " + path);
+    size_t bytes = size_t(info.st_size);
+    // Validate every view before allocating or uploading the bundle.
     for (auto &[name, entry] : entries.items()) {
       auto dims = entry["shape"].get<std::vector<int>>();
       if (dims.empty())
@@ -142,26 +164,38 @@ struct Weights {
         count *= n;
       }
       size_t offset = entry["offset"], length = entry["bytes"];
-      if (length != count * 2 || offset > bytes || length > bytes - offset ||
-          count > INT32_MAX)
+      if (length != count * 2 || offset % sizeof(B) || offset > bytes ||
+          length > bytes - offset || count > INT32_MAX)
         throw std::runtime_error("invalid weight span: " + name);
-      std::vector<B> data(count);
-      f.seekg(offset);
-      f.read((char *)data.data(), length);
-      if (!f)
-        throw std::runtime_error("truncated weights: " + name);
-      values.emplace(name, Weight{Tensor::upload(data, 1, int(count)), dims});
+      Tensor view;
+      view.rows = 1;
+      view.cols = int(count);
+      values.emplace(name, Weight{std::move(view), std::move(dims)});
+    }
+    void *mapped = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapped == MAP_FAILED)
+      throw std::runtime_error("cannot map " + path);
+    struct Mapping {
+      void *p;
+      size_t bytes;
+      ~Mapping() { munmap(p, bytes); }
+    } mapping{mapped, bytes};
+    auto storage = device_storage(bytes);
+    gpu::copy(storage.get(), mapped, bytes);
+    for (auto &[name, weight] : values) {
+      size_t offset = entries.at(name).at("offset");
+      weight.t.storage = storage;
+      weight.t.ptr =
+          reinterpret_cast<B *>(static_cast<char *>(storage.get()) + offset);
     }
   }
+
   const Weight &operator[](const std::string &name) const {
     return values.at(name);
   }
   bool has(const std::string &name) const { return values.count(name); }
 };
 struct Ops {
-  hipblasHandle_t handle{};
-  Ops() { blas_check(hipblasCreate(&handle)); }
-  ~Ops() { hipblasDestroy(handle); }
   Tensor linear(const Tensor &x, const Weight &w, const B *bias = nullptr);
   Tensor norm(const Tensor &x, const Tensor &weight, int mode = 0,
               float eps = 1e-5f);

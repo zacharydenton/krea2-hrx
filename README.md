@@ -1,6 +1,6 @@
 # krea2-loom
 
-Krea 2 Turbo's transformer blocks in **Loom**, AMD's kernel language from
+Krea 2 Turbo's native GPU pipeline in **Loom**, AMD's kernel language from
 [ROCm/hrx-system](https://github.com/ROCm/hrx-system), for the Radeon 8060S (gfx1151),
 in **W4A4 ConvRot**: int4 weights and int4 activations on the part's `iu4` WMMA, which is
 the only 2x path this silicon has (measured 117 TOPS against 54 for int8 and fp16).
@@ -13,9 +13,10 @@ A sibling of [dinov3-loom](https://github.com/zacharydenton/dinov3-loom),
 There are two entry points:
 
 - **Standalone C ABI:** `libkrea2_pipeline.so` runs prompt-to-RGB inference without
-  Python, Torch or diffusers. The 28 quantized transformer blocks use Loom; the
-  text encoder, text fusion, embeddings, final layer and VAE use native HIP and
-  hipBLAS. Tokenization runs in C++; the flow-match scheduler updates latents on the GPU.
+  Python, Torch or diffusers. All GPU kernels use Loom, including the text encoder,
+  text fusion, embeddings, VAE, scheduler and Sage preprocessing. The host calls
+  HRX's public C API directly; there is no HIP launcher or BLAS dependency.
+  Tokenization, Unicode normalization and cache hashing run in C++.
 - **Python reference/integration:** `tools/pipeline.py --backend loom` uses the
   same Loom blocks inside diffusers. `--quant w4a4` and the default bf16 backend
   remain available for comparison.
@@ -23,13 +24,16 @@ There are two entry points:
 The standalone path supports the single-image Turbo model, without classifier-free
 guidance, on Linux with a Radeon 8060S (gfx1151). Dimensions must be multiples of
 16 in 64–2048; practical memory and latency depend on resolution. This is a native
-runtime with a C interface, not a port of every auxiliary GPU operation to Loom.
+runtime with a C interface, specialized for this GPU.
 
 ## Standalone build and use
 
-Build dependencies are ROCm HIP/hipBLAS, a C/C++ compiler, nlohmann JSON headers,
-PCRE2, ICU and OpenSSL. Python/Torch are needed to prepare the model bundle and run
-reference tests, but are not runtime dependencies of the native library or CLI.
+Build dependencies are a C++17/C compiler, nlohmann JSON headers, HRX's public
+headers/library and a compatible HSA GPU driver. The scripts use the local
+`~/code/hrx-system/build-cuda` build and `~/.local/rocm-hrx` provider, and package
+runtime libraries under `build/runtime`. They use ordinary C++, without `hipcc`,
+HIP, hipBLAS, ICU, PCRE2 or OpenSSL. Python/Torch are used for model export and
+reference tests. See [HRX runtime details](docs/hrx-runtime.md).
 The model layout defaults to `~/krea2-models/{krea2_turbo_bf16.safetensors,qwen3-vl-4b,qwen-image/vae}`.
 
 ```sh
@@ -52,10 +56,13 @@ Export publishes the bundle only after preparation succeeds.
 
 The first request for a new total token count invokes the native `loom-compile`
 executable and caches the GPU binaries inside the bundle. Completed caches have
-source/configuration fingerprints and artifact checksums. A populated cache can be
-used from a read-only bundle without a compiler. New token counts need both a
-compiler and a writable cache directory. Compiler upgrades do not automatically
-invalidate native caches; remove the bundle's `kernels` directory to rebuild them.
+source/configuration fingerprints and artifact checksums. Auxiliary Loom sources
+are embedded in the library and specialize on tensor shapes; their binaries live
+under `$XDG_CACHE_HOME/krea2-loom/native-gfx1151-v1` (default `~/.cache`). Once all
+needed shapes are cached, inference needs no compiler. The bundle may be read-only;
+the auxiliary cache currently requires write access for its lock. New shapes need
+a compiler and writable caches. Compiler upgrades do not automatically invalidate
+caches; clear both caches when changing compiler builds.
 
 Any language with C FFI can use [host/krea2_pipeline.h](host/krea2_pipeline.h):
 create a session, call `krea2_generate` into a caller-owned RGB8 buffer, then destroy
@@ -69,7 +76,8 @@ call. Errors return a nonzero status and a caller-owned error string.
 env -u LD_LIBRARY_PATH build/krea2-c-example build/native "a red fox" build/c-fox.ppm
 ```
 
-Deploy the bundle, the shared library, your executable and their native dependencies;
+Deploy the bundle, `libkrea2_pipeline.so`, `libkrea2.so`, the adjacent `runtime/`
+directory and your executable;
 no Python environment or source checkpoints are needed. RGB encoding belongs to the
 caller; the example CLI writes PPM. Native seeds are repeatable within this backend
 but do not reproduce Torch's RNG. Pass identical packed initial latents through the
@@ -78,8 +86,9 @@ C API when comparing backends.
 ## gfx1151 attention
 
 The native runtime always uses tuned SA2-style INT4 QK with fp16 PV and fp32
-softmax/accumulation. HIP/hipBLAS preprocessing and Loom attention run entirely
-on the GPU. V is transposed once per block. Below 8,192 tokens, eight waves share
+softmax/accumulation. Loom preprocessing and attention run entirely on the GPU
+through HRX. Quantization uses four channels per lane and wave shuffles, with no
+workgroup barriers. V is transposed once per block. Below 8,192 tokens, eight waves share
 K/V across two query tiles with alternating LDS slots; longer sequences use four
 waves with explicit prefetch. Kernel selection and GEMM grouping are automatic.
 
@@ -101,7 +110,9 @@ recorded in [the implementation notes](docs/native-attention.md).
 ## Native performance
 
 Each native pipeline retains one device copy of block weights across resolution changes. The
-initial upload reads an mmap of the weight file without a full host vector. Block
+initial upload reads an mmap of the weight file without a full host vector.
+Text, outer-transformer and VAE weights likewise use one mapped upload and one
+resident allocation per bundle, with tensor views into it. Block
 modulation is assembled on the GPU from resident tables, and scheduler updates
 stay on the GPU with the real pipeline’s bf16 delta/product rounding.
 
@@ -110,11 +121,20 @@ until session destruction. Active tensors and model weights are additional memor
 Rotary-position data is cached by image geometry and text-token count. The native
 pipeline keeps its residual stream on the GPU and converts between bf16 and fp16
 there, removing the previous CPU conversions and full-stream transfers per step.
-The earlier buffer/rotary-reuse pass preserved numerical operations. In its
+The following timings predate the HRX/Loom auxiliary port. The earlier
+buffer/rotary-reuse pass preserved numerical operations. In its
 1024×1024 eight-step comparison, two warm runs averaged 30.89 seconds before and
 27.72 seconds after buffer/rotary reuse
 (about 10% less latency), with identical RGB checksums. See `docs/notes.md` for the
 measurement conditions.
+
+With the HRX/Loom port, a fresh local comparison at 1024² and eight steps measured
+about **18.5 s warm** versus **19.3 s** for the saved HIP build. Consolidating weight
+allocations reduced HRX model loading from 6.31 s to 1.43 s without changing the
+RGB checksum. A separate UI comparison using identical initial noise measured
+19.36 s native generation versus 53.73 s in ComfyUI INT8 ConvRot. These are local
+measurements, not a broad benchmark; model loading is excluded from generation
+times. See `docs/hrx-runtime.md` for the conditions.
 
 For stage timings, set `KREA2_NATIVE_PROFILE=1` when running the CLI. This adds
 synchronization and prints text encoding, denoising, VAE and transformer-stage
@@ -159,8 +179,11 @@ text encoder, outer transformer layers, full transformer, tiled VAE and schedule
 against the installed Python references. It requires `build/native`,
 `build/native-deploy` and the models. For the focused scheduler, modulation and
 weight-reuse checks without loading a Torch model, run
-`env -u LD_LIBRARY_PATH .venv/bin/python tests/test_native_regressions.py` after
-`scripts/build_native.sh`.
+`source scripts/env.sh` followed by
+`.venv/bin/python tests/test_native_regressions.py` after `scripts/build_native.sh`.
+Tests combining Torch and HRX in one process must use the same HSA provider at
+startup; `scripts/env.sh` sets that search path. Standalone C callers need no such
+setting. The quick suite also checks actual loaded libraries after HRX dispatch.
 
 After changes to the block host, `scripts/build_host.sh` rebuilds `libkrea2.so` and
 the kernel test runner. The block API uses ABI 2; the full pipeline API uses ABI 1.
@@ -185,10 +208,11 @@ identical inputs with the original 0.99 update-cosine threshold, and composing
 individual native blocks must exactly reproduce a complete native forward. The
 bf16 trajectory comparison includes quantization and fusion/storage differences.
 
-The standalone component checks measure text-encoder cosine 0.99986, text-fusion
-cosine 0.99998 and VAE RGB mean absolute errors around 1/255 at tested sizes.
-Before the fixed INT4-attention path, the full independent quantized transformer
-reached 0.98455 cosine. The earlier scheduler exactness claim used CPU sigmas
+The HRX/Loom component checks measure text-encoder cosine 0.999847, text-fusion
+cosine 0.999979 and complete-transformer cosine 0.990253 against the independent
+outer-model implementation with Loom blocks. VAE RGB mean absolute errors are
+1.223/255 at 64², 0.905/255 at 256² and 0.932/255 at 320×272. The saved HIP VAE
+produces similar errors; HRX and HIP differ by 0.16–0.17/255 on these inputs. The earlier scheduler exactness claim used CPU sigmas
 and did not test the real pipeline’s CUDA rounding. The corrected test uses CUDA
 sigmas: all 5,050 steps across step counts 1–100 match exactly, as does a
 64×64 two-step image driven by the native components. See

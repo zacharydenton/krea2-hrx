@@ -51,7 +51,7 @@ def main():
         finished = time.perf_counter()
         pixels = bytes(rgb)
         png_rgb(directory / 'loom.png', n, pixels)
-        result = dict(load_seconds=loaded - start, seconds=finished - loaded,
+        result = dict(runtime="HRX", load_seconds=loaded - start, seconds=finished - loaded,
                       noise_sha256=hashlib.sha256(raw).hexdigest(),
                       rgb_sha256=hashlib.sha256(pixels).hexdigest())
         (directory / 'loom.json').write_text(json.dumps(result, indent=2))

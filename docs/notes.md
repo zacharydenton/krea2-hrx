@@ -502,3 +502,65 @@ A 64×64 two-step image matches independently scheduled native component calls
 using the CUDA Diffusers scheduler exactly. These checks load no full Torch model.
 The full Torch-model comparison suite and image-quality sweep were not rerun;
 historical image hashes and timings predate the scheduler correction.
+
+### Native HRX / all-Loom auxiliary port (2026-09-05)
+
+The native C ABI now calls HRX directly. The block library owns the shared HRX
+runtime, and the full pipeline links it. All GPU operations are Loom, including
+BF16 matrix/conv operations, text and VAE attention, Sage preparation/correction,
+layout conversions and the BF16 scheduler. HIP, hipBLAS, ICU, PCRE2 and OpenSSL
+were removed from the production build. Tokenization uses complete Unicode 16.0
+NFC/category tables; hashing uses the included SHA-256 implementation. Build
+scripts use C++17 and package HRX plus its compatible HSA provider. See
+`docs/hrx-runtime.md` for deployment and the mixed Torch/HRX test environment.
+
+The initial auxiliary launch metadata incorrectly fixed Y to one. Multi-head
+Sage and batched GEMM comparisons exposed the resulting constant folding. Both
+launch dimensions are now specialized in compiler metadata and tested with tall,
+wide, batched and partial-tile matrices. Sage quantization uses four channels per
+lane and wave shuffles, eliminating the first port's LDS reduction barriers.
+In-memory kernel hits avoid rehashing source on every operation.
+
+Validation:
+
+- The quick suite passes: generated-source consistency, native ownership cleanup,
+  Python integration, prepare/rotary kernels, auxiliary arithmetic and both tuned
+  attention kernels. Sage cosine against the smoothed INT4 oracle is at least
+  0.99999994 across 16, 48, 65, 100 and 4,115 tokens; both variants are byte-identical.
+- A C++ process dispatches Loom through HRX and inspects loaded mappings. HRX/HSA
+  are present; HIP, BLAS, Torch, Python, ICU, PCRE2 and OpenSSL are absent.
+- SHA-256 padding/block boundaries match hashlib. NFC checks cover 17,085
+  decomposable codepoints; 310 mixed-script/special-token prompts match tokenizers.
+  Invalid, overlong, surrogate and truncated UTF-8 is rejected.
+- CUDA scheduler results match exactly over all 5,050 steps at step counts 1–100.
+  All 28 modulation tables match BF16 Torch addition. Resolution changes work
+  after removing private weight links, and returning to a shape is exact.
+- Full model checks: text encoder cosine 0.99984735; text fusion 0.99997938;
+  time embedding 1.00000012; modulation 1.00000000; final layer 0.99999636.
+  The complete transformer reaches 0.99025321 against the independent outer-model
+  implementation using the same Loom blocks. This is not a full BF16 baseline.
+- VAE RGB mean errors are 1.2226/255 (64²), 0.9047/255 (256²), and 0.9324/255
+  (320×272). Saved HIP results are 1.2350, 0.9084 and 0.9347 respectively; the
+  HRX/HIP difference is 0.155–0.170/255. Independent scheduling reproduces native
+  two-step RGB exactly. Input validation and calls from multiple threads pass.
+
+The model test now releases the text encoder after collecting its states and
+loads the VAE only for decoding. The earlier setup held an unused second 13B
+transformer and caused severe swapping. It also produced a different Torch VAE
+result: the same input gave 3.736/255 error for HRX and 3.747/255 for the saved HIP
+build, versus about 1.2/255 with a freshly loaded VAE. The port did not cause that
+difference. VAE weights stayed unchanged in a separate native encode/transformer
+stress check, and native decoding was identical before and after it. The revised
+full suite passes its original thresholds; they were not relaxed.
+
+Historical throughput measurements above predate this port. The GPU is shared
+with unrelated inference work; timings from concurrent correctness tests are not
+isolated throughput measurements.
+
+A final startup pass validates and maps each auxiliary weight file and uploads it
+into one resident allocation, with shared tensor views. This reduced observed
+model loading from 6.31 s to 1.43 s while retaining the exact 1024² RGB checksum.
+Final warm generation was 18.49 s versus 19.33 s for the saved HIP build under the
+same local conditions. The fresh shared-noise UI pair took 19.36 s for native
+HRX generation and 53.73 s for ComfyUI INT8 ConvRot. Detailed conditions, hashes
+and the single-prompt quality comparison are in `docs/hrx-runtime.md`.

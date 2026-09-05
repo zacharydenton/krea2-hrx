@@ -1,13 +1,10 @@
-#define PCRE2_CODE_UNIT_WIDTH 8
 #include "native_tokenizer.h"
+#include "unicode.h"
 #include <algorithm>
 #include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
-#include <pcre2.h>
 #include <stdexcept>
-#include <unicode/normalizer2.h>
-#include <unicode/ustring.h>
 #include <unordered_map>
 
 namespace krea_native {
@@ -17,7 +14,6 @@ struct Tokenizer::Impl {
   std::unordered_map<std::string, int32_t> vocab;
   std::map<std::pair<std::string, std::string>, int> merges;
   std::vector<std::pair<std::string, int32_t>> special;
-  pcre2_code *regex = nullptr;
   Impl() {
     unsigned extra = 256;
     for (unsigned i = 0; i < 256; ++i)
@@ -25,10 +21,6 @@ struct Tokenizer::Impl {
         reverse[i] = i;
       else
         reverse[extra++] = i;
-  }
-  ~Impl() {
-    if (regex)
-      pcre2_code_free(regex);
   }
   std::string unbyte(const std::string &s) {
     std::string out;
@@ -75,45 +67,14 @@ struct Tokenizer::Impl {
   void ordinary(const std::string &input, std::vector<int32_t> &out) const {
     if (input.empty())
       return;
-    UErrorCode status = U_ZERO_ERROR;
-    int32_t length = 0;
-    u_strFromUTF8(nullptr, 0, &length, input.data(), input.size(), &status);
-    if (status != U_BUFFER_OVERFLOW_ERROR && U_FAILURE(status))
-      throw std::invalid_argument("invalid UTF-8 prompt");
-    status = U_ZERO_ERROR;
-    std::vector<UChar> utf16(length + 1);
-    u_strFromUTF8(utf16.data(), utf16.size(), &length, input.data(),
-                  input.size(), &status);
-    auto *normalizer = icu::Normalizer2::getNFCInstance(status);
-    icu::UnicodeString normalized;
-    if (U_SUCCESS(status))
-      normalizer->normalize(icu::UnicodeString(utf16.data(), length),
-                            normalized, status);
-    if (U_FAILURE(status))
-      throw std::invalid_argument("cannot normalize UTF-8 prompt");
-    std::string s;
-    normalized.toUTF8String(s);
-    auto data =
-        std::unique_ptr<pcre2_match_data, decltype(&pcre2_match_data_free)>(
-            pcre2_match_data_create_from_pattern(regex, nullptr),
-            pcre2_match_data_free);
-    size_t pos = 0;
-    while (pos < s.size()) {
-      int rc = pcre2_match(regex, (PCRE2_SPTR)s.data(), s.size(), pos, 0,
-                           data.get(), nullptr);
-      if (rc < 0)
-        throw std::invalid_argument(
-            "prompt is not valid UTF-8 or tokenizer failed");
-      auto match = pcre2_get_ovector_pointer(data.get());
-      if (match[0] != pos || match[1] <= pos)
-        throw std::runtime_error("tokenizer did not cover input");
-      word(s.substr(pos, match[1] - pos), out);
-      pos = match[1];
-    }
+    for (const auto &piece : unicode::words(input))
+      word(piece, out);
   }
 };
 Tokenizer::Tokenizer(const std::string &path) : impl(std::make_unique<Impl>()) {
   std::ifstream f(path);
+  if (!f)
+    throw std::runtime_error("cannot read tokenizer: " + path);
   json j;
   f >> j;
   if (j["normalizer"]["type"] != "NFC" || j["model"]["type"] != "BPE")
@@ -138,13 +99,10 @@ Tokenizer::Tokenizer(const std::string &path) : impl(std::make_unique<Impl>()) {
     impl->special.emplace_back(token["content"], token["id"]);
   std::string pattern =
       j["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"];
-  int error;
-  PCRE2_SIZE offset;
-  impl->regex = pcre2_compile((PCRE2_SPTR)pattern.c_str(), pattern.size(),
-                              PCRE2_UTF | PCRE2_UCP, &error, &offset, nullptr);
-  if (!impl->regex)
-    throw std::runtime_error("cannot compile tokenizer regex at " +
-                             std::to_string(offset));
+  const std::string supported =
+      R"((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)";
+  if (pattern != supported)
+    throw std::runtime_error("unsupported tokenizer split pattern");
 }
 Tokenizer::~Tokenizer() = default;
 std::vector<int32_t> Tokenizer::encode(const std::string &text) const {

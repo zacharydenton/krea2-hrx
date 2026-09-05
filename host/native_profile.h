@@ -16,14 +16,14 @@ struct Profile {
     const char *value = std::getenv("KREA2_NATIVE_PROFILE");
     enabled = value && std::strcmp(value, "1") == 0;
     if (enabled) {
-      hip_check(hipDeviceSynchronize());
+      gpu::synchronize();
       last = std::chrono::steady_clock::now();
     }
   }
   void mark(const char *stage) {
     if (!enabled)
       return;
-    hip_check(hipDeviceSynchronize());
+    gpu::synchronize();
     auto now = std::chrono::steady_clock::now();
     std::fprintf(stderr, "native profile %s / %s: %.3f ms\n", scope, stage,
                  std::chrono::duration<double, std::milli>(now - last).count());

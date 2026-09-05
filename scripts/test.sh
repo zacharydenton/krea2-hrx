@@ -18,30 +18,35 @@ done
 tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT; export tmpdir
 status=0
 step() { local name="$1"; shift; printf '\n=== %s ===\n' "$name"; if "$@"; then printf '  ok\n'; else printf '  FAILED: %s\n' "$name"; status=1; return 1; fi; }
-step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom experiments/attention_gqa_lds_f16_wmma.loom'
+step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom kernels/native/*.loom experiments/attention_gqa_lds_f16_wmma.loom'
 step "generated kernels match their generators" bash -c '
-  cp -r kernels "$tmpdir/kernels" && mkdir -p "$tmpdir/experiments" && cd "$tmpdir" && mkdir -p tools &&
+  cp -r kernels "$tmpdir/kernels" && mkdir -p "$tmpdir/experiments" && cd "$tmpdir" && mkdir -p tools host &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_prepare.py" > tools/gen_prepare.py &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#; s#OUT = Path(__file__).resolve().parent.parent / \"kernels\"#OUT = Path(\"$tmpdir\") / \"kernels\"#" "$OLDPWD/tools/gen_attention_lds.py" > tools/gen_attention_lds.py &&
+  sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_native_ops.py" > tools/gen_native_ops.py &&
+  python3 tools/gen_native_ops.py && cmp -s host/native_sources.h "$OLDPWD/host/native_sources.h" && diff -r kernels/native "$OLDPWD/kernels/native" &&
   cp "$OLDPWD/tools/gen_sage_attention.py" tools/gen_sage_attention.py &&
   python3 tools/gen_prepare.py >/dev/null && python3 tools/gen_attention_lds.py >/dev/null && python3 tools/gen_sage_attention.py >/dev/null &&
   "$LOOM_FORMAT" --in-place experiments/attention_gqa_lds_f16_wmma.loom >/dev/null && cmp -s experiments/attention_gqa_lds_f16_wmma.loom "$OLDPWD/experiments/attention_gqa_lds_f16_wmma.loom" &&
   for f in prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 attention_sage_i4_fast attention_sage_i4_fast_prefetch; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
 step "build host"                 ./scripts/build_host.sh
-step "Python runtime regressions" bash -c 'source .venv/bin/activate && env -u LD_LIBRARY_PATH python3 tests/test_runtime.py'
-step "native constructor cleanup" bash -c '/opt/rocm/bin/hipcc --offload-arch=gfx1151 -O2 -Wall -Werror tests/test_session.cpp host/krea2.cpp host/sage.cpp -lhipblas -Wl,--wrap=hipMalloc,--wrap=hipFree -o "$tmpdir/test-session" && env -u LD_LIBRARY_PATH "$tmpdir/test-session" "$tmpdir"'
-step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && env -u LD_LIBRARY_PATH python3 tests/test_ref_vs_diffusers.py'
-step "prepare kernels"            bash -c 'env -u LD_LIBRARY_PATH python3 tests/test_prepare.py'
-step "qk norm + rope"             bash -c 'env -u LD_LIBRARY_PATH python3 tests/test_rope_qknorm.py'
-step "FP16 attention reference"   bash -c 'env -u LD_LIBRARY_PATH python3 tests/test_attention.py'
-step "gfx1151 attention vs oracle" bash -c 'env -u LD_LIBRARY_PATH .venv/bin/python tests/test_sage_attention.py'
+step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
+step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
+step "native constructor cleanup" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_session.cpp build/obj/{gpu,krea2,sage,native_kernels}.o "${HRXLIBS[@]}" -Wl,--wrap=hrx_buffer_allocate,--wrap=hrx_buffer_release -o "$tmpdir/test-session" && "$tmpdir/test-session" "$tmpdir"'
+step "auxiliary Loom kernel regressions" bash -c 'source .venv/bin/activate && python3 tests/test_native_ops.py'
+step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && python3 tests/test_ref_vs_diffusers.py'
+step "prepare kernels"            bash -c 'python3 tests/test_prepare.py'
+step "qk norm + rope"             bash -c 'python3 tests/test_rope_qknorm.py'
+step "FP16 attention reference"   bash -c 'python3 tests/test_attention.py'
+step "gfx1151 attention vs oracle" bash -c '.venv/bin/python tests/test_sage_attention.py'
 if [ "$quick" = 0 ]; then
-  step "native blocks vs reference (fixture)" bash -c 'source .venv/bin/activate && env -u LD_LIBRARY_PATH python3 tests/test_blocks.py --curve 1,28'
+  step "native blocks vs reference (fixture)" bash -c 'source .venv/bin/activate && python3 tests/test_blocks.py --curve 1,28'
 fi
 if [ "$native" = 1 ]; then
   if step "build native pipeline" ./scripts/build_native.sh; then
-    step "native scheduler and weight reuse regressions" bash -c 'env -u LD_LIBRARY_PATH .venv/bin/python tests/test_native_regressions.py'
-    step "native pipeline vs reference" bash -c 'env -u LD_LIBRARY_PATH .venv/bin/python tests/test_native_pipeline.py'
+    step "Unicode normalization, tokenizer and SHA-256" bash -c '.venv/bin/python tests/test_unicode.py'
+    step "native scheduler and weight reuse regressions" bash -c '.venv/bin/python tests/test_native_regressions.py'
+    step "native pipeline vs reference" bash -c '.venv/bin/python tests/test_native_pipeline.py'
   fi
 fi
 printf '\n'; [ "$status" = 0 ] && printf 'all checks passed\n' || printf 'SOME CHECKS FAILED\n'
