@@ -9,7 +9,19 @@ void matmul(const std::string &name, const void *a, const void *b, void *out,
   args.i32(m).f32(alpha).ptr(a).ptr(b).ptr(out);
   if (bias)
     args.ptr(bias);
-  native_launch(name,
+  // Double the row tile when it adds no extra padded rows. Tiny matrices
+  // retain enough independent workgroups to occupy the GPU.
+  const bool wide =
+      m >= 128 && n >= 64 && ((m + 63) / 64) % 2 == 0 &&
+      (name == "gemm_bf16_bf16_nt" || name == "gemm_bf16_bf16_nt_bias");
+  const int tile_m = wide ? 128 : 64;
+  // The long convolution reductions stream the input once per column tile.
+  // A 128-column tile halves those reads; short reductions favor more tiles.
+  const bool square = wide && n >= 128 && ((n + 63) / 64) % 2 == 0 && k >= 128;
+  const int tile_n = square ? 128 : 64;
+  native_launch(square ? name + "_tiled"
+                : wide ? name + "_wide"
+                       : name,
                 {{"m", size_t(m)},
                  {"n", size_t(n)},
                  {"k", size_t(k)},
@@ -18,7 +30,8 @@ void matmul(const std::string &name, const void *a, const void *b, void *out,
                  {"csize", cs * batches},
                  {"astride", as},
                  {"bstride", bs}},
-                args, (n + 63) / 64, batches * ((m + 63) / 64));
+                args, (n + tile_n - 1) / tile_n,
+                batches * ((m + tile_m - 1) / tile_m));
 }
 } // namespace
 Tensor Ops::linear(const Tensor &x, const Weight &w, const B *bias) {

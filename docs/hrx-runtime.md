@@ -24,6 +24,14 @@ keep their existing precision. Sage packs four channels per lane with wave
 shuffles, processing eight token/head rows per workgroup without LDS barriers.
 The V transpose adapts the tiled Loom implementation in `minimax-h3-loom`.
 
+Auxiliary WMMA kernels load and store four contiguous elements at a time when
+the shape permits it. Irregular tails retain scalar guards. Operand and result
+tiles share LDS after the final workgroup barrier: the 64×64 kernel needs 10 KiB
+instead of 18 KiB. Image-sized BF16 projections use 128×64 tiles, and long
+reductions with enough output columns use 128×128 tiles to halve repeated input
+reads. Selection avoids adding padded rows or columns compared with 64×64 tiles.
+The FP32 accumulation order and BF16 rounding boundaries are unchanged.
+
 The host tokenizer uses complete Unicode 16.0 category and canonical-normalization
 tables, including algorithmic Hangul composition. It implements the exact Qwen
 split expression before byte-level BPE. The tables and embedded Loom source are
@@ -97,3 +105,45 @@ absolute difference is 14.88/255. This is one prompt compared to ComfyUI INT8,
 not a BF16 quality sweep. Both full-resolution PNGs are available in the UI;
 composition is similar and detail differs. History and measurements are stored
 under `build/comparison-ui/b090e5212a974313`.
+
+## Auxiliary GEMM optimization
+
+`tools/bench_native_gemm.py` compiles the current kernels and a selected Git
+revision, checks bit-identical results on signed BF16 inputs, then alternates
+their execution order on the same resident GPU buffers. It reports paired
+speedup and latency percentiles; compilation, allocation and transfers are
+outside the timed region. These are kernel measurements, not image latency.
+
+```sh
+scripts/build_host.sh
+env -u LD_LIBRARY_PATH .venv/bin/python tools/bench_native_gemm.py --baseline 2870077
+```
+
+The September 6 run used 80 alternating rounds per shape. Another H3 video job
+shared the GPU, so the observed improvements are estimates under contention.
+The [raw results](benchmarks/aux-gemm-2026-09-06.json) include latency percentiles.
+
+| GEMM M×N×K | Median paired speedup | Output |
+| --- | ---: | --- |
+| 64×6144×2560 | 1.37× | bit identical |
+| 4096×6144×64 | 3.37× | bit identical |
+| 65536×256×2304 | 1.87× | bit identical |
+| 16384×512×4608 | 1.49× | bit identical |
+
+The end-to-end timing sweep was stopped after the saved baseline took 105 seconds
+for a previously ~19-second image under the competing workload. No new full-image
+speedup is claimed from that sweep. The final build passes
+`scripts/test.sh --quick --native`, including the independent pipeline references,
+all three GEMM tile shapes with irregular tails and batched heads, real HRX
+dependency checks, and all 5,050 CUDA scheduler steps.
+The final 1024², eight-step, seed-zero fox image is byte-identical to `2870077`:
+SHA-256 `65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09`.
+
+The optimization retains BF16 auxiliary weights and existing quantization in
+the main transformer. Larger INT4 workgroup tiles adapted from the sibling
+GEMM/H3 work were also tested: their gains varied by projection and were not
+adopted. Removing raster padding alone did not produce a consistent gain.
+Carrying the next Sage key scale and correction in registers preserved output
+but slowed the 4K-token attention kernel from 13.97 to 15.55 ms median; carrying
+only the scale also lost. The existing attention schedules remain selected.
+These local experiments do not establish a state-of-the-art ranking.

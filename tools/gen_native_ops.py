@@ -605,9 +605,11 @@ softmax(False)
 softmax(True)
 
 
-# A 64x64 WMMA tile, based on dinov3-loom's proven 4x2 wave layout.
+# 64x64, 128x64 and 128x128 WMMA tiles, using a 4x2 wave layout.
+# Larger row tiles reuse B fragments; larger column tiles halve A traffic
+# in the VAE's long reductions. All share the same accumulation order.
 # Scalar predication at the edges handles arbitrary M/N/K, including RGB's N=3.
-def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
+def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, tile_n=64):
     name = (
         "gemm_"
         + dtype
@@ -615,6 +617,7 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
         + output
         + ("_nt" if transpose else "_nn")
         + ("_bias" if bias else "")
+        + ("_tiled" if tile_n == 128 else "_wide" if tile_m == 128 else "")
     )
     bufs = [("a", dtype, "%asize"), ("b", dtype, "%bsize"), ("out", output, "%csize")]
     if bias:
@@ -631,31 +634,33 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
     lane = k.var()
     k.emit(f"{wave} = kernel.subgroup.id : index")
     k.emit(f"{lane} = kernel.subgroup.lane.id : index")
-    wr = k.mul(k.div(wave, c2), c16)
-    wc = k.mul(k.rem(wave, c2), c32)
-    mt = k.div(k.add("%m", k.c(63)), c64)
+    wr = k.mul(k.div(wave, c2), k.c(tile_m // 4))
+    wc = k.mul(k.rem(wave, c2), k.c(tile_n // 2))
+    mt = k.div(k.add("%m", k.c(tile_m - 1)), k.c(tile_m))
     batch = k.div("%group_y", mt)
-    bm = k.mul(k.rem("%group_y", mt), c64)
-    bn = k.mul("%group", c64)
+    bm = k.mul(k.rem("%group_y", mt), k.c(tile_m))
+    bn = k.mul("%group", k.c(tile_n))
     ao = k.mul(batch, "%astride")
     bo = k.mul(batch, "%bstride")
     co = k.mul(k.mul(batch, "%m"), "%n")
-    k.emit("%stage_bytes = index.constant 5120 : offset")
-    k.emit("%result_bytes = index.constant 8192 : offset")
+    # Once the K loop's final workgroup barrier completes, its operand tiles
+    # are dead. Reuse that LDS for the eight result tiles (8192 bytes).
+    k.emit(f"%stage_bytes = index.constant {(tile_m + tile_n) * 80} : offset")
+    k.emit(f"%b_offset = index.constant {tile_m * 80} : offset")
     k.emit("%wave_bytes = index.constant 1024 : offset")
+    k.emit("%stage_buf = buffer.alloca<workgroup> align(16) %stage_bytes : buffer")
     for s in ["aa", "bb"]:
-        k.emit(f"%{s}_buf = buffer.alloca<workgroup> align(16) %stage_bytes : buffer")
+        offset = "%zero_offset" if s == "aa" else "%b_offset"
         k.emit(
-            f"%{s} = buffer.view %{s}_buf[%zero_offset] : buffer -> view<64x40x{dtype}>"
+            f"%{s} = buffer.view %stage_buf[{offset}] : buffer -> view<{tile_m if s == 'aa' else tile_n}x40x{dtype}>"
         )
     k.emit(f"%rhs_layout = encoding.layout.strided [1, {c40}] : encoding<layout>")
     k.emit(
-        f"%rhs = buffer.view %bb_buf[%zero_offset] : buffer -> view<32x64x{dtype}, %rhs_layout>"
+        f"%rhs = buffer.view %stage_buf[%b_offset] : buffer -> view<32x{tile_n}x{dtype}, %rhs_layout>"
     )
-    k.emit("%result_buf = buffer.alloca<workgroup> align(16) %result_bytes : buffer")
     ro = k.var()
     k.emit(f"{ro} = index.scale {wave}, %wave_bytes : index, offset -> offset")
-    k.emit(f"%result = buffer.view %result_buf[{ro}] : buffer -> view<16x16xf32>")
+    k.emit(f"%result = buffer.view %stage_buf[{ro}] : buffer -> view<16x16xf32>")
     k.emit("%zero_vec = vector.constant 0.0 : vector<8xf32>")
     k.emit(
         f"%init = vector.fragment<init> %zero_vec shape [{c16}, {c16}] : vector<8xf32>"
@@ -663,14 +668,56 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
     loadrow = k.div("%lane", c8)
     loadcol = k.mul(k.rem("%lane", c8), c4)
     kend = k.mul(k.div(k.add("%k", k.c(31)), c32), c32)
-    kb, acc0, acc1, out0, out1 = [k.var() for _ in range(5)]
+    fm, fn = tile_m // 64, tile_n // 32
+    accumulators = [k.var() for _ in range(fm * fn)]
+    results = [k.var() for _ in accumulators]
+    kb = k.var()
+    types = ", ".join(["vector<8xf32>"] * len(accumulators))
+    initials = ", ".join(f"{a} = %init : vector<8xf32>" for a in accumulators)
     k.emit(
-        f"{out0}, {out1} = scf.for {kb} = [{c0} to {kend} step {c32}]({acc0} = %init : vector<8xf32>, {acc1} = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {{"
+        f"{', '.join(results)} = scf.for {kb} = [{c0} to {kend} step {c32}]({initials}) -> ({types}) {{"
     )
-    for h in range(2):
+    for h in range(max(tile_m, tile_n) // 32):
         row = k.add(loadrow, k.c(h * 32))
         ar = k.add(bm, row)
         br = k.add(bn, row)
+        # A contiguous four-element packet replaces four separately predicated
+        # global loads and LDS stores. K alignment is known at compilation;
+        # retain scalar tails for the small irregular attention matrices.
+        if transpose:
+            aligned = k.cmp(k.rem("%k", c4), c0, "eq")
+            k.begin(aligned)
+            col = k.add(kb, loadcol)
+            for inp, rr, limit, off, tile in [
+                ("a", ar, "%m", ao, "aa"),
+                ("b", br, "%n", bo, "bb"),
+            ]:
+                if h >= (tile_m if inp == "a" else tile_n) // 32:
+                    continue
+                valid = k.op("scalar.andi", k.cmp(rr, limit), k.cmp(col, "%k"), t="i1")
+                value = k.var()
+                k.emit(f"{value} = scf.if {valid} -> (vector<4x{dtype}>) {{")
+                idx = k.add(off, k.add(k.mul(rr, "%k"), col))
+                bounded = k.var()
+                size = "%asize" if inp == "a" else "%bsize"
+                end = k.op("index.sub", size, c4)
+                k.emit(
+                    f"{bounded} = index.assume {idx} [range({idx}, 0, 1073741823), le({idx}, {end}), mul({idx}, 4)] : index"
+                )
+                val = k.var()
+                k.emit(
+                    f"{val} = vector.load %{inp}_view[{bounded}] : view<[{size}]x{dtype}> -> vector<4x{dtype}>"
+                )
+                k.emit(f"scf.yield {val} : vector<4x{dtype}>")
+                k.emit("} else {")
+                zero = k.var()
+                k.emit(f"{zero} = vector.constant 0.0 : vector<4x{dtype}>")
+                k.emit(f"scf.yield {zero} : vector<4x{dtype}>")
+                k.end()
+                k.emit(
+                    f"vector.store {value}, %{tile}[{row}, {loadcol}] : vector<4x{dtype}>, view<{tile_m if tile == 'aa' else tile_n}x40x{dtype}>"
+                )
+            k.emit("} else {")
         for j in range(4):
             lc = k.add(loadcol, k.c(j))
             col = k.add(kb, lc)
@@ -678,6 +725,8 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
                 ("a", ar, "%m", ao, "aa"),
                 ("b", br, "%n", bo, "bb"),
             ]:
+                if h >= (tile_m if inp == "a" else tile_n) // 32:
+                    continue
                 valid = k.op("scalar.andi", k.cmp(rr, limit), k.cmp(col, "%k"), t="i1")
                 value = k.var()
                 k.emit(f"{value} = scf.if {valid} -> ({dtype}) {{")
@@ -694,48 +743,92 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
                 k.emit(f"scf.yield {z} : {dtype}")
                 k.end()
                 k.emit(
-                    f"view.store {value}, %{tile}[{row}, {lc}] : {dtype}, view<64x40x{dtype}>"
+                    f"view.store {value}, %{tile}[{row}, {lc}] : {dtype}, view<{tile_m if tile == 'aa' else tile_n}x40x{dtype}>"
                 )
+        if transpose:
+            k.end()
     k.emit("kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-    a0, a1 = acc0, acc1
+    values = accumulators[:]
     for h in range(2):
-        lh = k.var()
-        r0 = k.var()
-        r1 = k.var()
         kh = k.c(h * 16)
-        wc1 = k.add(wc, c16)
-        k.emit(
-            f"{lh} = vector.fragment.load<lhs> %aa[{wr}, {kh}] shape [{c16}, {c16}] : view<64x40x{dtype}> -> vector<16x{dtype}>"
-        )
-        for r, c in [(r0, wc), (r1, wc1)]:
+        rhs = []
+        for j in range(fn):
+            v = k.var()
+            col = k.add(wc, k.c(j * 16))
             k.emit(
-                f"{r} = vector.fragment.load<rhs> %rhs[{kh}, {c}] shape [{c16}, {c16}] : view<32x64x{dtype}, %rhs_layout> -> vector<16x{dtype}>"
+                f"{v} = vector.fragment.load<rhs> %rhs[{kh}, {col}] shape [{c16}, {c16}] : view<32x{tile_n}x{dtype}, %rhs_layout> -> vector<16x{dtype}>"
             )
-        b0 = k.var()
-        b1 = k.var()
-        k.emit(
-            f"{b0} = vector.mma {lh}, {r0}, {a0} : vector<16x{dtype}>, vector<16x{dtype}>, vector<8xf32>"
-        )
-        k.emit(
-            f"{b1} = vector.mma {lh}, {r1}, {a1} : vector<16x{dtype}>, vector<16x{dtype}>, vector<8xf32>"
-        )
-        a0, a1 = b0, b1
+            rhs.append(v)
+        for i in range(fm):
+            lhs = k.var()
+            row = k.add(wr, k.c(i * 16))
+            k.emit(
+                f"{lhs} = vector.fragment.load<lhs> %aa[{row}, {kh}] shape [{c16}, {c16}] : view<{tile_m}x40x{dtype}> -> vector<16x{dtype}>"
+            )
+            for j in range(fn):
+                v = k.var()
+                k.emit(
+                    f"{v} = vector.mma {lhs}, {rhs[j]}, {values[i * fn + j]} : vector<16x{dtype}>, vector<16x{dtype}>, vector<8xf32>"
+                )
+                values[i * fn + j] = v
     k.emit("kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
-    k.emit(f"scf.yield {a0}, {a1} : vector<8xf32>, vector<8xf32>")
+    k.emit(f"scf.yield {', '.join(values)} : {types}")
     k.end()
     pr = k.div(lane, c4)
     pc = k.mul(k.rem(lane, c4), c4)
-    for f, acc in enumerate([out0, out1]):
+    for f, acc in enumerate(results):
         k.emit(
             f"vector.fragment.store<result> {acc}, %result[{c0}, {c0}] shape [{c16}, {c16}] : vector<8xf32>, view<16x16xf32>"
         )
         k.emit("kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)")
         for h in range(2):
             rr = k.add(pr, k.c(h * 8))
-            row = k.add(bm, k.add(wr, rr))
+            row = k.add(bm, k.add(wr, k.add(k.c((f // fn) * 16), rr)))
+            # Aligned output rows can leave LDS in four-element packets too.
+            # N=3 RGB and other irregular widths use the scalar edge path.
+            aligned = k.cmp(k.rem("%n", c4), c0, "eq")
+            k.begin(aligned)
+            col = k.add(bn, k.add(wc, k.add(k.c((f % fn) * 16), pc)))
+            valid = k.op("scalar.andi", k.cmp(row, "%m"), k.cmp(col, "%n"), t="i1")
+            k.begin(valid)
+            value, alpha, scaled = [k.var() for _ in range(3)]
+            k.emit(
+                f"{value} = vector.load %result[{rr}, {pc}] : view<16x16xf32> -> vector<4xf32>"
+            )
+            k.emit(f"{alpha} = vector.splat %alpha : vector<4xf32>")
+            k.emit(f"{scaled} = vector.mulf {value}, {alpha} : vector<4xf32>")
+            if bias:
+                bc, bv, bf, added = [k.var() for _ in range(4)]
+                end = k.op("index.sub", "%n", c4)
+                k.emit(
+                    f"{bc} = index.assume {col} [range({col}, 0, 1073741823), le({col}, {end}), mul({col}, 4)] : index"
+                )
+                k.emit(
+                    f"{bv} = vector.load %bias_view[{bc}] : view<[%n]x{dtype}> -> vector<4x{dtype}>"
+                )
+                k.emit(f"{bf} = vector.extf {bv} : vector<4x{dtype}> to vector<4xf32>")
+                k.emit(f"{added} = vector.addf {scaled}, {bf} : vector<4xf32>")
+                scaled = added
+            if output != "f32":
+                narrow = k.var()
+                k.emit(
+                    f"{narrow} = vector.fptrunc {scaled} : vector<4xf32> to vector<4x{output}>"
+                )
+                scaled = narrow
+            idx = k.add(co, k.add(k.mul(row, "%n"), col))
+            bound = k.var()
+            end = k.op("index.sub", "%csize", c4)
+            k.emit(
+                f"{bound} = index.assume {idx} [range({idx}, 0, 1073741823), le({idx}, {end}), mul({idx}, 4)] : index"
+            )
+            k.emit(
+                f"vector.store {scaled}, %out_view[{bound}] : vector<4x{output}>, view<[%csize]x{output}>"
+            )
+            k.end()
+            k.emit("} else {")
             for j in range(4):
                 cc = k.add(pc, k.c(j))
-                col = k.add(bn, k.add(wc, k.add(k.c(f * 16), cc)))
+                col = k.add(bn, k.add(wc, k.add(k.c((f % fn) * 16), cc)))
                 valid = k.op("scalar.andi", k.cmp(row, "%m"), k.cmp(col, "%n"), t="i1")
                 k.begin(valid)
                 v = k.var()
@@ -745,9 +838,15 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False):
                     v = k.math("addf", v, k.load("bias", col))
                 k.store("out", k.add(co, k.add(k.mul(row, "%n"), col)), v)
                 k.end()
+            k.end()
         k.emit("kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)")
     save(k)
 
+
+gemm(tile_m=128, tile_n=128)
+gemm(bias=True, tile_m=128, tile_n=128)
+gemm(tile_m=128)
+gemm(bias=True, tile_m=128)
 
 for kw in [
     dict(),

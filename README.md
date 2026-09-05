@@ -136,6 +136,12 @@ RGB checksum. A separate UI comparison using identical initial noise measured
 measurements, not a broad benchmark; model loading is excluded from generation
 times. See `docs/hrx-runtime.md` for the conditions.
 
+Auxiliary WMMA kernels now use wider memory operations, reuse operand storage for
+their results, and select larger tiles for image projections and VAE convolutions.
+They preserve the accumulation and rounding order. The resident-buffer A/B
+benchmark and rejected INT4/prefetch experiments are documented in
+[HRX runtime details](docs/hrx-runtime.md#auxiliary-gemm-optimization).
+
 For stage timings, set `KREA2_NATIVE_PROFILE=1` when running the CLI. This adds
 synchronization and prints text encoding, denoising, VAE and transformer-stage
 timings to stderr. Leave it unset for performance comparisons.

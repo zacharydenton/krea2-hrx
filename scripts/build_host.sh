@@ -11,4 +11,6 @@ mv -f build/sage-runner.tmp build/sage-runner
 mv -f build/libnative_ops_test.so.tmp build/libnative_ops_test.so
 "$CXX" "${CXXFLAGS[@]}" tests/test_hrx_runtime.cpp -Lbuild -lkrea2 -Wl,-rpath,'$ORIGIN' -o build/test-hrx-runtime.tmp
 mv -f build/test-hrx-runtime.tmp build/test-hrx-runtime
+"$CXX" "${CXXFLAGS[@]}" tests/gemm_bench.cpp -Lbuild -lkrea2 -Wl,-rpath,'$ORIGIN' -o build/gemm-bench.tmp
+mv -f build/gemm-bench.tmp build/gemm-bench
 printf 'built HRX block library, Loom runner and Sage runner\n'

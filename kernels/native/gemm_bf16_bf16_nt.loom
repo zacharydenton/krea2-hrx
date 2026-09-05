@@ -40,8 +40,8 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_target) export("krea2_gemm_bf16_bf16_
   %v12 = index.constant 64 : index
   %v19 = index.constant 63 : index
   %v34 = index.constant 31 : index
-  %v57 = scalar.constant 0.0 : bf16
-  %v107 = index.constant 3 : index
+  %v82 = scalar.constant 0.0 : bf16
+  %v132 = index.constant 3 : index
   %zero_offset = index.constant 0 : offset
   %count_b = index.assume %count [range(%count, 1, 1073741824)] : index
   %lane = kernel.workitem.id<x> : index
@@ -79,18 +79,16 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_target) export("krea2_gemm_bf16_bf16_
   %v27 = index.mul %v22, %bstride : index
   %v28 = index.mul %v22, %m : index
   %v29 = index.mul %v28, %n : index
-  %stage_bytes = index.constant 5120 : offset
-  %result_bytes = index.constant 8192 : offset
+  %stage_bytes = index.constant 10240 : offset
+  %b_offset = index.constant 5120 : offset
   %wave_bytes = index.constant 1024 : offset
-  %aa_buf = buffer.alloca<workgroup> align(16) %stage_bytes : buffer
-  %aa = buffer.view %aa_buf[%zero_offset] : buffer -> view<64x40xbf16>
-  %bb_buf = buffer.alloca<workgroup> align(16) %stage_bytes : buffer
-  %bb = buffer.view %bb_buf[%zero_offset] : buffer -> view<64x40xbf16>
+  %stage_buf = buffer.alloca<workgroup> align(16) %stage_bytes : buffer
+  %aa = buffer.view %stage_buf[%zero_offset] : buffer -> view<64x40xbf16>
+  %bb = buffer.view %stage_buf[%b_offset] : buffer -> view<64x40xbf16>
   %rhs_layout = encoding.layout.strided [1, %v11] : encoding<layout>
-  %rhs = buffer.view %bb_buf[%zero_offset] : buffer -> view<32x64xbf16, %rhs_layout>
-  %result_buf = buffer.alloca<workgroup> align(16) %result_bytes : buffer
+  %rhs = buffer.view %stage_buf[%b_offset] : buffer -> view<32x64xbf16, %rhs_layout>
   %v30 = index.scale %v13, %wave_bytes : index, offset -> offset
-  %result = buffer.view %result_buf[%v30] : buffer -> view<16x16xf32>
+  %result = buffer.view %stage_buf[%v30] : buffer -> view<16x16xf32>
   %zero_vec = vector.constant 0.0 : vector<8xf32>
   %init = vector.fragment<init> %zero_vec shape [%v9, %v9] : vector<8xf32>
   %v31 = index.div %lane, %v8 : index
@@ -99,560 +97,736 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_target) export("krea2_gemm_bf16_bf16_
   %v35 = index.add %k, %v34 : index
   %v36 = index.div %v35, %v10 : index
   %v37 = index.mul %v36, %v10 : index
-  %v41, %v42 = scf.for %v38 = [%v4 to %v37 step %v10](%v39 = %init : vector<8xf32>, %v40 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {
+  %v40, %v41 = scf.for %v42 = [%v4 to %v37 step %v10](%v38 = %init : vector<8xf32>, %v39 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {
     %v43 = index.add %v31, %v4 : index
     %v44 = index.add %v24, %v43 : index
     %v45 = index.add %v25, %v43 : index
-    %v46 = index.add %v33, %v4 : index
-    %v47 = index.add %v38, %v46 : index
-    %v48 = index.cmp ult, %v44, %m : index
-    %v49 = index.cmp ult, %v47, %k : index
-    %v50 = scalar.andi %v48, %v49 : i1
-    %v51 = scf.if %v50 -> (bf16) {
-      %v52 = index.mul %v44, %k : index
-      %v53 = index.add %v52, %v47 : index
-      %v54 = index.add %v26, %v53 : index
-      %v55 = index.assume %v54 [range(%v54, 0, 1073741824), lt(%v54, %asize)] : index
-      %v56 = view.load %a_view[%v55] : view<[%asize]xbf16> -> bf16
-      scf.yield %v56 : bf16
+    %v46 = index.rem %k, %v7 : index
+    %v47 = index.cmp eq, %v46, %v4 : index
+    scf.if %v47 {
+      %v48 = index.add %v42, %v33 : index
+      %v49 = index.cmp ult, %v44, %m : index
+      %v50 = index.cmp ult, %v48, %k : index
+      %v51 = scalar.andi %v49, %v50 : i1
+      %v52 = scf.if %v51 -> (vector<4xbf16>) {
+        %v53 = index.mul %v44, %k : index
+        %v54 = index.add %v53, %v48 : index
+        %v55 = index.add %v26, %v54 : index
+        %v57 = index.sub %asize, %v7 : index
+        %v56 = index.assume %v55 [range(%v55, 0, 1073741823), le(%v55, %v57), mul(%v55, 4)] : index
+        %v58 = vector.load %a_view[%v56] : view<[%asize]xbf16> -> vector<4xbf16>
+        scf.yield %v58 : vector<4xbf16>
+      } else {
+        %v59 = vector.constant 0.0 : vector<4xbf16>
+        scf.yield %v59 : vector<4xbf16>
+      }
+      vector.store %v52, %aa[%v43, %v33] : vector<4xbf16>, view<64x40xbf16>
+      %v60 = index.cmp ult, %v45, %n : index
+      %v61 = index.cmp ult, %v48, %k : index
+      %v62 = scalar.andi %v60, %v61 : i1
+      %v63 = scf.if %v62 -> (vector<4xbf16>) {
+        %v64 = index.mul %v45, %k : index
+        %v65 = index.add %v64, %v48 : index
+        %v66 = index.add %v27, %v65 : index
+        %v68 = index.sub %bsize, %v7 : index
+        %v67 = index.assume %v66 [range(%v66, 0, 1073741823), le(%v66, %v68), mul(%v66, 4)] : index
+        %v69 = vector.load %b_view[%v67] : view<[%bsize]xbf16> -> vector<4xbf16>
+        scf.yield %v69 : vector<4xbf16>
+      } else {
+        %v70 = vector.constant 0.0 : vector<4xbf16>
+        scf.yield %v70 : vector<4xbf16>
+      }
+      vector.store %v63, %bb[%v43, %v33] : vector<4xbf16>, view<64x40xbf16>
     } else {
-      scf.yield %v57 : bf16
+      %v71 = index.add %v33, %v4 : index
+      %v72 = index.add %v42, %v71 : index
+      %v73 = index.cmp ult, %v44, %m : index
+      %v74 = index.cmp ult, %v72, %k : index
+      %v75 = scalar.andi %v73, %v74 : i1
+      %v76 = scf.if %v75 -> (bf16) {
+        %v77 = index.mul %v44, %k : index
+        %v78 = index.add %v77, %v72 : index
+        %v79 = index.add %v26, %v78 : index
+        %v80 = index.assume %v79 [range(%v79, 0, 1073741824), lt(%v79, %asize)] : index
+        %v81 = view.load %a_view[%v80] : view<[%asize]xbf16> -> bf16
+        scf.yield %v81 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v76, %aa[%v43, %v71] : bf16, view<64x40xbf16>
+      %v83 = index.cmp ult, %v45, %n : index
+      %v84 = index.cmp ult, %v72, %k : index
+      %v85 = scalar.andi %v83, %v84 : i1
+      %v86 = scf.if %v85 -> (bf16) {
+        %v87 = index.mul %v45, %k : index
+        %v88 = index.add %v87, %v72 : index
+        %v89 = index.add %v27, %v88 : index
+        %v90 = index.assume %v89 [range(%v89, 0, 1073741824), lt(%v89, %bsize)] : index
+        %v91 = view.load %b_view[%v90] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v91 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v86, %bb[%v43, %v71] : bf16, view<64x40xbf16>
+      %v92 = index.add %v33, %v5 : index
+      %v93 = index.add %v42, %v92 : index
+      %v94 = index.cmp ult, %v44, %m : index
+      %v95 = index.cmp ult, %v93, %k : index
+      %v96 = scalar.andi %v94, %v95 : i1
+      %v97 = scf.if %v96 -> (bf16) {
+        %v98 = index.mul %v44, %k : index
+        %v99 = index.add %v98, %v93 : index
+        %v100 = index.add %v26, %v99 : index
+        %v101 = index.assume %v100 [range(%v100, 0, 1073741824), lt(%v100, %asize)] : index
+        %v102 = view.load %a_view[%v101] : view<[%asize]xbf16> -> bf16
+        scf.yield %v102 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v97, %aa[%v43, %v92] : bf16, view<64x40xbf16>
+      %v103 = index.cmp ult, %v45, %n : index
+      %v104 = index.cmp ult, %v93, %k : index
+      %v105 = scalar.andi %v103, %v104 : i1
+      %v106 = scf.if %v105 -> (bf16) {
+        %v107 = index.mul %v45, %k : index
+        %v108 = index.add %v107, %v93 : index
+        %v109 = index.add %v27, %v108 : index
+        %v110 = index.assume %v109 [range(%v109, 0, 1073741824), lt(%v109, %bsize)] : index
+        %v111 = view.load %b_view[%v110] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v111 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v106, %bb[%v43, %v92] : bf16, view<64x40xbf16>
+      %v112 = index.add %v33, %v6 : index
+      %v113 = index.add %v42, %v112 : index
+      %v114 = index.cmp ult, %v44, %m : index
+      %v115 = index.cmp ult, %v113, %k : index
+      %v116 = scalar.andi %v114, %v115 : i1
+      %v117 = scf.if %v116 -> (bf16) {
+        %v118 = index.mul %v44, %k : index
+        %v119 = index.add %v118, %v113 : index
+        %v120 = index.add %v26, %v119 : index
+        %v121 = index.assume %v120 [range(%v120, 0, 1073741824), lt(%v120, %asize)] : index
+        %v122 = view.load %a_view[%v121] : view<[%asize]xbf16> -> bf16
+        scf.yield %v122 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v117, %aa[%v43, %v112] : bf16, view<64x40xbf16>
+      %v123 = index.cmp ult, %v45, %n : index
+      %v124 = index.cmp ult, %v113, %k : index
+      %v125 = scalar.andi %v123, %v124 : i1
+      %v126 = scf.if %v125 -> (bf16) {
+        %v127 = index.mul %v45, %k : index
+        %v128 = index.add %v127, %v113 : index
+        %v129 = index.add %v27, %v128 : index
+        %v130 = index.assume %v129 [range(%v129, 0, 1073741824), lt(%v129, %bsize)] : index
+        %v131 = view.load %b_view[%v130] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v131 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v126, %bb[%v43, %v112] : bf16, view<64x40xbf16>
+      %v133 = index.add %v33, %v132 : index
+      %v134 = index.add %v42, %v133 : index
+      %v135 = index.cmp ult, %v44, %m : index
+      %v136 = index.cmp ult, %v134, %k : index
+      %v137 = scalar.andi %v135, %v136 : i1
+      %v138 = scf.if %v137 -> (bf16) {
+        %v139 = index.mul %v44, %k : index
+        %v140 = index.add %v139, %v134 : index
+        %v141 = index.add %v26, %v140 : index
+        %v142 = index.assume %v141 [range(%v141, 0, 1073741824), lt(%v141, %asize)] : index
+        %v143 = view.load %a_view[%v142] : view<[%asize]xbf16> -> bf16
+        scf.yield %v143 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v138, %aa[%v43, %v133] : bf16, view<64x40xbf16>
+      %v144 = index.cmp ult, %v45, %n : index
+      %v145 = index.cmp ult, %v134, %k : index
+      %v146 = scalar.andi %v144, %v145 : i1
+      %v147 = scf.if %v146 -> (bf16) {
+        %v148 = index.mul %v45, %k : index
+        %v149 = index.add %v148, %v134 : index
+        %v150 = index.add %v27, %v149 : index
+        %v151 = index.assume %v150 [range(%v150, 0, 1073741824), lt(%v150, %bsize)] : index
+        %v152 = view.load %b_view[%v151] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v152 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v147, %bb[%v43, %v133] : bf16, view<64x40xbf16>
     }
-    view.store %v51, %aa[%v43, %v46] : bf16, view<64x40xbf16>
-    %v58 = index.cmp ult, %v45, %n : index
-    %v59 = index.cmp ult, %v47, %k : index
-    %v60 = scalar.andi %v58, %v59 : i1
-    %v61 = scf.if %v60 -> (bf16) {
-      %v62 = index.mul %v45, %k : index
-      %v63 = index.add %v62, %v47 : index
-      %v64 = index.add %v27, %v63 : index
-      %v65 = index.assume %v64 [range(%v64, 0, 1073741824), lt(%v64, %bsize)] : index
-      %v66 = view.load %b_view[%v65] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v66 : bf16
+    %v153 = index.add %v31, %v10 : index
+    %v154 = index.add %v24, %v153 : index
+    %v155 = index.add %v25, %v153 : index
+    %v156 = index.rem %k, %v7 : index
+    %v157 = index.cmp eq, %v156, %v4 : index
+    scf.if %v157 {
+      %v158 = index.add %v42, %v33 : index
+      %v159 = index.cmp ult, %v154, %m : index
+      %v160 = index.cmp ult, %v158, %k : index
+      %v161 = scalar.andi %v159, %v160 : i1
+      %v162 = scf.if %v161 -> (vector<4xbf16>) {
+        %v163 = index.mul %v154, %k : index
+        %v164 = index.add %v163, %v158 : index
+        %v165 = index.add %v26, %v164 : index
+        %v167 = index.sub %asize, %v7 : index
+        %v166 = index.assume %v165 [range(%v165, 0, 1073741823), le(%v165, %v167), mul(%v165, 4)] : index
+        %v168 = vector.load %a_view[%v166] : view<[%asize]xbf16> -> vector<4xbf16>
+        scf.yield %v168 : vector<4xbf16>
+      } else {
+        %v169 = vector.constant 0.0 : vector<4xbf16>
+        scf.yield %v169 : vector<4xbf16>
+      }
+      vector.store %v162, %aa[%v153, %v33] : vector<4xbf16>, view<64x40xbf16>
+      %v170 = index.cmp ult, %v155, %n : index
+      %v171 = index.cmp ult, %v158, %k : index
+      %v172 = scalar.andi %v170, %v171 : i1
+      %v173 = scf.if %v172 -> (vector<4xbf16>) {
+        %v174 = index.mul %v155, %k : index
+        %v175 = index.add %v174, %v158 : index
+        %v176 = index.add %v27, %v175 : index
+        %v178 = index.sub %bsize, %v7 : index
+        %v177 = index.assume %v176 [range(%v176, 0, 1073741823), le(%v176, %v178), mul(%v176, 4)] : index
+        %v179 = vector.load %b_view[%v177] : view<[%bsize]xbf16> -> vector<4xbf16>
+        scf.yield %v179 : vector<4xbf16>
+      } else {
+        %v180 = vector.constant 0.0 : vector<4xbf16>
+        scf.yield %v180 : vector<4xbf16>
+      }
+      vector.store %v173, %bb[%v153, %v33] : vector<4xbf16>, view<64x40xbf16>
     } else {
-      scf.yield %v57 : bf16
+      %v181 = index.add %v33, %v4 : index
+      %v182 = index.add %v42, %v181 : index
+      %v183 = index.cmp ult, %v154, %m : index
+      %v184 = index.cmp ult, %v182, %k : index
+      %v185 = scalar.andi %v183, %v184 : i1
+      %v186 = scf.if %v185 -> (bf16) {
+        %v187 = index.mul %v154, %k : index
+        %v188 = index.add %v187, %v182 : index
+        %v189 = index.add %v26, %v188 : index
+        %v190 = index.assume %v189 [range(%v189, 0, 1073741824), lt(%v189, %asize)] : index
+        %v191 = view.load %a_view[%v190] : view<[%asize]xbf16> -> bf16
+        scf.yield %v191 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v186, %aa[%v153, %v181] : bf16, view<64x40xbf16>
+      %v192 = index.cmp ult, %v155, %n : index
+      %v193 = index.cmp ult, %v182, %k : index
+      %v194 = scalar.andi %v192, %v193 : i1
+      %v195 = scf.if %v194 -> (bf16) {
+        %v196 = index.mul %v155, %k : index
+        %v197 = index.add %v196, %v182 : index
+        %v198 = index.add %v27, %v197 : index
+        %v199 = index.assume %v198 [range(%v198, 0, 1073741824), lt(%v198, %bsize)] : index
+        %v200 = view.load %b_view[%v199] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v200 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v195, %bb[%v153, %v181] : bf16, view<64x40xbf16>
+      %v201 = index.add %v33, %v5 : index
+      %v202 = index.add %v42, %v201 : index
+      %v203 = index.cmp ult, %v154, %m : index
+      %v204 = index.cmp ult, %v202, %k : index
+      %v205 = scalar.andi %v203, %v204 : i1
+      %v206 = scf.if %v205 -> (bf16) {
+        %v207 = index.mul %v154, %k : index
+        %v208 = index.add %v207, %v202 : index
+        %v209 = index.add %v26, %v208 : index
+        %v210 = index.assume %v209 [range(%v209, 0, 1073741824), lt(%v209, %asize)] : index
+        %v211 = view.load %a_view[%v210] : view<[%asize]xbf16> -> bf16
+        scf.yield %v211 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v206, %aa[%v153, %v201] : bf16, view<64x40xbf16>
+      %v212 = index.cmp ult, %v155, %n : index
+      %v213 = index.cmp ult, %v202, %k : index
+      %v214 = scalar.andi %v212, %v213 : i1
+      %v215 = scf.if %v214 -> (bf16) {
+        %v216 = index.mul %v155, %k : index
+        %v217 = index.add %v216, %v202 : index
+        %v218 = index.add %v27, %v217 : index
+        %v219 = index.assume %v218 [range(%v218, 0, 1073741824), lt(%v218, %bsize)] : index
+        %v220 = view.load %b_view[%v219] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v220 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v215, %bb[%v153, %v201] : bf16, view<64x40xbf16>
+      %v221 = index.add %v33, %v6 : index
+      %v222 = index.add %v42, %v221 : index
+      %v223 = index.cmp ult, %v154, %m : index
+      %v224 = index.cmp ult, %v222, %k : index
+      %v225 = scalar.andi %v223, %v224 : i1
+      %v226 = scf.if %v225 -> (bf16) {
+        %v227 = index.mul %v154, %k : index
+        %v228 = index.add %v227, %v222 : index
+        %v229 = index.add %v26, %v228 : index
+        %v230 = index.assume %v229 [range(%v229, 0, 1073741824), lt(%v229, %asize)] : index
+        %v231 = view.load %a_view[%v230] : view<[%asize]xbf16> -> bf16
+        scf.yield %v231 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v226, %aa[%v153, %v221] : bf16, view<64x40xbf16>
+      %v232 = index.cmp ult, %v155, %n : index
+      %v233 = index.cmp ult, %v222, %k : index
+      %v234 = scalar.andi %v232, %v233 : i1
+      %v235 = scf.if %v234 -> (bf16) {
+        %v236 = index.mul %v155, %k : index
+        %v237 = index.add %v236, %v222 : index
+        %v238 = index.add %v27, %v237 : index
+        %v239 = index.assume %v238 [range(%v238, 0, 1073741824), lt(%v238, %bsize)] : index
+        %v240 = view.load %b_view[%v239] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v240 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v235, %bb[%v153, %v221] : bf16, view<64x40xbf16>
+      %v241 = index.add %v33, %v132 : index
+      %v242 = index.add %v42, %v241 : index
+      %v243 = index.cmp ult, %v154, %m : index
+      %v244 = index.cmp ult, %v242, %k : index
+      %v245 = scalar.andi %v243, %v244 : i1
+      %v246 = scf.if %v245 -> (bf16) {
+        %v247 = index.mul %v154, %k : index
+        %v248 = index.add %v247, %v242 : index
+        %v249 = index.add %v26, %v248 : index
+        %v250 = index.assume %v249 [range(%v249, 0, 1073741824), lt(%v249, %asize)] : index
+        %v251 = view.load %a_view[%v250] : view<[%asize]xbf16> -> bf16
+        scf.yield %v251 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v246, %aa[%v153, %v241] : bf16, view<64x40xbf16>
+      %v252 = index.cmp ult, %v155, %n : index
+      %v253 = index.cmp ult, %v242, %k : index
+      %v254 = scalar.andi %v252, %v253 : i1
+      %v255 = scf.if %v254 -> (bf16) {
+        %v256 = index.mul %v155, %k : index
+        %v257 = index.add %v256, %v242 : index
+        %v258 = index.add %v27, %v257 : index
+        %v259 = index.assume %v258 [range(%v258, 0, 1073741824), lt(%v258, %bsize)] : index
+        %v260 = view.load %b_view[%v259] : view<[%bsize]xbf16> -> bf16
+        scf.yield %v260 : bf16
+      } else {
+        scf.yield %v82 : bf16
+      }
+      view.store %v255, %bb[%v153, %v241] : bf16, view<64x40xbf16>
     }
-    view.store %v61, %bb[%v43, %v46] : bf16, view<64x40xbf16>
-    %v67 = index.add %v33, %v5 : index
-    %v68 = index.add %v38, %v67 : index
-    %v69 = index.cmp ult, %v44, %m : index
-    %v70 = index.cmp ult, %v68, %k : index
-    %v71 = scalar.andi %v69, %v70 : i1
-    %v72 = scf.if %v71 -> (bf16) {
-      %v73 = index.mul %v44, %k : index
-      %v74 = index.add %v73, %v68 : index
-      %v75 = index.add %v26, %v74 : index
-      %v76 = index.assume %v75 [range(%v75, 0, 1073741824), lt(%v75, %asize)] : index
-      %v77 = view.load %a_view[%v76] : view<[%asize]xbf16> -> bf16
-      scf.yield %v77 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v72, %aa[%v43, %v67] : bf16, view<64x40xbf16>
-    %v78 = index.cmp ult, %v45, %n : index
-    %v79 = index.cmp ult, %v68, %k : index
-    %v80 = scalar.andi %v78, %v79 : i1
-    %v81 = scf.if %v80 -> (bf16) {
-      %v82 = index.mul %v45, %k : index
-      %v83 = index.add %v82, %v68 : index
-      %v84 = index.add %v27, %v83 : index
-      %v85 = index.assume %v84 [range(%v84, 0, 1073741824), lt(%v84, %bsize)] : index
-      %v86 = view.load %b_view[%v85] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v86 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v81, %bb[%v43, %v67] : bf16, view<64x40xbf16>
-    %v87 = index.add %v33, %v6 : index
-    %v88 = index.add %v38, %v87 : index
-    %v89 = index.cmp ult, %v44, %m : index
-    %v90 = index.cmp ult, %v88, %k : index
-    %v91 = scalar.andi %v89, %v90 : i1
-    %v92 = scf.if %v91 -> (bf16) {
-      %v93 = index.mul %v44, %k : index
-      %v94 = index.add %v93, %v88 : index
-      %v95 = index.add %v26, %v94 : index
-      %v96 = index.assume %v95 [range(%v95, 0, 1073741824), lt(%v95, %asize)] : index
-      %v97 = view.load %a_view[%v96] : view<[%asize]xbf16> -> bf16
-      scf.yield %v97 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v92, %aa[%v43, %v87] : bf16, view<64x40xbf16>
-    %v98 = index.cmp ult, %v45, %n : index
-    %v99 = index.cmp ult, %v88, %k : index
-    %v100 = scalar.andi %v98, %v99 : i1
-    %v101 = scf.if %v100 -> (bf16) {
-      %v102 = index.mul %v45, %k : index
-      %v103 = index.add %v102, %v88 : index
-      %v104 = index.add %v27, %v103 : index
-      %v105 = index.assume %v104 [range(%v104, 0, 1073741824), lt(%v104, %bsize)] : index
-      %v106 = view.load %b_view[%v105] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v106 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v101, %bb[%v43, %v87] : bf16, view<64x40xbf16>
-    %v108 = index.add %v33, %v107 : index
-    %v109 = index.add %v38, %v108 : index
-    %v110 = index.cmp ult, %v44, %m : index
-    %v111 = index.cmp ult, %v109, %k : index
-    %v112 = scalar.andi %v110, %v111 : i1
-    %v113 = scf.if %v112 -> (bf16) {
-      %v114 = index.mul %v44, %k : index
-      %v115 = index.add %v114, %v109 : index
-      %v116 = index.add %v26, %v115 : index
-      %v117 = index.assume %v116 [range(%v116, 0, 1073741824), lt(%v116, %asize)] : index
-      %v118 = view.load %a_view[%v117] : view<[%asize]xbf16> -> bf16
-      scf.yield %v118 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v113, %aa[%v43, %v108] : bf16, view<64x40xbf16>
-    %v119 = index.cmp ult, %v45, %n : index
-    %v120 = index.cmp ult, %v109, %k : index
-    %v121 = scalar.andi %v119, %v120 : i1
-    %v122 = scf.if %v121 -> (bf16) {
-      %v123 = index.mul %v45, %k : index
-      %v124 = index.add %v123, %v109 : index
-      %v125 = index.add %v27, %v124 : index
-      %v126 = index.assume %v125 [range(%v125, 0, 1073741824), lt(%v125, %bsize)] : index
-      %v127 = view.load %b_view[%v126] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v127 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v122, %bb[%v43, %v108] : bf16, view<64x40xbf16>
-    %v128 = index.add %v31, %v10 : index
-    %v129 = index.add %v24, %v128 : index
-    %v130 = index.add %v25, %v128 : index
-    %v131 = index.add %v33, %v4 : index
-    %v132 = index.add %v38, %v131 : index
-    %v133 = index.cmp ult, %v129, %m : index
-    %v134 = index.cmp ult, %v132, %k : index
-    %v135 = scalar.andi %v133, %v134 : i1
-    %v136 = scf.if %v135 -> (bf16) {
-      %v137 = index.mul %v129, %k : index
-      %v138 = index.add %v137, %v132 : index
-      %v139 = index.add %v26, %v138 : index
-      %v140 = index.assume %v139 [range(%v139, 0, 1073741824), lt(%v139, %asize)] : index
-      %v141 = view.load %a_view[%v140] : view<[%asize]xbf16> -> bf16
-      scf.yield %v141 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v136, %aa[%v128, %v131] : bf16, view<64x40xbf16>
-    %v142 = index.cmp ult, %v130, %n : index
-    %v143 = index.cmp ult, %v132, %k : index
-    %v144 = scalar.andi %v142, %v143 : i1
-    %v145 = scf.if %v144 -> (bf16) {
-      %v146 = index.mul %v130, %k : index
-      %v147 = index.add %v146, %v132 : index
-      %v148 = index.add %v27, %v147 : index
-      %v149 = index.assume %v148 [range(%v148, 0, 1073741824), lt(%v148, %bsize)] : index
-      %v150 = view.load %b_view[%v149] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v150 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v145, %bb[%v128, %v131] : bf16, view<64x40xbf16>
-    %v151 = index.add %v33, %v5 : index
-    %v152 = index.add %v38, %v151 : index
-    %v153 = index.cmp ult, %v129, %m : index
-    %v154 = index.cmp ult, %v152, %k : index
-    %v155 = scalar.andi %v153, %v154 : i1
-    %v156 = scf.if %v155 -> (bf16) {
-      %v157 = index.mul %v129, %k : index
-      %v158 = index.add %v157, %v152 : index
-      %v159 = index.add %v26, %v158 : index
-      %v160 = index.assume %v159 [range(%v159, 0, 1073741824), lt(%v159, %asize)] : index
-      %v161 = view.load %a_view[%v160] : view<[%asize]xbf16> -> bf16
-      scf.yield %v161 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v156, %aa[%v128, %v151] : bf16, view<64x40xbf16>
-    %v162 = index.cmp ult, %v130, %n : index
-    %v163 = index.cmp ult, %v152, %k : index
-    %v164 = scalar.andi %v162, %v163 : i1
-    %v165 = scf.if %v164 -> (bf16) {
-      %v166 = index.mul %v130, %k : index
-      %v167 = index.add %v166, %v152 : index
-      %v168 = index.add %v27, %v167 : index
-      %v169 = index.assume %v168 [range(%v168, 0, 1073741824), lt(%v168, %bsize)] : index
-      %v170 = view.load %b_view[%v169] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v170 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v165, %bb[%v128, %v151] : bf16, view<64x40xbf16>
-    %v171 = index.add %v33, %v6 : index
-    %v172 = index.add %v38, %v171 : index
-    %v173 = index.cmp ult, %v129, %m : index
-    %v174 = index.cmp ult, %v172, %k : index
-    %v175 = scalar.andi %v173, %v174 : i1
-    %v176 = scf.if %v175 -> (bf16) {
-      %v177 = index.mul %v129, %k : index
-      %v178 = index.add %v177, %v172 : index
-      %v179 = index.add %v26, %v178 : index
-      %v180 = index.assume %v179 [range(%v179, 0, 1073741824), lt(%v179, %asize)] : index
-      %v181 = view.load %a_view[%v180] : view<[%asize]xbf16> -> bf16
-      scf.yield %v181 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v176, %aa[%v128, %v171] : bf16, view<64x40xbf16>
-    %v182 = index.cmp ult, %v130, %n : index
-    %v183 = index.cmp ult, %v172, %k : index
-    %v184 = scalar.andi %v182, %v183 : i1
-    %v185 = scf.if %v184 -> (bf16) {
-      %v186 = index.mul %v130, %k : index
-      %v187 = index.add %v186, %v172 : index
-      %v188 = index.add %v27, %v187 : index
-      %v189 = index.assume %v188 [range(%v188, 0, 1073741824), lt(%v188, %bsize)] : index
-      %v190 = view.load %b_view[%v189] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v190 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v185, %bb[%v128, %v171] : bf16, view<64x40xbf16>
-    %v191 = index.add %v33, %v107 : index
-    %v192 = index.add %v38, %v191 : index
-    %v193 = index.cmp ult, %v129, %m : index
-    %v194 = index.cmp ult, %v192, %k : index
-    %v195 = scalar.andi %v193, %v194 : i1
-    %v196 = scf.if %v195 -> (bf16) {
-      %v197 = index.mul %v129, %k : index
-      %v198 = index.add %v197, %v192 : index
-      %v199 = index.add %v26, %v198 : index
-      %v200 = index.assume %v199 [range(%v199, 0, 1073741824), lt(%v199, %asize)] : index
-      %v201 = view.load %a_view[%v200] : view<[%asize]xbf16> -> bf16
-      scf.yield %v201 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v196, %aa[%v128, %v191] : bf16, view<64x40xbf16>
-    %v202 = index.cmp ult, %v130, %n : index
-    %v203 = index.cmp ult, %v192, %k : index
-    %v204 = scalar.andi %v202, %v203 : i1
-    %v205 = scf.if %v204 -> (bf16) {
-      %v206 = index.mul %v130, %k : index
-      %v207 = index.add %v206, %v192 : index
-      %v208 = index.add %v27, %v207 : index
-      %v209 = index.assume %v208 [range(%v208, 0, 1073741824), lt(%v208, %bsize)] : index
-      %v210 = view.load %b_view[%v209] : view<[%bsize]xbf16> -> bf16
-      scf.yield %v210 : bf16
-    } else {
-      scf.yield %v57 : bf16
-    }
-    view.store %v205, %bb[%v128, %v191] : bf16, view<64x40xbf16>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-    %v214 = index.add %v18, %v9 : index
-    %v211 = vector.fragment.load<lhs> %aa[%v16, %v4] shape [%v9, %v9] : view<64x40xbf16> -> vector<16xbf16>
-    %v212 = vector.fragment.load<rhs> %rhs[%v4, %v18] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
-    %v213 = vector.fragment.load<rhs> %rhs[%v4, %v214] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
-    %v215 = vector.mma %v211, %v212, %v39 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
-    %v216 = vector.mma %v211, %v213, %v40 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
-    %v220 = index.add %v18, %v9 : index
-    %v217 = vector.fragment.load<lhs> %aa[%v16, %v9] shape [%v9, %v9] : view<64x40xbf16> -> vector<16xbf16>
-    %v218 = vector.fragment.load<rhs> %rhs[%v9, %v18] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
-    %v219 = vector.fragment.load<rhs> %rhs[%v9, %v220] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
-    %v221 = vector.mma %v217, %v218, %v215 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
-    %v222 = vector.mma %v217, %v219, %v216 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+    %v262 = index.add %v18, %v4 : index
+    %v261 = vector.fragment.load<rhs> %rhs[%v4, %v262] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
+    %v264 = index.add %v18, %v9 : index
+    %v263 = vector.fragment.load<rhs> %rhs[%v4, %v264] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
+    %v266 = index.add %v16, %v4 : index
+    %v265 = vector.fragment.load<lhs> %aa[%v266, %v4] shape [%v9, %v9] : view<64x40xbf16> -> vector<16xbf16>
+    %v267 = vector.mma %v265, %v261, %v38 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+    %v268 = vector.mma %v265, %v263, %v39 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+    %v270 = index.add %v18, %v4 : index
+    %v269 = vector.fragment.load<rhs> %rhs[%v9, %v270] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
+    %v272 = index.add %v18, %v9 : index
+    %v271 = vector.fragment.load<rhs> %rhs[%v9, %v272] shape [%v9, %v9] : view<32x64xbf16, %rhs_layout> -> vector<16xbf16>
+    %v274 = index.add %v16, %v4 : index
+    %v273 = vector.fragment.load<lhs> %aa[%v274, %v9] shape [%v9, %v9] : view<64x40xbf16> -> vector<16xbf16>
+    %v275 = vector.mma %v273, %v269, %v267 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+    %v276 = vector.mma %v273, %v271, %v268 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-    scf.yield %v221, %v222 : vector<8xf32>, vector<8xf32>
+    scf.yield %v275, %v276 : vector<8xf32>, vector<8xf32>
   }
-  %v223 = index.div %v14, %v7 : index
-  %v224 = index.rem %v14, %v7 : index
-  %v225 = index.mul %v224, %v7 : index
+  %v277 = index.div %v14, %v7 : index
+  %v278 = index.rem %v14, %v7 : index
+  %v279 = index.mul %v278, %v7 : index
+  vector.fragment.store<result> %v40, %result[%v4, %v4] shape [%v9, %v9] : vector<8xf32>, view<16x16xf32>
+  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+  %v280 = index.add %v277, %v4 : index
+  %v281 = index.add %v4, %v280 : index
+  %v282 = index.add %v16, %v281 : index
+  %v283 = index.add %v24, %v282 : index
+  %v284 = index.rem %n, %v7 : index
+  %v285 = index.cmp eq, %v284, %v4 : index
+  scf.if %v285 {
+    %v286 = index.add %v4, %v279 : index
+    %v287 = index.add %v18, %v286 : index
+    %v288 = index.add %v25, %v287 : index
+    %v289 = index.cmp ult, %v283, %m : index
+    %v290 = index.cmp ult, %v288, %n : index
+    %v291 = scalar.andi %v289, %v290 : i1
+    scf.if %v291 {
+      %v292 = vector.load %result[%v280, %v279] : view<16x16xf32> -> vector<4xf32>
+      %v293 = vector.splat %alpha : vector<4xf32>
+      %v294 = vector.mulf %v292, %v293 : vector<4xf32>
+      %v295 = vector.fptrunc %v294 : vector<4xf32> to vector<4xbf16>
+      %v296 = index.mul %v283, %n : index
+      %v297 = index.add %v296, %v288 : index
+      %v298 = index.add %v29, %v297 : index
+      %v300 = index.sub %csize, %v7 : index
+      %v299 = index.assume %v298 [range(%v298, 0, 1073741823), le(%v298, %v300), mul(%v298, 4)] : index
+      vector.store %v295, %out_view[%v299] : vector<4xbf16>, view<[%csize]xbf16>
+    }
+  } else {
+    %v301 = index.add %v279, %v4 : index
+    %v302 = index.add %v4, %v301 : index
+    %v303 = index.add %v18, %v302 : index
+    %v304 = index.add %v25, %v303 : index
+    %v305 = index.cmp ult, %v283, %m : index
+    %v306 = index.cmp ult, %v304, %n : index
+    %v307 = scalar.andi %v305, %v306 : i1
+    scf.if %v307 {
+      %v308 = view.load %result[%v280, %v301] : view<16x16xf32> -> f32
+      %v309 = scalar.mulf %v308, %alpha : f32
+      %v310 = index.mul %v283, %n : index
+      %v311 = index.add %v310, %v304 : index
+      %v312 = index.add %v29, %v311 : index
+      %v313 = scalar.fptrunc %v309 : f32 to bf16
+      %v314 = index.assume %v312 [range(%v312, 0, 1073741824), lt(%v312, %csize)] : index
+      view.store %v313, %out_view[%v314] : bf16, view<[%csize]xbf16>
+    }
+    %v315 = index.add %v279, %v5 : index
+    %v316 = index.add %v4, %v315 : index
+    %v317 = index.add %v18, %v316 : index
+    %v318 = index.add %v25, %v317 : index
+    %v319 = index.cmp ult, %v283, %m : index
+    %v320 = index.cmp ult, %v318, %n : index
+    %v321 = scalar.andi %v319, %v320 : i1
+    scf.if %v321 {
+      %v322 = view.load %result[%v280, %v315] : view<16x16xf32> -> f32
+      %v323 = scalar.mulf %v322, %alpha : f32
+      %v324 = index.mul %v283, %n : index
+      %v325 = index.add %v324, %v318 : index
+      %v326 = index.add %v29, %v325 : index
+      %v327 = scalar.fptrunc %v323 : f32 to bf16
+      %v328 = index.assume %v326 [range(%v326, 0, 1073741824), lt(%v326, %csize)] : index
+      view.store %v327, %out_view[%v328] : bf16, view<[%csize]xbf16>
+    }
+    %v329 = index.add %v279, %v6 : index
+    %v330 = index.add %v4, %v329 : index
+    %v331 = index.add %v18, %v330 : index
+    %v332 = index.add %v25, %v331 : index
+    %v333 = index.cmp ult, %v283, %m : index
+    %v334 = index.cmp ult, %v332, %n : index
+    %v335 = scalar.andi %v333, %v334 : i1
+    scf.if %v335 {
+      %v336 = view.load %result[%v280, %v329] : view<16x16xf32> -> f32
+      %v337 = scalar.mulf %v336, %alpha : f32
+      %v338 = index.mul %v283, %n : index
+      %v339 = index.add %v338, %v332 : index
+      %v340 = index.add %v29, %v339 : index
+      %v341 = scalar.fptrunc %v337 : f32 to bf16
+      %v342 = index.assume %v340 [range(%v340, 0, 1073741824), lt(%v340, %csize)] : index
+      view.store %v341, %out_view[%v342] : bf16, view<[%csize]xbf16>
+    }
+    %v343 = index.add %v279, %v132 : index
+    %v344 = index.add %v4, %v343 : index
+    %v345 = index.add %v18, %v344 : index
+    %v346 = index.add %v25, %v345 : index
+    %v347 = index.cmp ult, %v283, %m : index
+    %v348 = index.cmp ult, %v346, %n : index
+    %v349 = scalar.andi %v347, %v348 : i1
+    scf.if %v349 {
+      %v350 = view.load %result[%v280, %v343] : view<16x16xf32> -> f32
+      %v351 = scalar.mulf %v350, %alpha : f32
+      %v352 = index.mul %v283, %n : index
+      %v353 = index.add %v352, %v346 : index
+      %v354 = index.add %v29, %v353 : index
+      %v355 = scalar.fptrunc %v351 : f32 to bf16
+      %v356 = index.assume %v354 [range(%v354, 0, 1073741824), lt(%v354, %csize)] : index
+      view.store %v355, %out_view[%v356] : bf16, view<[%csize]xbf16>
+    }
+  }
+  %v357 = index.add %v277, %v8 : index
+  %v358 = index.add %v4, %v357 : index
+  %v359 = index.add %v16, %v358 : index
+  %v360 = index.add %v24, %v359 : index
+  %v361 = index.rem %n, %v7 : index
+  %v362 = index.cmp eq, %v361, %v4 : index
+  scf.if %v362 {
+    %v363 = index.add %v4, %v279 : index
+    %v364 = index.add %v18, %v363 : index
+    %v365 = index.add %v25, %v364 : index
+    %v366 = index.cmp ult, %v360, %m : index
+    %v367 = index.cmp ult, %v365, %n : index
+    %v368 = scalar.andi %v366, %v367 : i1
+    scf.if %v368 {
+      %v369 = vector.load %result[%v357, %v279] : view<16x16xf32> -> vector<4xf32>
+      %v370 = vector.splat %alpha : vector<4xf32>
+      %v371 = vector.mulf %v369, %v370 : vector<4xf32>
+      %v372 = vector.fptrunc %v371 : vector<4xf32> to vector<4xbf16>
+      %v373 = index.mul %v360, %n : index
+      %v374 = index.add %v373, %v365 : index
+      %v375 = index.add %v29, %v374 : index
+      %v377 = index.sub %csize, %v7 : index
+      %v376 = index.assume %v375 [range(%v375, 0, 1073741823), le(%v375, %v377), mul(%v375, 4)] : index
+      vector.store %v372, %out_view[%v376] : vector<4xbf16>, view<[%csize]xbf16>
+    }
+  } else {
+    %v378 = index.add %v279, %v4 : index
+    %v379 = index.add %v4, %v378 : index
+    %v380 = index.add %v18, %v379 : index
+    %v381 = index.add %v25, %v380 : index
+    %v382 = index.cmp ult, %v360, %m : index
+    %v383 = index.cmp ult, %v381, %n : index
+    %v384 = scalar.andi %v382, %v383 : i1
+    scf.if %v384 {
+      %v385 = view.load %result[%v357, %v378] : view<16x16xf32> -> f32
+      %v386 = scalar.mulf %v385, %alpha : f32
+      %v387 = index.mul %v360, %n : index
+      %v388 = index.add %v387, %v381 : index
+      %v389 = index.add %v29, %v388 : index
+      %v390 = scalar.fptrunc %v386 : f32 to bf16
+      %v391 = index.assume %v389 [range(%v389, 0, 1073741824), lt(%v389, %csize)] : index
+      view.store %v390, %out_view[%v391] : bf16, view<[%csize]xbf16>
+    }
+    %v392 = index.add %v279, %v5 : index
+    %v393 = index.add %v4, %v392 : index
+    %v394 = index.add %v18, %v393 : index
+    %v395 = index.add %v25, %v394 : index
+    %v396 = index.cmp ult, %v360, %m : index
+    %v397 = index.cmp ult, %v395, %n : index
+    %v398 = scalar.andi %v396, %v397 : i1
+    scf.if %v398 {
+      %v399 = view.load %result[%v357, %v392] : view<16x16xf32> -> f32
+      %v400 = scalar.mulf %v399, %alpha : f32
+      %v401 = index.mul %v360, %n : index
+      %v402 = index.add %v401, %v395 : index
+      %v403 = index.add %v29, %v402 : index
+      %v404 = scalar.fptrunc %v400 : f32 to bf16
+      %v405 = index.assume %v403 [range(%v403, 0, 1073741824), lt(%v403, %csize)] : index
+      view.store %v404, %out_view[%v405] : bf16, view<[%csize]xbf16>
+    }
+    %v406 = index.add %v279, %v6 : index
+    %v407 = index.add %v4, %v406 : index
+    %v408 = index.add %v18, %v407 : index
+    %v409 = index.add %v25, %v408 : index
+    %v410 = index.cmp ult, %v360, %m : index
+    %v411 = index.cmp ult, %v409, %n : index
+    %v412 = scalar.andi %v410, %v411 : i1
+    scf.if %v412 {
+      %v413 = view.load %result[%v357, %v406] : view<16x16xf32> -> f32
+      %v414 = scalar.mulf %v413, %alpha : f32
+      %v415 = index.mul %v360, %n : index
+      %v416 = index.add %v415, %v409 : index
+      %v417 = index.add %v29, %v416 : index
+      %v418 = scalar.fptrunc %v414 : f32 to bf16
+      %v419 = index.assume %v417 [range(%v417, 0, 1073741824), lt(%v417, %csize)] : index
+      view.store %v418, %out_view[%v419] : bf16, view<[%csize]xbf16>
+    }
+    %v420 = index.add %v279, %v132 : index
+    %v421 = index.add %v4, %v420 : index
+    %v422 = index.add %v18, %v421 : index
+    %v423 = index.add %v25, %v422 : index
+    %v424 = index.cmp ult, %v360, %m : index
+    %v425 = index.cmp ult, %v423, %n : index
+    %v426 = scalar.andi %v424, %v425 : i1
+    scf.if %v426 {
+      %v427 = view.load %result[%v357, %v420] : view<16x16xf32> -> f32
+      %v428 = scalar.mulf %v427, %alpha : f32
+      %v429 = index.mul %v360, %n : index
+      %v430 = index.add %v429, %v423 : index
+      %v431 = index.add %v29, %v430 : index
+      %v432 = scalar.fptrunc %v428 : f32 to bf16
+      %v433 = index.assume %v431 [range(%v431, 0, 1073741824), lt(%v431, %csize)] : index
+      view.store %v432, %out_view[%v433] : bf16, view<[%csize]xbf16>
+    }
+  }
+  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
   vector.fragment.store<result> %v41, %result[%v4, %v4] shape [%v9, %v9] : vector<8xf32>, view<16x16xf32>
   kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
-  %v226 = index.add %v223, %v4 : index
-  %v227 = index.add %v16, %v226 : index
-  %v228 = index.add %v24, %v227 : index
-  %v229 = index.add %v225, %v4 : index
-  %v230 = index.add %v4, %v229 : index
-  %v231 = index.add %v18, %v230 : index
-  %v232 = index.add %v25, %v231 : index
-  %v233 = index.cmp ult, %v228, %m : index
-  %v234 = index.cmp ult, %v232, %n : index
-  %v235 = scalar.andi %v233, %v234 : i1
-  scf.if %v235 {
-    %v236 = view.load %result[%v226, %v229] : view<16x16xf32> -> f32
-    %v237 = scalar.mulf %v236, %alpha : f32
-    %v238 = index.mul %v228, %n : index
-    %v239 = index.add %v238, %v232 : index
-    %v240 = index.add %v29, %v239 : index
-    %v241 = scalar.fptrunc %v237 : f32 to bf16
-    %v242 = index.assume %v240 [range(%v240, 0, 1073741824), lt(%v240, %csize)] : index
-    view.store %v241, %out_view[%v242] : bf16, view<[%csize]xbf16>
+  %v434 = index.add %v277, %v4 : index
+  %v435 = index.add %v4, %v434 : index
+  %v436 = index.add %v16, %v435 : index
+  %v437 = index.add %v24, %v436 : index
+  %v438 = index.rem %n, %v7 : index
+  %v439 = index.cmp eq, %v438, %v4 : index
+  scf.if %v439 {
+    %v440 = index.add %v9, %v279 : index
+    %v441 = index.add %v18, %v440 : index
+    %v442 = index.add %v25, %v441 : index
+    %v443 = index.cmp ult, %v437, %m : index
+    %v444 = index.cmp ult, %v442, %n : index
+    %v445 = scalar.andi %v443, %v444 : i1
+    scf.if %v445 {
+      %v446 = vector.load %result[%v434, %v279] : view<16x16xf32> -> vector<4xf32>
+      %v447 = vector.splat %alpha : vector<4xf32>
+      %v448 = vector.mulf %v446, %v447 : vector<4xf32>
+      %v449 = vector.fptrunc %v448 : vector<4xf32> to vector<4xbf16>
+      %v450 = index.mul %v437, %n : index
+      %v451 = index.add %v450, %v442 : index
+      %v452 = index.add %v29, %v451 : index
+      %v454 = index.sub %csize, %v7 : index
+      %v453 = index.assume %v452 [range(%v452, 0, 1073741823), le(%v452, %v454), mul(%v452, 4)] : index
+      vector.store %v449, %out_view[%v453] : vector<4xbf16>, view<[%csize]xbf16>
+    }
+  } else {
+    %v455 = index.add %v279, %v4 : index
+    %v456 = index.add %v9, %v455 : index
+    %v457 = index.add %v18, %v456 : index
+    %v458 = index.add %v25, %v457 : index
+    %v459 = index.cmp ult, %v437, %m : index
+    %v460 = index.cmp ult, %v458, %n : index
+    %v461 = scalar.andi %v459, %v460 : i1
+    scf.if %v461 {
+      %v462 = view.load %result[%v434, %v455] : view<16x16xf32> -> f32
+      %v463 = scalar.mulf %v462, %alpha : f32
+      %v464 = index.mul %v437, %n : index
+      %v465 = index.add %v464, %v458 : index
+      %v466 = index.add %v29, %v465 : index
+      %v467 = scalar.fptrunc %v463 : f32 to bf16
+      %v468 = index.assume %v466 [range(%v466, 0, 1073741824), lt(%v466, %csize)] : index
+      view.store %v467, %out_view[%v468] : bf16, view<[%csize]xbf16>
+    }
+    %v469 = index.add %v279, %v5 : index
+    %v470 = index.add %v9, %v469 : index
+    %v471 = index.add %v18, %v470 : index
+    %v472 = index.add %v25, %v471 : index
+    %v473 = index.cmp ult, %v437, %m : index
+    %v474 = index.cmp ult, %v472, %n : index
+    %v475 = scalar.andi %v473, %v474 : i1
+    scf.if %v475 {
+      %v476 = view.load %result[%v434, %v469] : view<16x16xf32> -> f32
+      %v477 = scalar.mulf %v476, %alpha : f32
+      %v478 = index.mul %v437, %n : index
+      %v479 = index.add %v478, %v472 : index
+      %v480 = index.add %v29, %v479 : index
+      %v481 = scalar.fptrunc %v477 : f32 to bf16
+      %v482 = index.assume %v480 [range(%v480, 0, 1073741824), lt(%v480, %csize)] : index
+      view.store %v481, %out_view[%v482] : bf16, view<[%csize]xbf16>
+    }
+    %v483 = index.add %v279, %v6 : index
+    %v484 = index.add %v9, %v483 : index
+    %v485 = index.add %v18, %v484 : index
+    %v486 = index.add %v25, %v485 : index
+    %v487 = index.cmp ult, %v437, %m : index
+    %v488 = index.cmp ult, %v486, %n : index
+    %v489 = scalar.andi %v487, %v488 : i1
+    scf.if %v489 {
+      %v490 = view.load %result[%v434, %v483] : view<16x16xf32> -> f32
+      %v491 = scalar.mulf %v490, %alpha : f32
+      %v492 = index.mul %v437, %n : index
+      %v493 = index.add %v492, %v486 : index
+      %v494 = index.add %v29, %v493 : index
+      %v495 = scalar.fptrunc %v491 : f32 to bf16
+      %v496 = index.assume %v494 [range(%v494, 0, 1073741824), lt(%v494, %csize)] : index
+      view.store %v495, %out_view[%v496] : bf16, view<[%csize]xbf16>
+    }
+    %v497 = index.add %v279, %v132 : index
+    %v498 = index.add %v9, %v497 : index
+    %v499 = index.add %v18, %v498 : index
+    %v500 = index.add %v25, %v499 : index
+    %v501 = index.cmp ult, %v437, %m : index
+    %v502 = index.cmp ult, %v500, %n : index
+    %v503 = scalar.andi %v501, %v502 : i1
+    scf.if %v503 {
+      %v504 = view.load %result[%v434, %v497] : view<16x16xf32> -> f32
+      %v505 = scalar.mulf %v504, %alpha : f32
+      %v506 = index.mul %v437, %n : index
+      %v507 = index.add %v506, %v500 : index
+      %v508 = index.add %v29, %v507 : index
+      %v509 = scalar.fptrunc %v505 : f32 to bf16
+      %v510 = index.assume %v508 [range(%v508, 0, 1073741824), lt(%v508, %csize)] : index
+      view.store %v509, %out_view[%v510] : bf16, view<[%csize]xbf16>
+    }
   }
-  %v243 = index.add %v225, %v5 : index
-  %v244 = index.add %v4, %v243 : index
-  %v245 = index.add %v18, %v244 : index
-  %v246 = index.add %v25, %v245 : index
-  %v247 = index.cmp ult, %v228, %m : index
-  %v248 = index.cmp ult, %v246, %n : index
-  %v249 = scalar.andi %v247, %v248 : i1
-  scf.if %v249 {
-    %v250 = view.load %result[%v226, %v243] : view<16x16xf32> -> f32
-    %v251 = scalar.mulf %v250, %alpha : f32
-    %v252 = index.mul %v228, %n : index
-    %v253 = index.add %v252, %v246 : index
-    %v254 = index.add %v29, %v253 : index
-    %v255 = scalar.fptrunc %v251 : f32 to bf16
-    %v256 = index.assume %v254 [range(%v254, 0, 1073741824), lt(%v254, %csize)] : index
-    view.store %v255, %out_view[%v256] : bf16, view<[%csize]xbf16>
-  }
-  %v257 = index.add %v225, %v6 : index
-  %v258 = index.add %v4, %v257 : index
-  %v259 = index.add %v18, %v258 : index
-  %v260 = index.add %v25, %v259 : index
-  %v261 = index.cmp ult, %v228, %m : index
-  %v262 = index.cmp ult, %v260, %n : index
-  %v263 = scalar.andi %v261, %v262 : i1
-  scf.if %v263 {
-    %v264 = view.load %result[%v226, %v257] : view<16x16xf32> -> f32
-    %v265 = scalar.mulf %v264, %alpha : f32
-    %v266 = index.mul %v228, %n : index
-    %v267 = index.add %v266, %v260 : index
-    %v268 = index.add %v29, %v267 : index
-    %v269 = scalar.fptrunc %v265 : f32 to bf16
-    %v270 = index.assume %v268 [range(%v268, 0, 1073741824), lt(%v268, %csize)] : index
-    view.store %v269, %out_view[%v270] : bf16, view<[%csize]xbf16>
-  }
-  %v271 = index.add %v225, %v107 : index
-  %v272 = index.add %v4, %v271 : index
-  %v273 = index.add %v18, %v272 : index
-  %v274 = index.add %v25, %v273 : index
-  %v275 = index.cmp ult, %v228, %m : index
-  %v276 = index.cmp ult, %v274, %n : index
-  %v277 = scalar.andi %v275, %v276 : i1
-  scf.if %v277 {
-    %v278 = view.load %result[%v226, %v271] : view<16x16xf32> -> f32
-    %v279 = scalar.mulf %v278, %alpha : f32
-    %v280 = index.mul %v228, %n : index
-    %v281 = index.add %v280, %v274 : index
-    %v282 = index.add %v29, %v281 : index
-    %v283 = scalar.fptrunc %v279 : f32 to bf16
-    %v284 = index.assume %v282 [range(%v282, 0, 1073741824), lt(%v282, %csize)] : index
-    view.store %v283, %out_view[%v284] : bf16, view<[%csize]xbf16>
-  }
-  %v285 = index.add %v223, %v8 : index
-  %v286 = index.add %v16, %v285 : index
-  %v287 = index.add %v24, %v286 : index
-  %v288 = index.add %v225, %v4 : index
-  %v289 = index.add %v4, %v288 : index
-  %v290 = index.add %v18, %v289 : index
-  %v291 = index.add %v25, %v290 : index
-  %v292 = index.cmp ult, %v287, %m : index
-  %v293 = index.cmp ult, %v291, %n : index
-  %v294 = scalar.andi %v292, %v293 : i1
-  scf.if %v294 {
-    %v295 = view.load %result[%v285, %v288] : view<16x16xf32> -> f32
-    %v296 = scalar.mulf %v295, %alpha : f32
-    %v297 = index.mul %v287, %n : index
-    %v298 = index.add %v297, %v291 : index
-    %v299 = index.add %v29, %v298 : index
-    %v300 = scalar.fptrunc %v296 : f32 to bf16
-    %v301 = index.assume %v299 [range(%v299, 0, 1073741824), lt(%v299, %csize)] : index
-    view.store %v300, %out_view[%v301] : bf16, view<[%csize]xbf16>
-  }
-  %v302 = index.add %v225, %v5 : index
-  %v303 = index.add %v4, %v302 : index
-  %v304 = index.add %v18, %v303 : index
-  %v305 = index.add %v25, %v304 : index
-  %v306 = index.cmp ult, %v287, %m : index
-  %v307 = index.cmp ult, %v305, %n : index
-  %v308 = scalar.andi %v306, %v307 : i1
-  scf.if %v308 {
-    %v309 = view.load %result[%v285, %v302] : view<16x16xf32> -> f32
-    %v310 = scalar.mulf %v309, %alpha : f32
-    %v311 = index.mul %v287, %n : index
-    %v312 = index.add %v311, %v305 : index
-    %v313 = index.add %v29, %v312 : index
-    %v314 = scalar.fptrunc %v310 : f32 to bf16
-    %v315 = index.assume %v313 [range(%v313, 0, 1073741824), lt(%v313, %csize)] : index
-    view.store %v314, %out_view[%v315] : bf16, view<[%csize]xbf16>
-  }
-  %v316 = index.add %v225, %v6 : index
-  %v317 = index.add %v4, %v316 : index
-  %v318 = index.add %v18, %v317 : index
-  %v319 = index.add %v25, %v318 : index
-  %v320 = index.cmp ult, %v287, %m : index
-  %v321 = index.cmp ult, %v319, %n : index
-  %v322 = scalar.andi %v320, %v321 : i1
-  scf.if %v322 {
-    %v323 = view.load %result[%v285, %v316] : view<16x16xf32> -> f32
-    %v324 = scalar.mulf %v323, %alpha : f32
-    %v325 = index.mul %v287, %n : index
-    %v326 = index.add %v325, %v319 : index
-    %v327 = index.add %v29, %v326 : index
-    %v328 = scalar.fptrunc %v324 : f32 to bf16
-    %v329 = index.assume %v327 [range(%v327, 0, 1073741824), lt(%v327, %csize)] : index
-    view.store %v328, %out_view[%v329] : bf16, view<[%csize]xbf16>
-  }
-  %v330 = index.add %v225, %v107 : index
-  %v331 = index.add %v4, %v330 : index
-  %v332 = index.add %v18, %v331 : index
-  %v333 = index.add %v25, %v332 : index
-  %v334 = index.cmp ult, %v287, %m : index
-  %v335 = index.cmp ult, %v333, %n : index
-  %v336 = scalar.andi %v334, %v335 : i1
-  scf.if %v336 {
-    %v337 = view.load %result[%v285, %v330] : view<16x16xf32> -> f32
-    %v338 = scalar.mulf %v337, %alpha : f32
-    %v339 = index.mul %v287, %n : index
-    %v340 = index.add %v339, %v333 : index
-    %v341 = index.add %v29, %v340 : index
-    %v342 = scalar.fptrunc %v338 : f32 to bf16
-    %v343 = index.assume %v341 [range(%v341, 0, 1073741824), lt(%v341, %csize)] : index
-    view.store %v342, %out_view[%v343] : bf16, view<[%csize]xbf16>
-  }
-  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
-  vector.fragment.store<result> %v42, %result[%v4, %v4] shape [%v9, %v9] : vector<8xf32>, view<16x16xf32>
-  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
-  %v344 = index.add %v223, %v4 : index
-  %v345 = index.add %v16, %v344 : index
-  %v346 = index.add %v24, %v345 : index
-  %v347 = index.add %v225, %v4 : index
-  %v348 = index.add %v9, %v347 : index
-  %v349 = index.add %v18, %v348 : index
-  %v350 = index.add %v25, %v349 : index
-  %v351 = index.cmp ult, %v346, %m : index
-  %v352 = index.cmp ult, %v350, %n : index
-  %v353 = scalar.andi %v351, %v352 : i1
-  scf.if %v353 {
-    %v354 = view.load %result[%v344, %v347] : view<16x16xf32> -> f32
-    %v355 = scalar.mulf %v354, %alpha : f32
-    %v356 = index.mul %v346, %n : index
-    %v357 = index.add %v356, %v350 : index
-    %v358 = index.add %v29, %v357 : index
-    %v359 = scalar.fptrunc %v355 : f32 to bf16
-    %v360 = index.assume %v358 [range(%v358, 0, 1073741824), lt(%v358, %csize)] : index
-    view.store %v359, %out_view[%v360] : bf16, view<[%csize]xbf16>
-  }
-  %v361 = index.add %v225, %v5 : index
-  %v362 = index.add %v9, %v361 : index
-  %v363 = index.add %v18, %v362 : index
-  %v364 = index.add %v25, %v363 : index
-  %v365 = index.cmp ult, %v346, %m : index
-  %v366 = index.cmp ult, %v364, %n : index
-  %v367 = scalar.andi %v365, %v366 : i1
-  scf.if %v367 {
-    %v368 = view.load %result[%v344, %v361] : view<16x16xf32> -> f32
-    %v369 = scalar.mulf %v368, %alpha : f32
-    %v370 = index.mul %v346, %n : index
-    %v371 = index.add %v370, %v364 : index
-    %v372 = index.add %v29, %v371 : index
-    %v373 = scalar.fptrunc %v369 : f32 to bf16
-    %v374 = index.assume %v372 [range(%v372, 0, 1073741824), lt(%v372, %csize)] : index
-    view.store %v373, %out_view[%v374] : bf16, view<[%csize]xbf16>
-  }
-  %v375 = index.add %v225, %v6 : index
-  %v376 = index.add %v9, %v375 : index
-  %v377 = index.add %v18, %v376 : index
-  %v378 = index.add %v25, %v377 : index
-  %v379 = index.cmp ult, %v346, %m : index
-  %v380 = index.cmp ult, %v378, %n : index
-  %v381 = scalar.andi %v379, %v380 : i1
-  scf.if %v381 {
-    %v382 = view.load %result[%v344, %v375] : view<16x16xf32> -> f32
-    %v383 = scalar.mulf %v382, %alpha : f32
-    %v384 = index.mul %v346, %n : index
-    %v385 = index.add %v384, %v378 : index
-    %v386 = index.add %v29, %v385 : index
-    %v387 = scalar.fptrunc %v383 : f32 to bf16
-    %v388 = index.assume %v386 [range(%v386, 0, 1073741824), lt(%v386, %csize)] : index
-    view.store %v387, %out_view[%v388] : bf16, view<[%csize]xbf16>
-  }
-  %v389 = index.add %v225, %v107 : index
-  %v390 = index.add %v9, %v389 : index
-  %v391 = index.add %v18, %v390 : index
-  %v392 = index.add %v25, %v391 : index
-  %v393 = index.cmp ult, %v346, %m : index
-  %v394 = index.cmp ult, %v392, %n : index
-  %v395 = scalar.andi %v393, %v394 : i1
-  scf.if %v395 {
-    %v396 = view.load %result[%v344, %v389] : view<16x16xf32> -> f32
-    %v397 = scalar.mulf %v396, %alpha : f32
-    %v398 = index.mul %v346, %n : index
-    %v399 = index.add %v398, %v392 : index
-    %v400 = index.add %v29, %v399 : index
-    %v401 = scalar.fptrunc %v397 : f32 to bf16
-    %v402 = index.assume %v400 [range(%v400, 0, 1073741824), lt(%v400, %csize)] : index
-    view.store %v401, %out_view[%v402] : bf16, view<[%csize]xbf16>
-  }
-  %v403 = index.add %v223, %v8 : index
-  %v404 = index.add %v16, %v403 : index
-  %v405 = index.add %v24, %v404 : index
-  %v406 = index.add %v225, %v4 : index
-  %v407 = index.add %v9, %v406 : index
-  %v408 = index.add %v18, %v407 : index
-  %v409 = index.add %v25, %v408 : index
-  %v410 = index.cmp ult, %v405, %m : index
-  %v411 = index.cmp ult, %v409, %n : index
-  %v412 = scalar.andi %v410, %v411 : i1
-  scf.if %v412 {
-    %v413 = view.load %result[%v403, %v406] : view<16x16xf32> -> f32
-    %v414 = scalar.mulf %v413, %alpha : f32
-    %v415 = index.mul %v405, %n : index
-    %v416 = index.add %v415, %v409 : index
-    %v417 = index.add %v29, %v416 : index
-    %v418 = scalar.fptrunc %v414 : f32 to bf16
-    %v419 = index.assume %v417 [range(%v417, 0, 1073741824), lt(%v417, %csize)] : index
-    view.store %v418, %out_view[%v419] : bf16, view<[%csize]xbf16>
-  }
-  %v420 = index.add %v225, %v5 : index
-  %v421 = index.add %v9, %v420 : index
-  %v422 = index.add %v18, %v421 : index
-  %v423 = index.add %v25, %v422 : index
-  %v424 = index.cmp ult, %v405, %m : index
-  %v425 = index.cmp ult, %v423, %n : index
-  %v426 = scalar.andi %v424, %v425 : i1
-  scf.if %v426 {
-    %v427 = view.load %result[%v403, %v420] : view<16x16xf32> -> f32
-    %v428 = scalar.mulf %v427, %alpha : f32
-    %v429 = index.mul %v405, %n : index
-    %v430 = index.add %v429, %v423 : index
-    %v431 = index.add %v29, %v430 : index
-    %v432 = scalar.fptrunc %v428 : f32 to bf16
-    %v433 = index.assume %v431 [range(%v431, 0, 1073741824), lt(%v431, %csize)] : index
-    view.store %v432, %out_view[%v433] : bf16, view<[%csize]xbf16>
-  }
-  %v434 = index.add %v225, %v6 : index
-  %v435 = index.add %v9, %v434 : index
-  %v436 = index.add %v18, %v435 : index
-  %v437 = index.add %v25, %v436 : index
-  %v438 = index.cmp ult, %v405, %m : index
-  %v439 = index.cmp ult, %v437, %n : index
-  %v440 = scalar.andi %v438, %v439 : i1
-  scf.if %v440 {
-    %v441 = view.load %result[%v403, %v434] : view<16x16xf32> -> f32
-    %v442 = scalar.mulf %v441, %alpha : f32
-    %v443 = index.mul %v405, %n : index
-    %v444 = index.add %v443, %v437 : index
-    %v445 = index.add %v29, %v444 : index
-    %v446 = scalar.fptrunc %v442 : f32 to bf16
-    %v447 = index.assume %v445 [range(%v445, 0, 1073741824), lt(%v445, %csize)] : index
-    view.store %v446, %out_view[%v447] : bf16, view<[%csize]xbf16>
-  }
-  %v448 = index.add %v225, %v107 : index
-  %v449 = index.add %v9, %v448 : index
-  %v450 = index.add %v18, %v449 : index
-  %v451 = index.add %v25, %v450 : index
-  %v452 = index.cmp ult, %v405, %m : index
-  %v453 = index.cmp ult, %v451, %n : index
-  %v454 = scalar.andi %v452, %v453 : i1
-  scf.if %v454 {
-    %v455 = view.load %result[%v403, %v448] : view<16x16xf32> -> f32
-    %v456 = scalar.mulf %v455, %alpha : f32
-    %v457 = index.mul %v405, %n : index
-    %v458 = index.add %v457, %v451 : index
-    %v459 = index.add %v29, %v458 : index
-    %v460 = scalar.fptrunc %v456 : f32 to bf16
-    %v461 = index.assume %v459 [range(%v459, 0, 1073741824), lt(%v459, %csize)] : index
-    view.store %v460, %out_view[%v461] : bf16, view<[%csize]xbf16>
+  %v511 = index.add %v277, %v8 : index
+  %v512 = index.add %v4, %v511 : index
+  %v513 = index.add %v16, %v512 : index
+  %v514 = index.add %v24, %v513 : index
+  %v515 = index.rem %n, %v7 : index
+  %v516 = index.cmp eq, %v515, %v4 : index
+  scf.if %v516 {
+    %v517 = index.add %v9, %v279 : index
+    %v518 = index.add %v18, %v517 : index
+    %v519 = index.add %v25, %v518 : index
+    %v520 = index.cmp ult, %v514, %m : index
+    %v521 = index.cmp ult, %v519, %n : index
+    %v522 = scalar.andi %v520, %v521 : i1
+    scf.if %v522 {
+      %v523 = vector.load %result[%v511, %v279] : view<16x16xf32> -> vector<4xf32>
+      %v524 = vector.splat %alpha : vector<4xf32>
+      %v525 = vector.mulf %v523, %v524 : vector<4xf32>
+      %v526 = vector.fptrunc %v525 : vector<4xf32> to vector<4xbf16>
+      %v527 = index.mul %v514, %n : index
+      %v528 = index.add %v527, %v519 : index
+      %v529 = index.add %v29, %v528 : index
+      %v531 = index.sub %csize, %v7 : index
+      %v530 = index.assume %v529 [range(%v529, 0, 1073741823), le(%v529, %v531), mul(%v529, 4)] : index
+      vector.store %v526, %out_view[%v530] : vector<4xbf16>, view<[%csize]xbf16>
+    }
+  } else {
+    %v532 = index.add %v279, %v4 : index
+    %v533 = index.add %v9, %v532 : index
+    %v534 = index.add %v18, %v533 : index
+    %v535 = index.add %v25, %v534 : index
+    %v536 = index.cmp ult, %v514, %m : index
+    %v537 = index.cmp ult, %v535, %n : index
+    %v538 = scalar.andi %v536, %v537 : i1
+    scf.if %v538 {
+      %v539 = view.load %result[%v511, %v532] : view<16x16xf32> -> f32
+      %v540 = scalar.mulf %v539, %alpha : f32
+      %v541 = index.mul %v514, %n : index
+      %v542 = index.add %v541, %v535 : index
+      %v543 = index.add %v29, %v542 : index
+      %v544 = scalar.fptrunc %v540 : f32 to bf16
+      %v545 = index.assume %v543 [range(%v543, 0, 1073741824), lt(%v543, %csize)] : index
+      view.store %v544, %out_view[%v545] : bf16, view<[%csize]xbf16>
+    }
+    %v546 = index.add %v279, %v5 : index
+    %v547 = index.add %v9, %v546 : index
+    %v548 = index.add %v18, %v547 : index
+    %v549 = index.add %v25, %v548 : index
+    %v550 = index.cmp ult, %v514, %m : index
+    %v551 = index.cmp ult, %v549, %n : index
+    %v552 = scalar.andi %v550, %v551 : i1
+    scf.if %v552 {
+      %v553 = view.load %result[%v511, %v546] : view<16x16xf32> -> f32
+      %v554 = scalar.mulf %v553, %alpha : f32
+      %v555 = index.mul %v514, %n : index
+      %v556 = index.add %v555, %v549 : index
+      %v557 = index.add %v29, %v556 : index
+      %v558 = scalar.fptrunc %v554 : f32 to bf16
+      %v559 = index.assume %v557 [range(%v557, 0, 1073741824), lt(%v557, %csize)] : index
+      view.store %v558, %out_view[%v559] : bf16, view<[%csize]xbf16>
+    }
+    %v560 = index.add %v279, %v6 : index
+    %v561 = index.add %v9, %v560 : index
+    %v562 = index.add %v18, %v561 : index
+    %v563 = index.add %v25, %v562 : index
+    %v564 = index.cmp ult, %v514, %m : index
+    %v565 = index.cmp ult, %v563, %n : index
+    %v566 = scalar.andi %v564, %v565 : i1
+    scf.if %v566 {
+      %v567 = view.load %result[%v511, %v560] : view<16x16xf32> -> f32
+      %v568 = scalar.mulf %v567, %alpha : f32
+      %v569 = index.mul %v514, %n : index
+      %v570 = index.add %v569, %v563 : index
+      %v571 = index.add %v29, %v570 : index
+      %v572 = scalar.fptrunc %v568 : f32 to bf16
+      %v573 = index.assume %v571 [range(%v571, 0, 1073741824), lt(%v571, %csize)] : index
+      view.store %v572, %out_view[%v573] : bf16, view<[%csize]xbf16>
+    }
+    %v574 = index.add %v279, %v132 : index
+    %v575 = index.add %v9, %v574 : index
+    %v576 = index.add %v18, %v575 : index
+    %v577 = index.add %v25, %v576 : index
+    %v578 = index.cmp ult, %v514, %m : index
+    %v579 = index.cmp ult, %v577, %n : index
+    %v580 = scalar.andi %v578, %v579 : i1
+    scf.if %v580 {
+      %v581 = view.load %result[%v511, %v574] : view<16x16xf32> -> f32
+      %v582 = scalar.mulf %v581, %alpha : f32
+      %v583 = index.mul %v514, %n : index
+      %v584 = index.add %v583, %v577 : index
+      %v585 = index.add %v29, %v584 : index
+      %v586 = scalar.fptrunc %v582 : f32 to bf16
+      %v587 = index.assume %v585 [range(%v585, 0, 1073741824), lt(%v585, %csize)] : index
+      view.store %v586, %out_view[%v587] : bf16, view<[%csize]xbf16>
+    }
   }
   kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
   kernel.return

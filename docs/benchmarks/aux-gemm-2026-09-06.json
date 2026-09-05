@@ -1,0 +1,89 @@
+{
+  "date": "2026-09-06",
+  "target": "gfx1151",
+  "baseline_revision": "2870077",
+  "command": "env -u LD_LIBRARY_PATH .venv/bin/python tools/bench_native_gemm.py --baseline 2870077 --rounds 80",
+  "conditions": "Shared GPU with concurrent H3 video inference. Timings are not dedicated-GPU measurements. Same resident signed BF16 inputs, alternating order, exact output checked before timing.",
+  "results": [
+    {
+      "exact": true,
+      "m": 64,
+      "n": 6144,
+      "k": 2560,
+      "rounds": 80,
+      "paired_median_speedup": 1.365279,
+      "baseline_ms": {
+        "min": 1.076921,
+        "p10": 1.425822,
+        "median": 2.118813,
+        "p90": 3.134275
+      },
+      "candidate_ms": {
+        "min": 0.880796,
+        "p10": 1.024593,
+        "median": 1.499139,
+        "p90": 2.349497
+      }
+    },
+    {
+      "exact": true,
+      "m": 4096,
+      "n": 6144,
+      "k": 64,
+      "rounds": 80,
+      "paired_median_speedup": 3.372389,
+      "baseline_ms": {
+        "min": 1.293075,
+        "p10": 1.434312,
+        "median": 1.47163,
+        "p90": 1.533709
+      },
+      "candidate_ms": {
+        "min": 0.37159,
+        "p10": 0.38141,
+        "median": 0.439798,
+        "p90": 0.496146
+      }
+    },
+    {
+      "exact": true,
+      "m": 65536,
+      "n": 256,
+      "k": 2304,
+      "rounds": 80,
+      "paired_median_speedup": 1.869871,
+      "baseline_ms": {
+        "min": 5.149861,
+        "p10": 5.21158,
+        "median": 23.900167,
+        "p90": 29.519735
+      },
+      "candidate_ms": {
+        "min": 3.71299,
+        "p10": 3.957923,
+        "median": 11.797083,
+        "p90": 16.006179
+      }
+    },
+    {
+      "exact": true,
+      "m": 16384,
+      "n": 512,
+      "k": 4608,
+      "rounds": 80,
+      "paired_median_speedup": 1.488789,
+      "baseline_ms": {
+        "min": 5.817684,
+        "p10": 6.191394,
+        "median": 6.981772,
+        "p90": 28.477393
+      },
+      "candidate_ms": {
+        "min": 3.788448,
+        "p10": 4.395321,
+        "median": 5.062984,
+        "p90": 14.833351
+      }
+    }
+  ]
+}

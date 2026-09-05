@@ -75,11 +75,16 @@ def main():
     rng = np.random.default_rng(42)
     # Non-divisible tiles, multiple M tiles, multiple batches, and N >> M catch
     # launch metadata that silently folds a workgroup index to zero.
-    for m, n, k, batches, trans, bias in [
-        (19, 3, 144, 1, True, False),
-        (129, 97, 37, 3, True, False),
-        (7, 257, 256, 1, True, True),
-        (65, 33, 71, 2, False, False),
+    for m, n, k, batches, trans, bias, tile_m, tile_n in [
+        (19, 3, 144, 1, True, False, 64, 64),
+        (129, 97, 37, 3, True, False, 64, 64),
+        (7, 257, 256, 1, True, True, 64, 64),
+        (65, 33, 71, 2, False, False, 64, 64),
+        (257, 97, 37, 3, True, False, 128, 64),
+        (129, 128, 132, 2, True, True, 128, 64),
+        (192, 64, 128, 2, True, False, 64, 64),
+        (257, 129, 37, 2, True, False, 128, 128),
+        (129, 128, 132, 2, True, True, 128, 128),
     ]:
         a = bf(rng.standard_normal((batches, m, k)))
         b = bf(rng.standard_normal((batches, n, k) if trans else (batches, k, n)))
@@ -94,6 +99,7 @@ def main():
             bstride=n * k,
         )
         name = "gemm_bf16_bf16_" + ("nt" if trans else "nn")
+        suffix = "_tiled" if tile_n == 128 else "_wide" if tile_m == 128 else ""
         want = f32(a) @ (f32(b).transpose(0, 2, 1) if trans else f32(b))
         if bias:
             biasval = bf(rng.standard_normal(n))
@@ -109,12 +115,12 @@ def main():
             buf = C.create_string_buffer(pack)
             try:
                 assert not lib.test_run(
-                    (name + "_bias").encode(),
+                    (name + "_bias" + suffix).encode(),
                     json.dumps(cfg).encode(),
                     buf,
                     len(pack),
-                    (n + 63) // 64,
-                    batches * ((m + 63) // 64),
+                    (n + tile_n - 1) // tile_n,
+                    batches * ((m + tile_m - 1) // tile_m),
                     256,
                 )
                 y = np.empty((batches, m, n), np.uint16)
@@ -124,13 +130,16 @@ def main():
                     lib.test_free(ptr)
         else:
             y = run(
-                name,
+                name + suffix,
                 cfg,
                 m,
                 [a, b],
                 (batches, m, n),
                 scalar=1.0,
-                grid=((n + 63) // 64, batches * ((m + 63) // 64)),
+                grid=(
+                    (n + tile_n - 1) // tile_n,
+                    batches * ((m + tile_m - 1) // tile_m),
+                ),
             )
         np.testing.assert_allclose(f32(y), f32(bf(want)), atol=0.005, rtol=0.008)
     print(
