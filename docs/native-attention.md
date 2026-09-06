@@ -114,11 +114,10 @@ between variants, so these values cannot establish a speedup or rank the variant
 | 8,192 | 112.72 | 16.04 + 84.22 = 100.26 | 15.84 + 73.14 = 88.98 |
 | 16,384 | 608.19 | 57.00 + 397.36 = 454.36 | 54.16 + 442.13 = 496.29 |
 
-Before selecting a default, repeat measurements on an idle GPU, alternate backend
-order, and measure full-image latency with `tools/bench_native.py` under each
-selector. Preprocessing can erase the INT4 QK savings, especially at shorter
-sequences. Broader image comparisons across prompts, seeds and resolutions remain
-necessary. All experimental modes are therefore opt-in.
+At the time, these numbers argued for keeping the modes opt-in. The selectors
+were later removed (see "Fixed-path validation" below); the tuned kernels are now
+the only attention path. Broader image comparisons across prompts, seeds and
+resolutions against the bf16 baseline remain necessary.
 
 ## Tuning against minimax-h3-loom
 
@@ -140,9 +139,9 @@ The fixed gfx1151 dispatcher uses:
 
 The second schedule won at both 8,192 and 16,384 tokens. The boundary is an
 empirical choice from these sample lengths, not proof that it is optimal at every
-shape or power setting. The earlier `sa2` and `sa2-pingpong` modes remain available
-for comparison. All four kernels preserve the original quantized attention's
-arithmetic and outputs.
+shape or power setting. The earlier `sa2` and `sa2-pingpong` kernels were used for
+this comparison and have since been removed from the tree; all four kernels
+preserved the original quantized attention's arithmetic and outputs.
 
 SA2 preprocessing also changed. Q mean and quantization now use separate kernels;
 this removes the previous 33 KiB LDS allocation and the 512-thread workgroup's

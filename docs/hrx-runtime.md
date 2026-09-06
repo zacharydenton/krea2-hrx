@@ -63,7 +63,9 @@ cannot undo a compiler-folded Y index. The tests cover multiple batch heads,
 multiple row tiles, wide/tall matrices and partial tails to catch that failure.
 Sources and configurations identify persistent caches; artifacts are verified
 with SHA-256 before loading. In-memory hits avoid rehashing kernel source on each
-operation. The auxiliary cache currently requires a writable lock file.
+operation. A populated auxiliary cache is verified and used without taking the
+lock, so a read-only cache directory works; only compilation needs write access.
+A failed compilation reports the compiler's stderr tail in the error string.
 
 ## Validation
 

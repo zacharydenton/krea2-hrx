@@ -165,8 +165,8 @@ the larger), so 33 rows raster in groups of 3 with no ghosts. Interleaved A/B, 2
 | forward | 2936 / 2945 | 2809 / 2872 |
 
 The down GEMM's spread (its 1 MB W tiles are the L2-sensitive case) is the box's noise;
-the other three gain 7-8%, the whole forward 3-4%. `KREA2_M_GROUP` overrides both sides
-for A/Bs.
+the other three gain 7-8%, the whole forward 3-4%. `KREA2_M_GROUP` overrode both sides
+for these A/Bs; the override was removed once the builders chose the group automatically.
 
 ## Attention round two: what actually stalled the staged kernel
 

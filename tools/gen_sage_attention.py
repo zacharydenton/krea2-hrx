@@ -204,7 +204,11 @@ def waves8(s):
     klines = ''.join(l for l in lines if '%v_chunk' not in l and '%st_row_v' not in l)
     vlines = ''.join(l for l in lines if '%v_chunk' in l)
     s = s[:i]+'    scf.if %stage_active {\n'+klines+'    } else {\n'+vlines+'    }\n'+s[j:]
-    s = s.replace('index.constant 9472 : offset','index.constant 11520 : offset').replace('index.constant 16896 : offset','index.constant 18944 : offset')
+    # Eight waves need eight 512-byte scratch slots after the two 7424-byte
+    # K/V slots that double_buffer laid out; this step must follow it.
+    before = s
+    s = s.replace('index.constant 16896 : offset', 'index.constant 18944 : offset')
+    assert s != before, 'waves8 expects the double_buffer LDS layout'
     s = s.replace('      %writes = scalar.andi %present, %in_range : i1', '      %valid_row = scalar.andi %present, %in_range : i1\n      %writes = scalar.andi %valid_row, %tile_present : i1')
     return s
 

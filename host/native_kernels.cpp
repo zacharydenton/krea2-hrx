@@ -1,16 +1,13 @@
 #include "native_kernels.h"
 #include "sha256.h"
-#include <cerrno>
+#include "compiler_spawn.h"
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
-#include <spawn.h>
 #include <sys/file.h>
-#include <sys/wait.h>
 #include <unistd.h>
-extern char **environ;
 namespace krea_native {
 #include "native_sources.h"
 namespace {
@@ -58,49 +55,52 @@ void native_launch(const std::string &name, const Config &input_config,
     root /= "native-gfx1151-v1";
     std::filesystem::create_directories(root);
     auto path = root / (key + ".hsaco"), hashfile = root / (key + ".sha256");
-    int fd = open((root / ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
-    if (fd < 0)
-      throw std::runtime_error("cannot open auxiliary kernel cache lock");
-    struct Lock {
-      int fd;
-      ~Lock() { close(fd); }
-    } lockfile{fd};
-    if (flock(fd, LOCK_EX))
-      throw std::runtime_error("cannot lock auxiliary kernel cache");
-    if (!std::filesystem::exists(path) || !std::filesystem::exists(hashfile)) {
-      auto src = root / (key + ".loom"), tmp = root / (key + ".tmp");
-      std::ofstream(src) << source;
-      const char *env = std::getenv("LOOM_COMPILE");
-      std::string exe =
-          compiler.empty() ? (env ? env : "loom-compile") : compiler;
-      std::vector<std::string> cmd = {exe,
-                                      src.string(),
-                                      "--backend=amdgpu-hal",
-                                      "--target=gfx1151",
-                                      "--root=@krea2_" + name,
-                                      "--output=" + tmp.string()};
-      for (const auto &[key, value] : config)
-        cmd.push_back("--config=krea2." + name + "." + key + "=" +
-                      std::to_string(value));
-      std::vector<char *> argv;
-      for (auto &s : cmd)
-        argv.push_back(s.data());
-      argv.push_back(nullptr);
-      pid_t pid;
-      int error = posix_spawnp(&pid, exe.c_str(), nullptr, nullptr, argv.data(),
-                               environ);
-      if (error)
-        throw std::runtime_error("cannot start Loom compiler: " + exe);
-      int status;
-      while (waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR)
-          throw std::runtime_error("cannot wait for Loom compiler");
+    // A populated cache is usable without write access: verify before locking.
+    auto cached = [&] {
+      return std::filesystem::exists(path) && std::filesystem::exists(hashfile);
+    };
+    if (!cached()) {
+      int fd =
+          open((root / ".lock").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+      if (fd < 0)
+        throw std::runtime_error("cannot open auxiliary kernel cache lock " +
+                                 (root / ".lock").string() + ": " +
+                                 std::strerror(errno));
+      struct Lock {
+        int fd;
+        ~Lock() { close(fd); }
+      } lockfile{fd};
+      if (flock(fd, LOCK_EX))
+        throw std::runtime_error("cannot lock auxiliary kernel cache");
+      if (!cached()) {
+        auto src = root / (key + ".loom"), tmp = root / (key + ".tmp"),
+             log = root / (key + ".log");
+        struct Scratch {
+          std::filesystem::path src, tmp, log;
+          ~Scratch() {
+            std::error_code e;
+            std::filesystem::remove(src, e);
+            std::filesystem::remove(tmp, e);
+            std::filesystem::remove(log, e);
+          }
+        } scratch{src, tmp, log};
+        std::ofstream(src) << source;
+        const char *env = std::getenv("LOOM_COMPILE");
+        std::string exe =
+            compiler.empty() ? (env ? env : "loom-compile") : compiler;
+        std::vector<std::string> cmd = {exe,
+                                        src.string(),
+                                        "--backend=amdgpu-hal",
+                                        "--target=gfx1151",
+                                        "--root=@krea2_" + name,
+                                        "--output=" + tmp.string()};
+        for (const auto &[key, value] : config)
+          cmd.push_back("--config=krea2." + name + "." + key + "=" +
+                        std::to_string(value));
+        run_compiler(cmd, log, name);
+        std::ofstream(hashfile) << sha256(read(tmp));
+        std::filesystem::rename(tmp, path);
       }
-      if (!WIFEXITED(status) || WEXITSTATUS(status))
-        throw std::runtime_error("Loom compilation failed: " + name);
-      std::ofstream(hashfile) << sha256(read(tmp));
-      std::filesystem::rename(tmp, path);
-      std::filesystem::remove(src);
     }
     if (read(hashfile) != sha256(read(path)))
       throw std::runtime_error("corrupt auxiliary kernel: " + path.string());

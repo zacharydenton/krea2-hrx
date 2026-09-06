@@ -1,18 +1,16 @@
 #include "native_compile.h"
 #include "sha256.h"
+#include "compiler_spawn.h"
 #include <algorithm>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
-#include <spawn.h>
 #include <stdexcept>
 #include <sys/file.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
-extern char **environ;
 namespace krea_native {
 static std::string digest(const std::string &bytes) { return sha256(bytes); }
 static std::string contents(const std::filesystem::path &path) {
@@ -140,23 +138,8 @@ std::string prepare_kernels(const std::string &bundle,
         "--output=" + (staging / (j.stem + ".hsaco")).string()};
     for (const auto &[k, v] : j.cfg)
       args.push_back("--config=krea2." + j.source + "." + k + "=" + v);
-    std::vector<char *> argv;
-    for (auto &a : args)
-      argv.push_back(a.data());
-    argv.push_back(nullptr);
-    pid_t pid;
-    int rc = posix_spawnp(&pid, compiler.c_str(), nullptr, nullptr, argv.data(),
-                          environ);
-    if (rc)
-      throw std::runtime_error("cannot start native loom-compile: " +
-                               std::to_string(rc));
-    int status;
-    while (waitpid(pid, &status, 0) < 0) {
-      if (errno != EINTR)
-        throw std::runtime_error("compiler wait failed");
-    }
-    if (!WIFEXITED(status) || WEXITSTATUS(status))
-      throw std::runtime_error("kernel compilation failed: " + j.source);
+    run_compiler(args, staging / (j.stem + ".log"), j.source);
+    fs::remove(staging / (j.stem + ".log"));
   }
   std::ofstream(staging / "launch.txt") << metadata;
   std::ofstream(staging / "signature", std::ios::binary) << signature;

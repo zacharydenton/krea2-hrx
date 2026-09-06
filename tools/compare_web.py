@@ -149,7 +149,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--host', default='127.0.0.1', help='bind address; 0.0.0.0 exposes GPU job submission to the network')
     parser.add_argument('--port', type=int, default=7865)
     args = parser.parse_args()
     OUTPUT.mkdir(parents=True, exist_ok=True)
