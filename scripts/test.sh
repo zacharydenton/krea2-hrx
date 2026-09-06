@@ -18,7 +18,7 @@ done
 tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT; export tmpdir
 status=0
 step() { local name="$1"; shift; printf '\n=== %s ===\n' "$name"; if "$@"; then printf '  ok\n'; else printf '  FAILED: %s\n' "$name"; status=1; return 1; fi; }
-step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom kernels/native/*.loom experiments/attention_gqa_lds_f16_wmma.loom'
+step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom kernels/native/*.loom experiments/attention_gqa_lds_f16_wmma.loom experiments/gemm_down_i4.loom'
 step "generated kernels match their generators" bash -c '
   cp -r kernels "$tmpdir/kernels" && mkdir -p "$tmpdir/experiments" && cd "$tmpdir" && mkdir -p tools host &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_prepare.py" > tools/gen_prepare.py &&
@@ -36,6 +36,7 @@ step "native constructor cleanup" bash -c 'source scripts/build_common.sh && "$C
 step "auxiliary Loom kernel regressions" bash -c 'source .venv/bin/activate && python3 tests/test_native_ops.py'
 step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && python3 tests/test_ref_vs_diffusers.py'
 step "prepare kernels"            bash -c 'python3 tests/test_prepare.py'
+step "wide INT4 down projection"  bash -c '.venv/bin/python tests/test_gemm_down.py'
 step "qk norm + rope"             bash -c 'python3 tests/test_rope_qknorm.py'
 step "FP16 attention reference"   bash -c 'python3 tests/test_attention.py'
 step "gfx1151 attention vs oracle" bash -c '.venv/bin/python tests/test_sage_attention.py'

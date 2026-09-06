@@ -40,13 +40,18 @@ def main():
     call(lib.krea2_pipeline_create, str(args.bundle.resolve()).encode(), None, C.byref(session))
     print(json.dumps({"load_seconds": time.perf_counter() - start}), flush=True)
     try:
+        first_digest = None
         for run in range(args.runs):
             start = time.perf_counter()
             call(lib.krea2_generate, session, args.prompt.encode(), args.size, args.size,
                  args.steps, 0, None, 0, rgb, len(rgb))
             elapsed = time.perf_counter() - start
+            digest = hashlib.sha256(bytes(rgb)).hexdigest()
             print(json.dumps({"run": run, "seconds": elapsed,
-                              "rgb_sha256": hashlib.sha256(bytes(rgb)).hexdigest()}), flush=True)
+                              "rgb_sha256": digest}), flush=True)
+            if first_digest is not None and digest != first_digest:
+                raise RuntimeError("identical prompt and seed produced different RGB on a repeated call")
+            first_digest = digest
     finally:
         lib.krea2_pipeline_destroy(session)
 

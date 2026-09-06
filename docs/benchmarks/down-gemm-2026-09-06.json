@@ -1,0 +1,90 @@
+{
+  "baseline": "db476cf",
+  "target": "gfx1151",
+  "command": "env -u LD_LIBRARY_PATH .venv/bin/python tools/bench_down_gemm.py --baseline db476cf --rounds 80",
+  "conditions": "Resident buffers, alternating order, synchronization included; compilation, allocation and transfers excluded. Shared with H3 inference work; an unrelated ComfyUI job was OOM-killed during the session. Timings are not guaranteed isolated.",
+  "results": [
+    {
+      "exact": true,
+      "m": 4096,
+      "n": 6144,
+      "k": 16384,
+      "rounds": 80,
+      "paired_median_speedup": 1.060689,
+      "baseline_ms": {
+        "min": 12.158401,
+        "p10": 12.301228,
+        "median": 12.61361,
+        "p90": 13.111646
+      },
+      "candidate_ms": {
+        "min": 11.408812,
+        "p10": 11.576547,
+        "median": 11.901668,
+        "p90": 12.392145
+      }
+    },
+    {
+      "exact": true,
+      "m": 4115,
+      "n": 6144,
+      "k": 16384,
+      "rounds": 80,
+      "paired_median_speedup": 1.091015,
+      "baseline_ms": {
+        "min": 13.202344,
+        "p10": 13.469507,
+        "median": 13.751498,
+        "p90": 14.462799
+      },
+      "candidate_ms": {
+        "min": 12.099204,
+        "p10": 12.316478,
+        "median": 12.627039,
+        "p90": 13.188024
+      }
+    },
+    {
+      "exact": true,
+      "m": 8192,
+      "n": 6144,
+      "k": 16384,
+      "rounds": 80,
+      "paired_median_speedup": 1.058379,
+      "baseline_ms": {
+        "min": 23.945384,
+        "p10": 24.43793,
+        "median": 25.20332,
+        "p90": 26.344509
+      },
+      "candidate_ms": {
+        "min": 22.463754,
+        "p10": 22.722026,
+        "median": 23.703971,
+        "p90": 25.256348
+      }
+    },
+    {
+      "exact": true,
+      "m": 16896,
+      "n": 6144,
+      "k": 16384,
+      "rounds": 80,
+      "paired_median_speedup": 1.064931,
+      "baseline_ms": {
+        "min": 48.319326,
+        "p10": 49.001287,
+        "median": 49.528472,
+        "p90": 51.365854
+      },
+      "candidate_ms": {
+        "min": 45.351446,
+        "p10": 45.968359,
+        "median": 46.481435,
+        "p90": 47.867008
+      }
+    }
+  ],
+  "experimental": true,
+  "production_selected": false
+}

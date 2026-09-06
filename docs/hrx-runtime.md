@@ -147,3 +147,7 @@ Carrying the next Sage key scale and correction in registers preserved output
 but slowed the 4K-token attention kernel from 13.97 to 15.55 ms median; carrying
 only the scale also lost. The existing attention schedules remain selected.
 These local experiments do not establish a state-of-the-art ranking.
+
+A later down-projection sweep measured a 1.06×–1.09× kernel speedup, but an
+integrated warm generation changed its checksum. That candidate remains outside
+the production path; see [the experiment report](down-gemm-experiment.md).

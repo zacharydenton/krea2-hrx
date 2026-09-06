@@ -142,6 +142,10 @@ They preserve the accumulation and rounding order. The resident-buffer A/B
 benchmark and rejected INT4/prefetch experiments are documented in
 [HRX runtime details](docs/hrx-runtime.md#auxiliary-gemm-optimization).
 
+A later wide INT4 down-projection candidate remains experimental: kernel timing
+improved, but an integrated warm repeat changed the image checksum. See the
+[measurements and unresolved repeat-image check](docs/down-gemm-experiment.md).
+
 For stage timings, set `KREA2_NATIVE_PROFILE=1` when running the CLI. This adds
 synchronization and prints text encoding, denoising, VAE and transformer-stage
 timings to stderr. Leave it unset for performance comparisons.
@@ -154,7 +158,8 @@ env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE python3 tools/bench_native.py \
 This standard-library-only Python benchmark calls the native C API and prints
 loading time, per-image time and an RGB checksum. The first image includes block
 session preparation; later images reuse the resident session. `--library` selects
-a saved library for comparisons. The native runtime itself still needs no Python.
+a saved library for comparisons. Repeated calls must retain the same checksum or
+the benchmark fails. The native runtime itself still needs no Python.
 
 ## Local comparison UI
 
