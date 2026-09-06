@@ -18,16 +18,20 @@ def unpack(q: np.ndarray) -> np.ndarray:
     return np.stack([lo, hi], axis=-1).reshape(q.shape[0], -1)
 
 
-def check(name, tmp, tokens, width, x_expected, args, cfg):
-    """x_expected: the f32 row before rotation; compare codes and scales."""
+def check(name, tmp, tokens, width, x_expected, args, cfg, pad=0):
+    """x_expected: the f32 row before rotation; compare codes and scales. pad: extra output
+    row pitch in elements (the GEMM's k_stride padding); the pad bytes must stay untouched."""
     h = R.hadamard(256)
     xr = R.rotate_groups(torch.from_numpy(x_expected), h)
     qs, ss = R.quant_int4_rows(xr)
     sym, ns = f"krea2_prepare_{name}_i4", f"krea2.prepare_{name}_i4"
     hs = tmp / f"{name}.hsaco"
-    compile_kernel(ROOT / f"kernels/prepare_{name}_i4.loom", sym, {f"{ns}.width": width, **cfg}, hs)
+    compile_kernel(ROOT / f"kernels/prepare_{name}_i4.loom", sym, {f"{ns}.width": width, f"{ns}.out_stride": width + pad, **cfg}, hs)
+    sentinel = np.full((tokens, (width + pad) // 2), 0xA5, dtype=np.uint8)
     (q, s), t = launch(hs, sym, (tokens, 1, 1), (256, 1, 1), [("i32", tokens)] + args +
-                       [("out", ((tokens, width // 2), np.uint8)), ("out", ((tokens,), np.float32))], tmp, repeat=3)
+                       [("inout_u8", (sentinel, sentinel.shape)), ("out", ((tokens,), np.float32))], tmp, repeat=3)
+    assert np.all(q[:, width // 2:] == 0xA5), "the prepare kernel wrote into the row padding"
+    q = q[:, : width // 2]
     got = unpack(q).astype(np.int64); want = qs.numpy().astype(np.int64)
     mism = (got != want); off_by_one = (np.abs(got - want) == 1)
     bad = mism & ~off_by_one
@@ -69,6 +73,7 @@ def main() -> int:
         inter = 16384
         x = (rng.standard_normal((tokens, inter)) * 0.5).astype(np.float16)
         ok &= check("plain", tmp, tokens, inter, x.astype(np.float32), [("in_f16", x)], {})
+        ok &= check("plain", tmp, tokens, inter, x.astype(np.float32), [("in_f16", x)], {}, pad=128)
         # Signed Hadamard basis rows exercise the largest intermediates; constants
         # previously overflowed even though their normalized rotation fits in f16.
         h256 = R.hadamard(256).numpy()

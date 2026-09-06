@@ -163,6 +163,9 @@ def kernel(name: str) -> str:
 amdgpu.target<gfx11-generic> @{sym}_gfx11 {{subgroup_size = 32}}
 
 config.decl @{ns}.width : %value: index where [range(%value, 2048, 32768), mul(%value, 2048)]
+
+// packed output row pitch in elements (the GEMM's k_stride): width, or width + 128 for 16384
+config.decl @{ns}.out_stride : %value: index where [range(%value, 2048, 65536), mul(%value, 128)]
 {eps_cfg}{extra_cfg}
 kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   %c1 = index.constant 1 : index
@@ -170,6 +173,7 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   kernel.launch.config workgroups(%tokens, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
 }} launch(%tokens: index, {f["args"]}, %q: buffer, %q_scale: buffer) {{
   %width = config.get @{ns}.width : index
+  %out_stride = config.get @{ns}.out_stride : index
 {eps_get}{extra_get}  %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index
@@ -206,11 +210,13 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
   %lane = kernel.workitem.id<x> : index
   %half_width = index.div %width, %c2 : index
   %word_width = index.div %width, %c8 : index
+  %out_words0 = index.div %out_stride, %c8 : index
+  %out_words = index.assume %out_words0 [ge(%out_words0, %word_width)] : index
   %width_last = index.sub %width, %c8 : index
 {gate_last}  %quads = index.div %width, %c4 : index
 {f["views"]}  %q_global = buffer.assume.memory_space<global> %q : buffer
   %qs_global = buffer.assume.memory_space<global> %q_scale : buffer
-  %qw_view = buffer.view %q_global[%c0_offset] : buffer -> view<[%tokens_b]x[%word_width]xi32>
+  %qw_view = buffer.view %q_global[%c0_offset] : buffer -> view<[%tokens_b]x[%out_words]xi32>
   %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<[%tokens_b]xf32>
   %row_bytes0 = index.mul %width, %c{lds_bytes} : index
   %row_bytes = index.cast %row_bytes0 : index to offset
@@ -244,7 +250,7 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
     %q_chunk = index.add %q_lane_step, %lane : index
     %q_i0 = index.mul %q_chunk, %c8 : index
     %q_i = index.assume %q_i0 [le(%q_i0, %width_last), mul(%q_i0, 8)] : index
-    %q_w = index.assume %q_chunk [lt(%q_chunk, %word_width)] : index
+    %q_w = index.assume %q_chunk [lt(%q_chunk, %word_width), lt(%q_chunk, %out_words)] : index
     %q_x = vector.load %x_view[%q_i] : view<[%width]xf32> -> vector<8xf32>
     %q_r = vector.mulf %q_x, %inv_s8 : vector<8xf32>
     %q_f = vector.roundevenf %q_r : vector<8xf32>
@@ -274,7 +280,7 @@ kernel.def target(@{sym}_gfx11) export("{sym}") @{sym}(%tokens: index) {{
     %q_o5 = scalar.ori %q_o4, %q_s5 : i32
     %q_o6 = scalar.ori %q_o5, %q_s6 : i32
     %q_o7 = scalar.ori %q_o6, %q_s7 : i32
-    view.store %q_o7, %qw_view[%row, %q_w] : i32, view<[%tokens_b]x[%word_width]xi32>
+    view.store %q_o7, %qw_view[%row, %q_w] : i32, view<[%tokens_b]x[%out_words]xi32>
   }}
   // the token scale, by one lane, after the last loop (a divergent region before a
   // loop is rejected by the branch lowering)

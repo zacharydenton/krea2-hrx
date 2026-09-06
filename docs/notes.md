@@ -564,3 +564,49 @@ Final warm generation was 18.49 s versus 19.33 s for the saved HIP build under t
 same local conditions. The fresh shared-noise UI pair took 19.36 s for native
 HRX generation and 53.73 s for ComfyUI INT8 ConvRot. Detailed conditions, hashes
 and the single-prompt quality comparison are in `docs/hrx-runtime.md`.
+
+## GEMM levers from minimax-h3-loom (2026-09-06)
+
+The sibling H3 repo's falsifier-first campaign found four things worth trying here.
+Every number below is a paired, interleaved A/B on an idle GPU (`tools/bench_i4_gemm.py`
+refuses to time while `gpu_busy_percent` is nonzero; another session's benchmark job
+was running on the box, so runs were queued for idle windows), 80 rounds, outputs
+compared bit for bit before and after timing. Records: `docs/benchmarks/gemm-*.jsonl`.
+
+**Unconditional staging loads (H3: +5-7%, 228 -> 192 VGPRs).** Replacing the
+predicated `scf.if` prefetch loads with plain loads from clamped rows cut the plain
+kernel from 156 to 141 VGPRs and 815 to 623 instructions, but Loom then sinks the four
+loads into the middle of the WMMA block instead of issuing them after the barrier, and
+the timing split by shape: wo (K 6144, N 6144) 1.047x / 1.042x, plain 1.002x / 0.998x,
+swiglu 0.996x / 1.027x, down (K 16384) 0.972x / 0.955x. Issuing the loads before the
+LDS stores, ahead of the barrier, was worse everywhere (0.88-0.92x). Kept for the
+plain and swiglu kernels (simpler, neutral), reverted for the shared resid kernel
+because the down projection is the larger stage. `tools/gen_gemm.py` keeps all three
+forms selectable (`loads=`) for the 256-row tile.
+
+**Operand row pitch (H3: 31 -> 41 TOPS at 1024-byte-multiple rows).** Same kernel at
+K vs K + 128, TOPS by the real K: down projection (8192-byte rows) 60.9 -> 77.5 TOPS,
+time ratio 1.26x at 4115 tokens and 1.15x at 8192, reproduced twice with a same-K
+control at 0.997x. The 3072-byte rows of K = 6144 showed nothing: plain 0.995x /
+0.989x raw time for 2% more bytes, swiglu 0.987x, wo 1.050x (control 0.998x). So
+`gemm_pitch(k)` pads only rows that are a multiple of 8192 bytes: the GEMMs and the
+prepare kernels take `k_stride` / `out_stride` configs, the weights are re-pitched on
+upload (`krea2_weights`, 16 MB host staging chunks, pad bytes zero), the prepared
+operand buffer is sized by the padded pitch, and `GEMM_KPAD=128` / the prepare test's
+sentinel pad prove neither side touches the padding. Launch metadata is version 3.
+
+**256x128 tile on all four GEMMs (H3: 15-17%).** `tools/gen_gemm.py` is H3's
+generator with Krea's epilogues (f16 residual stream with a per-column gate, no
+saturation) so the outputs stay bit-exact with the 128-row kernels. With H3's padded
+raster grid the tile was a wash at 4115 tokens (plain 1.002x, wo 0.982x, down 1.052x,
+swiglu 1.019x: 17 tile rows padded to 18) and clearly ahead at 8192 (1.08x, 1.07x,
+1.06x, 1.14x). With the down experiment's in-kernel tail shortening (no ghost
+workgroups, `m_group` 4) it wins at 4115 too: plain 1.058x, wo 1.035x, down 1.075x,
+swiglu 1.079x; 8192: down 1.071x, swiglu 1.108x; 16896: plain 1.096x; 4353: down
+1.038x; 2064: down 1.066x; 1040: plain 0.971x. `gemm_rows(tokens)` therefore takes the
+256-row tile from 2048 tokens when its tile rows are within 8% of the 128-row grid's
+padded rows. `tests/test_gemm_i4.py` checks both tiles against a float64 oracle and
+each other at seven token counts, with and without pad columns.
+
+**Still open from the plan:** head-major Sage attention operands and the int8-QK
+attention fallback (phases 3 and 5).

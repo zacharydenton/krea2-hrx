@@ -36,8 +36,10 @@ class CacheTests(unittest.TestCase):
                     selected = builder.build(tokens)
                     launch = (selected / "launch.txt").read_text()
                     fields = launch.split()
-                    self.assertEqual(fields[0], "2")
-                    self.assertEqual(fields[-1], str(waves))
+                    self.assertEqual(fields[0], "3")
+                    self.assertEqual(fields[5], str(waves))
+                    self.assertEqual(fields[2], str(builder.gemm_rows(tokens)))
+                    self.assertEqual(fields[6:], ["6144", "16512"])
                     expected = "attention_sage_i4_fast" + ("_prefetch" if waves == 4 else "")
                     self.assertIn(expected, (selected / "attention.hsaco").read_text())
                     self.assertEqual(builder.build(tokens), selected)
@@ -59,8 +61,13 @@ class CacheTests(unittest.TestCase):
                     builder.build(129)
 
     def test_automatic_groups(self):
-        for tokens, group in ((129, 2), (4115, 3), (8192, 4)):
-            self.assertEqual(builder.gemm_m_group(tokens), group)
+        for tokens, group in ((16, 1), (129, 2), (4115, 3), (8192, 4)):
+            self.assertEqual(builder.gemm_m_group(tokens, 128), group)
+        for tokens in (4096, 4115, 16896):
+            self.assertEqual(builder.gemm_m_group(tokens, 256), 4)
+        self.assertEqual([builder.gemm_pitch(k) for k in (6144, 16384)], [6144, 16512])
+        self.assertEqual([builder.gemm_rows(t) for t in (16, 1040, 2047, 2064, 4115, 4353, 8192, 16896)],
+                         [128, 128, 128, 256, 256, 256, 256, 256])
 
     def test_reject_unsupported_tokens(self):
         for tokens in (0, 15, 16897, 65536):

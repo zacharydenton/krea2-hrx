@@ -35,16 +35,14 @@ def main():
             tiles = (m + 127) // 128
             group = min((4, 3, 2), key=lambda g: (tiles + g - 1) // g * g)
             output = td / "baseline.hsaco"
-            compile_kernel(
-                baseline,
-                "krea2_gemm_i4_resid",
-                {
-                    "krea2.gemm_i4_resid.k_size": 16384,
-                    "krea2.gemm_i4_resid.n_size": 6144,
-                    "krea2.gemm_i4_resid.m_group": group,
-                },
-                output,
-            )
+            config = {
+                "krea2.gemm_i4_resid.k_size": 16384,
+                "krea2.gemm_i4_resid.n_size": 6144,
+                "krea2.gemm_i4_resid.m_group": group,
+            }
+            if b"k_stride" in source:  # revisions after the operand-pitch config
+                config["krea2.gemm_i4_resid.k_stride"] = 16384
+            compile_kernel(baseline, "krea2_gemm_i4_resid", config, output)
             subprocess.run(
                 [
                     str(ROOT / "build/down-bench"),

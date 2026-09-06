@@ -12,6 +12,10 @@ config.decl @krea2.gemm_i4_resid.k_size : %value: index where [range(%value, 128
 
 config.decl @krea2.gemm_i4_resid.n_size : %value: index where [range(%value, 128, 32768), mul(%value, 128)]
 
+// operand row pitch in k elements: K itself, or K + 128 when a row is 8192 bytes (K = 16384),
+// where the rows a step touches alias in the cache (down projection: 61 -> 77 TOPS)
+config.decl @krea2.gemm_i4_resid.k_stride : %value: index where [range(%value, 128, 65536), mul(%value, 128)]
+
 // m-tiles per raster group: chosen per token count so the tile rows divide with as few ghost rows as possible
 config.decl @krea2.gemm_i4_resid.m_group : %value: index where [range(%value, 1, 4)]
 
@@ -35,6 +39,9 @@ kernel.def target(@krea2_gemm_i4_resid_gfx11) export("krea2_gemm_i4_resid") @kre
   %n_size0 = config.get @krea2.gemm_i4_resid.n_size : index
   %k_size = index.assume %k_size0 [range(%k_size0, 128, 65536), mul(%k_size0, 128)] : index
   %n_size = index.assume %n_size0 [range(%n_size0, 128, 32768), mul(%n_size0, 128)] : index
+  %k_stride0 = config.get @krea2.gemm_i4_resid.k_stride : index
+  %k_stride1 = index.assume %k_stride0 [range(%k_stride0, 128, 65536), mul(%k_stride0, 128)] : index
+  %k_stride = index.assume %k_stride1 [ge(%k_stride1, %k_size)] : index
 
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
@@ -93,7 +100,8 @@ kernel.def target(@krea2_gemm_i4_resid_gfx11) export("krea2_gemm_i4_resid") @kre
   %wave_col = index.mul %wave_n, %c64 : index
   %base_m = index.mul %tile_m_id, %c128 : index
   %base_n = index.mul %tile_n_id, %c128 : index
-  %k_quads = index.div %k_size, %c8 : index
+  // A and W rows are k_stride/8 i32 quads; only the first k_size/8 are read.
+  %k_quads = index.div %k_stride, %c8 : index
 
   %a_global = buffer.assume.memory_space<global> %a : buffer
   %w_global = buffer.assume.memory_space<global> %w : buffer
@@ -101,7 +109,7 @@ kernel.def target(@krea2_gemm_i4_resid_gfx11) export("krea2_gemm_i4_resid") @kre
   %a_scale_global = buffer.assume.memory_space<global> %a_scale : buffer
   %gate_global = buffer.assume.memory_space<global> %gate : buffer
   %c_global = buffer.assume.memory_space<global> %c : buffer
-  // A and W as rows of K/4 i32 quads; C as f16.
+  // A and W as rows of k_stride/8 i32 quads; C as f16.
   %a_view = buffer.view %a_global[%c0_offset] : buffer -> view<[%m_bounded]x[%k_quads]xi32>
   %w_view = buffer.view %w_global[%c0_offset] : buffer -> view<[%n_size]x[%k_quads]xi32>
   %scale_view = buffer.view %scale_global[%c0_offset] : buffer -> view<[%n_size]xf32>

@@ -31,10 +31,44 @@ def compile_one(src: str, root: str, out: Path, cfg: dict) -> None:
         raise RuntimeError(f"{src}: {r.stderr.strip()[:600]}")
 
 
-def gemm_m_group(tokens):
-    """m-tiles per raster group: of 4, 3, 2 the one that pads the tile rows least (ties to the larger).
-    Persisted beside the kernels for the host to use throughout the session."""
-    tiles = (tokens + 127) // 128
+# The GEMM launch shape rules, mirrored from host/gemm_shape.h; the launch metadata
+# records their results and the session rejects a bundle that disagrees with its own.
+WIDE_TILE_TOKENS = 2048
+
+
+def gemm_pitch(k):
+    """Operand row pitch in k elements: an 8192-byte row (K = 16384) aliases in the cache, so it
+    gets one k step of padding (down projection 61 -> 77 TOPS); 3072-byte rows showed no effect."""
+    return k + 128 if k % 8192 == 0 else k
+
+
+def gemm_grid_rows(tokens, rows, m_group):
+    """Launch grid rows: the tiles themselves for the shortening 256-row kernels, padded to whole
+    raster groups for the 128-row kernels."""
+    tiles = (tokens + rows - 1) // rows
+    return tiles if rows == 256 else (tiles + m_group - 1) // m_group * m_group
+
+
+def gemm_rows(tokens):
+    """Workgroup tile rows: the 256x128 tile runs 4-11% faster per row (paired A/B, 2064..16896
+    tokens) but rounds M up to 256, so it is chosen from WIDE_TILE_TOKENS when its rows are within
+    8% of the 128-row grid's padded rows (at 1040 tokens it lost 3%)."""
+    if tokens < WIDE_TILE_TOKENS:
+        return 128
+    wide = (tokens + 255) // 256
+    narrow = gemm_grid_rows(tokens, 128, gemm_m_group(tokens, 128))
+    return 256 if 50 * wide <= 27 * narrow else 128
+
+
+def gemm_m_group(tokens, rows=128):
+    """m-tiles per raster group. The 256-row kernels shorten their last group in-kernel and always
+    take 4; the 128-row kernels pad the grid: 1 for a single tile row, else of 4, 3, 2 the one that
+    pads the tile rows least (ties to the larger). Persisted beside the kernels for the host."""
+    if rows == 256:
+        return 4
+    tiles = (tokens + rows - 1) // rows
+    if tiles == 1:
+        return 1
     return min((4, 3, 2), key=lambda g: ((tiles + g - 1) // g * g, -g))
 
 
@@ -44,16 +78,22 @@ def build(tokens: int) -> Path:
         raise ValueError("tokens must be 16..16896")
     waves = 8 if tokens < 8192 else 4
     source = "attention_sage_i4_fast" if waves == 8 else "attention_sage_i4_fast_prefetch"
-    m_group = gemm_m_group(tokens)
+    rows = gemm_rows(tokens)
+    m_group = gemm_m_group(tokens, rows)
+    pitch_hidden, pitch_inter = gemm_pitch(HIDDEN), gemm_pitch(INTER)
     capacity = max((tokens + 16 + 31) // 32 * 32, (tokens + 63) // 64 * 64)   # tokens+16 headroom, whole 64-key blocks, a multiple of 32
+    def gemm(kind, stem, k, n):
+        source = f"gemm_i4{kind}" + ("_256" if rows == 256 else "")
+        ns = f"krea2.{source}"
+        return (source, f"krea2_{source}", stem, {f"{ns}.k_size": k, f"{ns}.k_stride": gemm_pitch(k), f"{ns}.n_size": n, f"{ns}.m_group": m_group})
     jobs = [
-        ("prepare_norm_i4", "krea2_prepare_norm_i4", "prepare_norm_i4", {"krea2.prepare_norm_i4.width": HIDDEN, "krea2.prepare_norm_i4.eps": 1e-5}),
-        ("prepare_gated_i4", "krea2_prepare_gated_i4", "prepare_gated_i4", {"krea2.prepare_gated_i4.width": HIDDEN, "krea2.prepare_gated_i4.gate_stride": QKVG}),
-        ("prepare_plain_i4", "krea2_prepare_plain_i4", "prepare_plain_i4", {"krea2.prepare_plain_i4.width": INTER}),
-        ("gemm_i4", "krea2_gemm_i4", "gemm_qkvg", {"krea2.gemm_i4.k_size": HIDDEN, "krea2.gemm_i4.n_size": QKVG, "krea2.gemm_i4.m_group": m_group}),
-        ("gemm_i4_swiglu", "krea2_gemm_i4_swiglu", "gemm_gu", {"krea2.gemm_i4_swiglu.k_size": HIDDEN, "krea2.gemm_i4_swiglu.n_size": 2 * INTER, "krea2.gemm_i4_swiglu.m_group": m_group}),
-        ("gemm_i4_resid", "krea2_gemm_i4_resid", "gemm_wo", {"krea2.gemm_i4_resid.k_size": HIDDEN, "krea2.gemm_i4_resid.n_size": HIDDEN, "krea2.gemm_i4_resid.m_group": m_group}),
-        ("gemm_i4_resid", "krea2_gemm_i4_resid", "gemm_down", {"krea2.gemm_i4_resid.k_size": INTER, "krea2.gemm_i4_resid.n_size": HIDDEN, "krea2.gemm_i4_resid.m_group": m_group}),
+        ("prepare_norm_i4", "krea2_prepare_norm_i4", "prepare_norm_i4", {"krea2.prepare_norm_i4.width": HIDDEN, "krea2.prepare_norm_i4.out_stride": pitch_hidden, "krea2.prepare_norm_i4.eps": 1e-5}),
+        ("prepare_gated_i4", "krea2_prepare_gated_i4", "prepare_gated_i4", {"krea2.prepare_gated_i4.width": HIDDEN, "krea2.prepare_gated_i4.out_stride": pitch_hidden, "krea2.prepare_gated_i4.gate_stride": QKVG}),
+        ("prepare_plain_i4", "krea2_prepare_plain_i4", "prepare_plain_i4", {"krea2.prepare_plain_i4.width": INTER, "krea2.prepare_plain_i4.out_stride": pitch_inter}),
+        gemm("", "gemm_qkvg", HIDDEN, QKVG),
+        gemm("_swiglu", "gemm_gu", HIDDEN, 2 * INTER),
+        gemm("_resid", "gemm_wo", HIDDEN, HIDDEN),
+        gemm("_resid", "gemm_down", INTER, HIDDEN),
         ("rope_qknorm_f16", "krea2_rope_qknorm_f16", "rope_qknorm", {"krea2.rope_qknorm_f16.row_stride": QKVG, "krea2.rope_qknorm_f16.q_heads": 48, "krea2.rope_qknorm_f16.kv_heads": KV, "krea2.rope_qknorm_f16.k_offset": HIDDEN, "krea2.rope_qknorm_f16.eps": 1e-5}),
         (source, "krea2_" + source, "attention",
          {f"krea2.{source}.{key}": value for key, value in
@@ -70,7 +110,7 @@ def build(tokens: int) -> Path:
     parent = ROOT / "build/kernels" / f"T{tokens}"
     parent.mkdir(parents=True, exist_ok=True)
     out = parent / fingerprint
-    launch = f"2 {tokens} {m_group} {capacity} {waves}\n"
+    launch = f"3 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter}\n"
     # Serialize publication, including across Python processes. A failed compilation
     # never exposes a partial bundle or overwrites kernels used by a live session.
     with (parent / ".lock").open("a") as lock:

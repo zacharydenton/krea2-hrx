@@ -24,6 +24,7 @@
 #include <unistd.h>
 #include <vector>
 
+#include "gemm_shape.h"
 #include "krea2.h"
 #include "krea2_device.h"
 #include "native_kernels.h"
@@ -37,8 +38,13 @@ constexpr int QKVG = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN; // 15360
 constexpr int GATE_OFFSET = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 constexpr int THREADS = 256;
 
+// A tensor's bytes in weights.bin and its home on the device. Packed int4
+// GEMM weights ("<name>.q", [N][K/2] bytes) are re-pitched on upload to
+// gemm_pitch(K)/2 bytes per row; everything else keeps its file layout.
 struct Span {
   size_t offset, bytes;
+  size_t device_offset = 0, device_bytes = 0;
+  size_t rows = 0, row_bytes = 0, device_row_bytes = 0; // .q tensors only
 };
 
 std::map<std::string, Span> read_manifest(const std::string &path) {
@@ -51,8 +57,23 @@ std::map<std::string, Span> read_manifest(const std::string &path) {
     std::istringstream ls(line);
     std::string name, dtype, shape;
     size_t offset, bytes;
-    if (ls >> name >> offset >> bytes >> dtype >> shape)
-      spans[name] = {offset, bytes};
+    if (!(ls >> name >> offset >> bytes >> dtype >> shape))
+      continue;
+    Span span{offset, bytes};
+    size_t rows = 0, columns = 0;
+    char x = 0;
+    std::istringstream ss(shape);
+    if (name.size() > 2 && name.compare(name.size() - 2, 2, ".q") == 0 &&
+        ss >> rows >> x >> columns && x == 'x' && rows && columns &&
+        rows * columns == bytes) {
+      int k = int(columns * 2); // K int4 elements per row
+      span.rows = rows;
+      span.row_bytes = columns;
+      span.device_row_bytes = size_t(krea2_shape::gemm_pitch(k)) / 2;
+    }
+    span.device_bytes =
+        span.rows ? span.rows * span.device_row_bytes : span.bytes;
+    spans[name] = span;
   }
   return spans;
 }
@@ -88,11 +109,39 @@ struct krea2_weights {
       size_t bytes;
       ~Mapping() { munmap(p, bytes); }
     } mapping{mapped, bytes};
-    void *device = nullptr;
-    device = gpu::allocate(bytes);
+    // Device layout: each tensor at a 256-byte boundary, GEMM weights with
+    // their padded row pitch.
+    size_t total = 0;
+    for (auto &[name, span] : spans) {
+      span.device_offset = total;
+      total += (span.device_bytes + 255) / 256 * 256;
+    }
+    void *device = gpu::allocate(total);
     storage =
         std::shared_ptr<void>(device, [](void *p) { (void)gpu::release(p); });
-    gpu::copy(device, mapped, bytes);
+    const size_t chunk_rows_bytes = size_t(16) << 20;
+    std::vector<char> staging;
+    for (const auto &[name, span] : spans) {
+      char *dst = (char *)device + span.device_offset;
+      const char *src = (const char *)mapped + span.offset;
+      if (!span.rows || span.device_row_bytes == span.row_bytes) {
+        gpu::copy(dst, src, span.bytes);
+        continue;
+      }
+      // Re-pitch through host staging chunks; the pad bytes stay zero (the
+      // kernels never read them, tests/test_gemm_i4.py GEMM_KPAD).
+      size_t rows_per_chunk =
+          std::max<size_t>(1, chunk_rows_bytes / span.device_row_bytes);
+      staging.assign(rows_per_chunk * span.device_row_bytes, 0);
+      for (size_t first = 0; first < span.rows; first += rows_per_chunk) {
+        size_t count = std::min(rows_per_chunk, span.rows - first);
+        for (size_t r = 0; r < count; ++r)
+          std::memcpy(staging.data() + r * span.device_row_bytes,
+                      src + (first + r) * span.row_bytes, span.row_bytes);
+        gpu::copy(dst + first * span.device_row_bytes, staging.data(),
+                  count * span.device_row_bytes);
+      }
+    }
   }
 };
 
@@ -138,14 +187,23 @@ public:
       capacity_ = std::max<size_t>(
           (tokens + 16 + 31) / 32 * 32,
           (tokens + 63) / 64 * 64); // tokens+16 headroom, whole 64-key blocks
+      // "3 tokens gemm_rows m_group capacity attention_waves pitch(6144)
+      // pitch(16384)": every field must match what this host derives.
       std::ifstream metadata(kernels_dir + "/launch.txt");
-      unsigned version = 0, compiled_tokens = 0;
+      unsigned version = 0, compiled_tokens = 0, pitch_hidden = 0,
+               pitch_inter = 0;
       size_t compiled_capacity = 0;
-      if (!(metadata >> version >> compiled_tokens >> m_group_ >>
-            compiled_capacity >> attention_waves_) ||
-          version != 2 || compiled_tokens != unsigned(tokens) ||
-          compiled_capacity != capacity_ || m_group_ < 2 || m_group_ > 4 ||
-          attention_waves_ != (tokens < 8192 ? 8u : 4u))
+      if (!(metadata >> version >> compiled_tokens >> gemm_rows_ >> m_group_ >>
+            compiled_capacity >> attention_waves_ >> pitch_hidden >>
+            pitch_inter) ||
+          version != 3 || compiled_tokens != unsigned(tokens) ||
+          compiled_capacity != capacity_ ||
+          gemm_rows_ != unsigned(krea2_shape::gemm_rows(tokens)) ||
+          m_group_ !=
+              unsigned(krea2_shape::gemm_m_group(tokens, int(gemm_rows_))) ||
+          attention_waves_ != (tokens < 8192 ? 8u : 4u) ||
+          pitch_hidden != unsigned(krea2_shape::gemm_pitch(HIDDEN)) ||
+          pitch_inter != unsigned(krea2_shape::gemm_pitch(INTER)))
         throw std::invalid_argument("invalid kernel launch metadata; rebuild "
                                     "with scripts/build_kernels.py");
       weights_ = weights ? std::move(weights) : krea2_load_weights(weights_dir);
@@ -158,7 +216,7 @@ public:
           throw std::runtime_error("tensor " + name + " has " +
                                    std::to_string(it->second.bytes) +
                                    " bytes, expected " + std::to_string(bytes));
-        return (char *)weights_->storage.get() + it->second.offset;
+        return (char *)weights_->storage.get() + it->second.device_offset;
       };
       for (int i = 0; i < layers; ++i) {
         std::string p = "blocks." + std::to_string(i);
@@ -183,10 +241,15 @@ public:
       load(k_prep_norm_, "prepare_norm_i4", "krea2_prepare_norm_i4");
       load(k_prep_gated_, "prepare_gated_i4", "krea2_prepare_gated_i4");
       load(k_prep_swiglu_, "prepare_plain_i4", "krea2_prepare_plain_i4");
-      load(k_gemm_qkvg_, "gemm_qkvg", "krea2_gemm_i4");
-      load(k_gemm_gu_, "gemm_gu", "krea2_gemm_i4_swiglu");
-      load(k_gemm_wo_, "gemm_wo", "krea2_gemm_i4_resid");
-      load(k_gemm_down_, "gemm_down", "krea2_gemm_i4_resid");
+      const bool wide = gemm_rows_ == 256;
+      load(k_gemm_qkvg_, "gemm_qkvg",
+           wide ? "krea2_gemm_i4_256" : "krea2_gemm_i4");
+      load(k_gemm_gu_, "gemm_gu",
+           wide ? "krea2_gemm_i4_swiglu_256" : "krea2_gemm_i4_swiglu");
+      load(k_gemm_wo_, "gemm_wo",
+           wide ? "krea2_gemm_i4_resid_256" : "krea2_gemm_i4_resid");
+      load(k_gemm_down_, "gemm_down",
+           wide ? "krea2_gemm_i4_resid_256" : "krea2_gemm_i4_resid");
       load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
       load(k_attention_, "attention",
            attention_waves_ == 8 ? "krea2_attention_sage_i4_fast"
@@ -194,8 +257,8 @@ public:
       sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_));
       const size_t T = capacity_;
       x_ = gpu::allocate(T * HIDDEN * 2);
-      a_q_ = gpu::allocate(T * INTER /
-                           2); // the widest prepared operand (down's K = 16384)
+      // the widest prepared operand: down's K = 16384 at its padded pitch
+      a_q_ = gpu::allocate(T * size_t(krea2_shape::gemm_pitch(INTER)) / 2);
       a_s_ = gpu::allocate(T * 4);
       fused_ = gpu::allocate(T * QKVG * 2);
       q_ = gpu::allocate(T * HIDDEN * 2);
@@ -320,7 +383,8 @@ private:
     }
   }
   unsigned gemm_grid_y(size_t m) const {
-    return unsigned(((m + 127) / 128 + m_group_ - 1) / m_group_ * m_group_);
+    return unsigned(krea2_shape::gemm_grid_rows(int(m), int(gemm_rows_),
+                                                int(m_group_)));
   }
 
   void gemm(Kernel &k, const char *stage, char *w_q, char *w_s, int n,
@@ -436,7 +500,7 @@ private:
 
   int tokens_, layers_;
   size_t capacity_ = 0;
-  unsigned m_group_ = 0, attention_waves_ = 4;
+  unsigned gemm_rows_ = 0, m_group_ = 0, attention_waves_ = 4;
   std::mutex mutex_;
   std::vector<Block> blocks_;
   std::unique_ptr<SagePreparation> sage_;

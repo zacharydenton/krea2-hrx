@@ -39,6 +39,14 @@ not isolated timings. A 4115-token stage profile attributed 19.1% of block time
 to this projection, so the measured improvement predicts only about 1–2% less
 block time, not a 6–9% whole-image improvement.
 
+A later paired run on 2026-09-06 (30 alternating rounds, `--baseline HEAD`),
+while another process kept the GPU at 100% busy, reversed the result: 0.952×,
+0.878×, 0.970× and 0.956× at 4096, 4115, 8192 and 16896 tokens, with the
+baseline itself running about twice as slow as in the table above. The two
+contended measurements disagree, so the kernel stays unselected until an idle
+box can decide it. `tests/gemm_bench.cpp` now accepts a same-tile baseline
+symbol so operand-path changes can be isolated from tile selection.
+
 `tests/test_gemm_down.py` checks complete output equivalence and independent
 sampled CPU INT4 dots. Cases cover complete raster groups and tails containing
 one, two and three tiles, signed gates, zero scales and nonzero residuals.
@@ -153,3 +161,15 @@ its exact pixels cannot be retrospectively compared with the reproduced faults.
   emitted costly LDS lane permutations. Register use rose from 240 to 256;
   the first 4115-token comparison regressed from 15.05 to 17.44 ms median.
   Static-gather and direct-load variants also failed to win.
+
+## Outcome (2026-09-06, idle-box A/B)
+
+`tools/gen_gemm.py` now generates the 256x128 tile for all three epilogues
+(`kernels/gemm_i4{,_resid,_swiglu}_256.loom`) with this kernel's raster-tail
+shortening and a `k_stride` operand pitch; `tests/test_gemm_i4.py` holds them
+bit-exact against the 128x128 kernels and a float64 oracle. On an idle GPU the
+shortened tile beat the padded raster form at 4115 tokens (where the padded form was
+a wash: 17 tile rows padded to 18) and won on every GEMM from about 2k tokens; both
+builders pick the tile by a waste-aware rule (`gemm_rows`). The measurements are in
+`docs/benchmarks/gemm-tile-*.jsonl` and `docs/notes.md`. This kernel stays as the
+hand-written original; `tools/bench_down_gemm.py` still times it.

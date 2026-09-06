@@ -18,19 +18,25 @@ struct Buffer {
 
 int main(int argc, char **argv) {
   try {
-    if (argc != 10)
-      throw std::invalid_argument("usage: gemm-bench BASELINE CANDIDATE SYMBOL "
-                                  "M N K TILE_M TILE_N ROUNDS");
+    if (argc != 10 && argc != 13)
+      throw std::invalid_argument(
+          "usage: gemm-bench BASELINE CANDIDATE SYMBOL M N K TILE_M TILE_N "
+          "ROUNDS [BASE_SYMBOL BASE_TILE_M BASE_TILE_N]");
     int m = std::stoi(argv[4]), n = std::stoi(argv[5]), k = std::stoi(argv[6]),
         tile = std::stoi(argv[7]), columns = std::stoi(argv[8]),
         rounds = std::stoi(argv[9]);
+    // The baseline defaults to the plain 64x64 kernel; a same-tile baseline
+    // isolates an operand-path change from tile selection.
+    const char *base_symbol = argc == 13 ? argv[10] : "krea2_gemm_bf16_bf16_nt";
+    int base_tile = argc == 13 ? std::stoi(argv[11]) : 64,
+        base_columns = argc == 13 ? std::stoi(argv[12]) : 64;
+    auto tile_ok = [](int t) { return t == 64 || t == 128; };
     if (m < 1 || n < 1 || k < 1 || rounds < 10 || rounds > 10000 ||
-        (tile != 64 && tile != 128) || (columns != 64 && columns != 128) ||
-        size_t(m) * n > 268435456 || size_t(m) * k > 268435456 ||
-        size_t(n) * k > 268435456)
+        !tile_ok(tile) || !tile_ok(columns) || !tile_ok(base_tile) ||
+        !tile_ok(base_columns) || size_t(m) * n > 268435456 ||
+        size_t(m) * k > 268435456 || size_t(n) * k > 268435456)
       throw std::invalid_argument("invalid benchmark dimensions");
-    gpu::Kernel kernels[2] = {{argv[1], "krea2_gemm_bf16_bf16_nt"},
-                              {argv[2], argv[3]}};
+    gpu::Kernel kernels[2] = {{argv[1], base_symbol}, {argv[2], argv[3]}};
     Buffer a(size_t(m) * k * 2), b(size_t(n) * k * 2);
     std::mt19937 random(42);
     auto initialize = [&](Buffer &buffer, size_t count) {
@@ -51,8 +57,8 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 2; ++i)
       args[i].i32(m).f32(1).ptr(a.p).ptr(b.p).ptr(output[i].p);
     auto launch = [&](int i) {
-      int rows = i ? tile : 64;
-      int cols = i ? columns : 64;
+      int rows = i ? tile : base_tile;
+      int cols = i ? columns : base_columns;
       kernels[i].launch((n + cols - 1) / cols, (m + rows - 1) / rows, 256,
                         args[i]);
     };

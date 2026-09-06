@@ -50,6 +50,7 @@ def main():
                 "krea2_gemm_i4_resid",
                 {
                     "krea2.gemm_i4_resid.k_size": k,
+                    "krea2.gemm_i4_resid.k_stride": k,
                     "krea2.gemm_i4_resid.n_size": n,
                     "krea2.gemm_i4_resid.m_group": group,
                 },

@@ -64,11 +64,13 @@ to measure, rather than an automatic replacement for the single-buffer kernel.
 
 Both native and Python builders select the tuned source by sequence length.
 Immutable caches fingerprint the source and configuration. `launch.txt` contains
-`2 tokens m_group capacity attention_waves`; version 2 fixes the preprocessing
-contract to 64-token query groups and transposed V. The host rejects old metadata
-and incorrect wave counts before loading weights. GEMM groups are chosen internally
-from 4, 3 and 2 to minimize padded rows. Deployment sources contain only the two
-tuned attention kernels; the FP16 comparison kernel lives under `experiments/`.
+`3 tokens gemm_rows m_group capacity attention_waves pitch_6144 pitch_16384`;
+version 2 fixed the preprocessing contract to 64-token query groups and transposed
+V, version 3 added the GEMM tile rows (128 or 256), the operand row pitches and a
+raster group of 1 for a single tile row. The host derives every field from the same
+rules (`host/gemm_shape.h`, mirrored by `scripts/build_kernels.py`) and rejects a
+bundle that disagrees before loading weights. Deployment sources are the `kernels/`
+directory; the FP16 comparison kernel lives under `experiments/`.
 
 SA2 supports 16 through 16,896 total tokens, head dimension 128 and four Q heads
 per KV head. The pipeline uses 48 Q heads and 12 KV heads. Its largest additional
