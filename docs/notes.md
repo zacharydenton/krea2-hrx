@@ -631,6 +631,14 @@ quality sweep (seed 0, 8 steps, 1024^2, `tools/pipeline.py --backend loom` then
 `tools/decode_latents.py`) says the attention codes are not where Krea's quality goes:
 image PSNR against the bf16 run is 18.91 dB with int4 QK and 19.22 dB with int8 QK
 (latent 9.75 vs 10.06 dB); the two Loom runs sit at 24.98 dB from each other, while
-both sit ~19 dB from bf16, which is the W4A4 GEMMs and the eight-step trajectory.
+both sit ~19 dB from bf16, which is the W4A4 GEMMs and the eight-step trajectory. The
+fixture block stack agrees: update cosine vs bf16 0.99899 / 0.96856 (1 / 28 blocks) with
+int8 QK against 0.99898 / 0.96576 with int4.
 The int4 kernel stays the default; the int8 twin is the switch to flip if a prompt
 shows attention ghosting.
+
+**Whole image.** Paired against the previous checkout (its own build and kernel
+sources, `tools/bench_native.py --runs 2`, alternating order, two rounds, idle box):
+the warm 1024^2 eight-step image went from 18.19 / 18.15 s to 16.63 / 16.62 s (1.09x),
+first runs 19.02 / 19.00 -> 17.46 / 17.45 s, every run the same RGB hash
+`65507120ec…`. Record: `docs/benchmarks/image-h3-levers-2026-09-06.txt`.

@@ -1,0 +1,9 @@
+old round 0 {"run": 0, "seconds": 19.024348963052034, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+old round 0 {"run": 1, "seconds": 18.186276099062525, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+new round 0 {"run": 0, "seconds": 17.45679066190496, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+new round 0 {"run": 1, "seconds": 16.6303539640503, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+new round 1 {"run": 0, "seconds": 17.450795397977345, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+new round 1 {"run": 1, "seconds": 16.622859351919033, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+old round 1 {"run": 0, "seconds": 18.99783193389885, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+old round 1 {"run": 1, "seconds": 18.153765436960384, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+finished
