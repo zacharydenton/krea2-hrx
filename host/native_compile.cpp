@@ -3,6 +3,7 @@
 #include "gemm_shape.h"
 #include "sha256.h"
 #include <algorithm>
+#include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +26,11 @@ std::string prepare_kernels(const std::string &bundle,
   if (tokens < 16 || tokens > 16896)
     throw std::invalid_argument("tokens must be 16..16896");
   const int attention_waves = tokens < 8192 ? 8 : 4;
+  // KREA2_ATTN_QK=8 selects the int8-QK attention twin (quality fallback).
+  const char *qk = std::getenv("KREA2_ATTN_QK");
+  const int attention_bits = qk && *qk ? std::atoi(qk) : 4;
+  if (attention_bits != 4 && attention_bits != 8)
+    throw std::invalid_argument("KREA2_ATTN_QK must be 4 or 8");
   namespace fs = std::filesystem;
   fs::path parent = fs::path(bundle) / "kernels";
   int capacity = std::max((tokens + 47) / 32 * 32, (tokens + 63) / 64 * 64);
@@ -41,7 +47,8 @@ std::string prepare_kernels(const std::string &bundle,
                          std::to_string(rows) + " " + group + " " +
                          std::to_string(capacity) + " " +
                          std::to_string(attention_waves) + " " +
-                         pitch_hidden + " " + pitch_inter + "\n";
+                         pitch_hidden + " " + pitch_inter + " " +
+                         std::to_string(attention_bits) + "\n";
   struct Job {
     std::string source, symbol, stem;
     std::map<std::string, std::string> cfg;
@@ -86,8 +93,9 @@ std::string prepare_kernels(const std::string &bundle,
        {"kv_heads", "12"},
        {"k_offset", "6144"},
        {"eps", "1e-5"}});
-  add(attention_waves == 8 ? "attention_sage_i4_fast"
-                           : "attention_sage_i4_fast_prefetch",
+  add(std::string(attention_bits == 4 ? "attention_sage_i4_fast"
+                                      : "attention_sage_i8_fast") +
+          (attention_waves == 8 ? "" : "_prefetch"),
       "attention",
       {{"q_stride", "6144"},
        {"kv_stride", "1536"},
@@ -98,7 +106,7 @@ std::string prepare_kernels(const std::string &bundle,
   // Bundles are deployable without the build-machine compiler. Source/config
   // fingerprints select immutable artifacts; compiler provenance is recorded.
   std::string signature =
-      "native-kernels-v3:gfx1151:sage-prep-v2:64:vt\n" + metadata;
+      "native-kernels-v3:gfx1151:sage-prep-v3:64:vt\n" + metadata;
   for (const auto &j : jobs) {
     std::ifstream source(fs::path(bundle) / "sources" / (j.source + ".loom"));
     if (!source)

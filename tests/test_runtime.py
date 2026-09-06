@@ -39,7 +39,7 @@ class CacheTests(unittest.TestCase):
                     self.assertEqual(fields[0], "3")
                     self.assertEqual(fields[5], str(waves))
                     self.assertEqual(fields[2], str(builder.gemm_rows(tokens)))
-                    self.assertEqual(fields[6:], ["6144", "16512"])
+                    self.assertEqual(fields[6:], ["6144", "16512", "4"])
                     expected = "attention_sage_i4_fast" + ("_prefetch" if waves == 4 else "")
                     self.assertIn(expected, (selected / "attention.hsaco").read_text())
                     self.assertEqual(builder.build(tokens), selected)

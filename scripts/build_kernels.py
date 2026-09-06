@@ -77,7 +77,10 @@ def build(tokens: int) -> Path:
     if not 16 <= tokens <= 16896:
         raise ValueError("tokens must be 16..16896")
     waves = 8 if tokens < 8192 else 4
-    source = "attention_sage_i4_fast" if waves == 8 else "attention_sage_i4_fast_prefetch"
+    attention_bits = int(os.environ.get("KREA2_ATTN_QK") or 4)   # 8: the int8-QK twin, a quality fallback
+    if attention_bits not in (4, 8):
+        raise ValueError("KREA2_ATTN_QK must be 4 or 8")
+    source = f"attention_sage_i{attention_bits}_fast" + ("" if waves == 8 else "_prefetch")
     rows = gemm_rows(tokens)
     m_group = gemm_m_group(tokens, rows)
     pitch_hidden, pitch_inter = gemm_pitch(HIDDEN), gemm_pitch(INTER)
@@ -110,7 +113,7 @@ def build(tokens: int) -> Path:
     parent = ROOT / "build/kernels" / f"T{tokens}"
     parent.mkdir(parents=True, exist_ok=True)
     out = parent / fingerprint
-    launch = f"3 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter}\n"
+    launch = f"3 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter} {attention_bits}\n"
     # Serialize publication, including across Python processes. A failed compilation
     # never exposes a partial bundle or overwrites kernels used by a live session.
     with (parent / ".lock").open("a") as lock:

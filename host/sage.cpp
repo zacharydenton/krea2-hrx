@@ -15,16 +15,17 @@ void SagePreparation::allocate(void *&p, size_t bytes) {
   }
 }
 SagePreparation::SagePreparation(int tokens, int capacity, int heads,
-                                 int kv_heads)
+                                 int kv_heads, int bits)
     : tokens_(tokens), capacity_(capacity), heads_(heads), kv_heads_(kv_heads),
-      tiles_((tokens + 63) / 64) {
+      tiles_((tokens + 63) / 64), bits_(bits) {
   if (tokens < 16 || tokens > 16896 || capacity < (tokens + 63) / 64 * 64 ||
       capacity % 32 || heads < 1 || kv_heads < 1 || heads / kv_heads != 4 ||
-      heads % kv_heads)
+      heads % kv_heads || (bits != 4 && bits != 8))
     throw std::invalid_argument("unsupported Sage dimensions");
+  const size_t row_bytes = bits == 4 ? 64 : 128; // one head's codes
   try {
-    allocate(q4, size_t(capacity) * heads * 64);
-    allocate(k4, size_t(capacity) * kv_heads * 64);
+    allocate(q4, size_t(capacity) * heads * row_bytes);
+    allocate(k4, size_t(capacity) * kv_heads * row_bytes);
     allocate(qscale, size_t(capacity) * heads * 4);
     allocate(kscale, size_t(capacity) * kv_heads * 4);
     allocate(kpartial_, size_t(tiles_) * kv_heads * 128 * 4);
@@ -32,7 +33,7 @@ SagePreparation::SagePreparation(int tokens, int capacity, int heads,
     allocate(qmean_, size_t(heads) * tiles_ * 128 * 4);
     allocate(qmean_half_, size_t(heads) * tiles_ * 128 * 2);
     allocate(centered_k_, size_t(kv_heads) * capacity * 128 * 2);
-    gpu::zero(q4, size_t(capacity) * heads * 64);
+    gpu::zero(q4, size_t(capacity) * heads * row_bytes);
     gpu::zero(qscale, size_t(capacity) * heads * 4);
     allocate(correction, size_t(heads) * tiles_ * capacity * 4);
     allocate(v_transposed, size_t(kv_heads) * capacity * 128 * 2);
@@ -101,7 +102,7 @@ void SagePreparation::run(const void *q, const void *k, const void *v,
   {
     gpu::Args a;
     a.i32(T).ptr(q).ptr(qmean_).ptr(q4).ptr(qscale);
-    native_launch("sage_quant_q",
+    native_launch(bits_ == 4 ? "sage_quant_q" : "sage_quant_q_i8",
                   {{"tokens", T},
                    {"heads", H},
                    {"tiles", tiles},
@@ -113,7 +114,7 @@ void SagePreparation::run(const void *q, const void *k, const void *v,
                   a, (T + 7) / 8, H);
     gpu::Args b;
     b.i32(T).ptr(k).ptr(kmean_).ptr(k4).ptr(kscale).ptr(centered_k_);
-    native_launch("sage_quant_k",
+    native_launch(bits_ == 4 ? "sage_quant_k" : "sage_quant_k_i8",
                   {{"tokens", T},
                    {"heads", KV},
                    {"tiles", tiles},

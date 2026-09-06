@@ -608,5 +608,29 @@ swiglu 1.079x; 8192: down 1.071x, swiglu 1.108x; 16896: plain 1.096x; 4353: down
 padded rows. `tests/test_gemm_i4.py` checks both tiles against a float64 oracle and
 each other at seven token counts, with and without pad columns.
 
-**Still open from the plan:** head-major Sage attention operands and the int8-QK
-attention fallback (phases 3 and 5).
+**Head-major attention operands (H3: +25% on int8 attention).** The Sage preparation
+now writes codes `[heads][capacity][64 B]` and scales `[heads][capacity]` so a key tile
+is one contiguous block; the attention kernels index the same data head-major. Outputs
+are byte-identical (golden outputs at 16..8192 tokens, both wave forms, and the
+whole-image hash). Paired against the previous checkout (`tools/bench_sage_attention.py
+--against`, preprocessing + kernel, three rounds): 4115 tokens 20.05 -> 19.65 ms
+(1.02x), 8192 79.4 -> 73.6 ms (1.08x), 16384 297.5 -> 254.9 ms (1.17x); the kernel
+itself 14.7 -> 14.2, 66.7 -> 60.9, 265.6 -> 223.6 ms. Record:
+`docs/benchmarks/sage-head-major-2026-09-06.jsonl`.
+
+**Int8-QK attention twin (H3: int4 QK ghosted, int8 matched f16).**
+`tools/gen_sage_attention.py` derives `attention_sage_i8_fast{,_prefetch}` from the
+finished int4 text (int8 operand schema, 16x36 i32 K tiles, doubled packed columns,
+LDS offsets moved 1 KB per K slot; every substitution asserts) and
+`tools/gen_native_ops.py` emits `sage_quant_{q,k}_i8` (absmax/127, four codes per i32).
+`KREA2_ATTN_QK=8` selects it in both builders; the launch metadata carries the width and
+the session picks the kernel and preparation. Both twins match their own oracle to
+cosine 1.0 on both wave forms, but at 4115 tokens the int8 kernel takes 29 ms against
+the int4 kernel's 14 ms (256 VGPRs with small spills, half the WMMA rate). The bf16
+quality sweep (seed 0, 8 steps, 1024^2, `tools/pipeline.py --backend loom` then
+`tools/decode_latents.py`) says the attention codes are not where Krea's quality goes:
+image PSNR against the bf16 run is 18.91 dB with int4 QK and 19.22 dB with int8 QK
+(latent 9.75 vs 10.06 dB); the two Loom runs sit at 24.98 dB from each other, while
+both sit ~19 dB from bf16, which is the W4A4 GEMMs and the eight-step trajectory.
+The int4 kernel stays the default; the int8 twin is the switch to flip if a prompt
+shows attention ghosting.

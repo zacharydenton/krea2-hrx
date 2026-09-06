@@ -1,3 +1,4 @@
+import os
 """Torch oracle for the native blocks' fusion and storage boundaries.
 
 krea2_ref models the unfused bf16 transformer. Native blocks instead keep fused
@@ -17,9 +18,10 @@ def sage_attention(q, k, v):
     Query chunks bound score storage; probability/PV arithmetic stays float32
     here to measure the fused kernel's fp16 fragment approximation separately.
     """
+    levels = 7 if int(os.environ.get("KREA2_ATTN_QK") or 4) == 4 else 127   # the int8-QK twin's codes
     def quantize(x):
-        scale = x.abs().amax(-1, keepdim=True) / 7
-        return torch.where(scale > 0, (x / scale).round().clamp(-7, 7) * scale, 0)
+        scale = x.abs().amax(-1, keepdim=True) / levels
+        return torch.where(scale > 0, (x / scale).round().clamp(-levels, levels) * scale, 0)
 
     outputs = []
     for query, key, value in zip(q.float(), k.float(), v.float()):

@@ -129,15 +129,20 @@ kernel.def target(@krea2_attention_sage_i4_fast_gfx11) export("krea2_attention_s
   %k_global = buffer.assume.memory_space<global> %k : buffer
   %v_global = buffer.assume.memory_space<global> %v : buffer
   %out_global = buffer.assume.memory_space<global> %out : buffer
-  %q_packed_stride = index.div %q_stride0, %c8 : index
-  %k_packed_stride = index.div %kv_stride0, %c8 : index
+  %q_rows = index.mul %head_limit, %padded_tokens : index
+  %k_rows = index.mul %kv_head_limit, %padded_tokens : index
+  %q_row_base = index.mul %head, %padded_tokens : index
+  %k_row_base = index.mul %kv_head, %padded_tokens : index
   %query_lane0 = index.add %query_origin0, %lane_column : index
   %query_lane = index.assume %query_lane0 [lt(%query_lane0, %padded_tokens)] : index
+  %q_row_hm0 = index.add %q_row_base, %query_lane : index
+  %q_row_hm = index.assume %q_row_hm0 [lt(%q_row_hm0, %q_rows)] : index
+  %pklimit = index.constant 14 : index
   %qs_global = buffer.assume.memory_space<global> %qs : buffer
   %ks_global = buffer.assume.memory_space<global> %ks : buffer
   %corr_global = buffer.assume.memory_space<global> %correction : buffer
-  %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<[%padded_tokens]x[%head_limit]xf32>
-  %ks_view = buffer.view %ks_global[%c0_offset] : buffer -> view<[%padded_tokens]x[%kv_head_limit]xf32>
+  %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<[%head_limit]x[%padded_tokens]xf32>
+  %ks_view = buffer.view %ks_global[%c0_offset] : buffer -> view<[%kv_head_limit]x[%padded_tokens]xf32>
   %mean_c63 = index.constant 63 : index
   %mean_rounded = index.add %tokens0, %mean_c63 : index
   %mean_tiles = index.div %mean_rounded, %c64 : index
@@ -147,8 +152,8 @@ kernel.def target(@krea2_attention_sage_i4_fast_gfx11) export("krea2_attention_s
   %corr_row1 = index.add %corr_row0, %mean_tile_id : index
   %corr_row = index.assume %corr_row1 [lt(%corr_row1, %corr_rows)] : index
   %corr_view = buffer.view %corr_global[%c0_offset] : buffer -> view<[%corr_rows]x[%padded_tokens]xf32>
-  %q_view = buffer.view %q_global[%c0_offset] : buffer -> view<[%padded_tokens]x[%q_packed_stride]xi32>
-  %k_view = buffer.view %k_global[%c0_offset] : buffer -> view<[%padded_tokens]x[%k_packed_stride]xi32>
+  %q_view = buffer.view %q_global[%c0_offset] : buffer -> view<[%q_rows]x16xi32>
+  %k_view = buffer.view %k_global[%c0_offset] : buffer -> view<[%k_rows]x16xi32>
   %v_view = buffer.view %v_global[%c0_offset] : buffer -> view<[%kv_stride0]x[%padded_tokens]xf16>
   %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<[%token_count]x[%out_stride0]xf16>
 
@@ -185,94 +190,77 @@ kernel.def target(@krea2_attention_sage_i4_fast_gfx11) export("krea2_attention_s
   %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
   %key_tile_count = index.add %tiles_per_image, %c0 : index
 
-  %packed_head = index.div %head_base0, %c8 : index
   %qc0 = index.constant 0 : index
-  %qcol0_0 = index.add %packed_head, %qc0 : index
-  %qlimit0 = index.sub %q_packed_stride, %c2 : index
-  %qcol0 = index.assume %qcol0_0 [le(%qcol0_0, %qlimit0), mul(%qcol0_0, 2)] : index
-  %qdata0 = vector.load %q_view[%query_lane, %qcol0] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw0 = index.constant 0 : index
+  %qdata0 = vector.load %q_view[%q_row_hm, %qw0] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs0 = vector.fragment<lhs> %qdata0 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_0 = index.add %query_origin0, %qc0 : index
   %qr1_0 = index.add %qr0_0, %lane_group : index
   %qr0 = index.assume %qr1_0 [lt(%qr1_0, %padded_tokens)] : index
-  %qs0 = view.load %qs_view[%qr0, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs0 = view.load %qs_view[%head, %qr0] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv0 = vector.insert %qs0 into %zero_vector[0] : f32, vector<8xf32>
   %qc1 = index.constant 2 : index
-  %qcol0_1 = index.add %packed_head, %qc1 : index
-  %qlimit1 = index.sub %q_packed_stride, %c2 : index
-  %qcol1 = index.assume %qcol0_1 [le(%qcol0_1, %qlimit1), mul(%qcol0_1, 2)] : index
-  %qdata1 = vector.load %q_view[%query_lane, %qcol1] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw1 = index.constant 2 : index
+  %qdata1 = vector.load %q_view[%q_row_hm, %qw1] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs1 = vector.fragment<lhs> %qdata1 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_1 = index.add %query_origin0, %qc1 : index
   %qr1_1 = index.add %qr0_1, %lane_group : index
   %qr1 = index.assume %qr1_1 [lt(%qr1_1, %padded_tokens)] : index
-  %qs1 = view.load %qs_view[%qr1, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs1 = view.load %qs_view[%head, %qr1] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv1 = vector.insert %qs1 into %qsv0[1] : f32, vector<8xf32>
   %qc2 = index.constant 4 : index
-  %qcol0_2 = index.add %packed_head, %qc2 : index
-  %qlimit2 = index.sub %q_packed_stride, %c2 : index
-  %qcol2 = index.assume %qcol0_2 [le(%qcol0_2, %qlimit2), mul(%qcol0_2, 2)] : index
-  %qdata2 = vector.load %q_view[%query_lane, %qcol2] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw2 = index.constant 4 : index
+  %qdata2 = vector.load %q_view[%q_row_hm, %qw2] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs2 = vector.fragment<lhs> %qdata2 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_2 = index.add %query_origin0, %qc2 : index
   %qr1_2 = index.add %qr0_2, %lane_group : index
   %qr2 = index.assume %qr1_2 [lt(%qr1_2, %padded_tokens)] : index
-  %qs2 = view.load %qs_view[%qr2, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs2 = view.load %qs_view[%head, %qr2] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv2 = vector.insert %qs2 into %qsv1[2] : f32, vector<8xf32>
   %qc3 = index.constant 6 : index
-  %qcol0_3 = index.add %packed_head, %qc3 : index
-  %qlimit3 = index.sub %q_packed_stride, %c2 : index
-  %qcol3 = index.assume %qcol0_3 [le(%qcol0_3, %qlimit3), mul(%qcol0_3, 2)] : index
-  %qdata3 = vector.load %q_view[%query_lane, %qcol3] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw3 = index.constant 6 : index
+  %qdata3 = vector.load %q_view[%q_row_hm, %qw3] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs3 = vector.fragment<lhs> %qdata3 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_3 = index.add %query_origin0, %qc3 : index
   %qr1_3 = index.add %qr0_3, %lane_group : index
   %qr3 = index.assume %qr1_3 [lt(%qr1_3, %padded_tokens)] : index
-  %qs3 = view.load %qs_view[%qr3, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs3 = view.load %qs_view[%head, %qr3] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv3 = vector.insert %qs3 into %qsv2[3] : f32, vector<8xf32>
   %qc4 = index.constant 8 : index
-  %qcol0_4 = index.add %packed_head, %qc4 : index
-  %qlimit4 = index.sub %q_packed_stride, %c2 : index
-  %qcol4 = index.assume %qcol0_4 [le(%qcol0_4, %qlimit4), mul(%qcol0_4, 2)] : index
-  %qdata4 = vector.load %q_view[%query_lane, %qcol4] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw4 = index.constant 8 : index
+  %qdata4 = vector.load %q_view[%q_row_hm, %qw4] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs4 = vector.fragment<lhs> %qdata4 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_4 = index.add %query_origin0, %qc4 : index
   %qr1_4 = index.add %qr0_4, %lane_group : index
   %qr4 = index.assume %qr1_4 [lt(%qr1_4, %padded_tokens)] : index
-  %qs4 = view.load %qs_view[%qr4, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs4 = view.load %qs_view[%head, %qr4] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv4 = vector.insert %qs4 into %qsv3[4] : f32, vector<8xf32>
   %qc5 = index.constant 10 : index
-  %qcol0_5 = index.add %packed_head, %qc5 : index
-  %qlimit5 = index.sub %q_packed_stride, %c2 : index
-  %qcol5 = index.assume %qcol0_5 [le(%qcol0_5, %qlimit5), mul(%qcol0_5, 2)] : index
-  %qdata5 = vector.load %q_view[%query_lane, %qcol5] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw5 = index.constant 10 : index
+  %qdata5 = vector.load %q_view[%q_row_hm, %qw5] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs5 = vector.fragment<lhs> %qdata5 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_5 = index.add %query_origin0, %qc5 : index
   %qr1_5 = index.add %qr0_5, %lane_group : index
   %qr5 = index.assume %qr1_5 [lt(%qr1_5, %padded_tokens)] : index
-  %qs5 = view.load %qs_view[%qr5, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs5 = view.load %qs_view[%head, %qr5] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv5 = vector.insert %qs5 into %qsv4[5] : f32, vector<8xf32>
   %qc6 = index.constant 12 : index
-  %qcol0_6 = index.add %packed_head, %qc6 : index
-  %qlimit6 = index.sub %q_packed_stride, %c2 : index
-  %qcol6 = index.assume %qcol0_6 [le(%qcol0_6, %qlimit6), mul(%qcol0_6, 2)] : index
-  %qdata6 = vector.load %q_view[%query_lane, %qcol6] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw6 = index.constant 12 : index
+  %qdata6 = vector.load %q_view[%q_row_hm, %qw6] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs6 = vector.fragment<lhs> %qdata6 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_6 = index.add %query_origin0, %qc6 : index
   %qr1_6 = index.add %qr0_6, %lane_group : index
   %qr6 = index.assume %qr1_6 [lt(%qr1_6, %padded_tokens)] : index
-  %qs6 = view.load %qs_view[%qr6, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs6 = view.load %qs_view[%head, %qr6] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv6 = vector.insert %qs6 into %qsv5[6] : f32, vector<8xf32>
   %qc7 = index.constant 14 : index
-  %qcol0_7 = index.add %packed_head, %qc7 : index
-  %qlimit7 = index.sub %q_packed_stride, %c2 : index
-  %qcol7 = index.assume %qcol0_7 [le(%qcol0_7, %qlimit7), mul(%qcol0_7, 2)] : index
-  %qdata7 = vector.load %q_view[%query_lane, %qcol7] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw7 = index.constant 14 : index
+  %qdata7 = vector.load %q_view[%q_row_hm, %qw7] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs7 = vector.fragment<lhs> %qdata7 shape [%m, %k_frag] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
   %qr0_7 = index.add %query_origin0, %qc7 : index
   %qr1_7 = index.add %qr0_7, %lane_group : index
   %qr7 = index.assume %qr1_7 [lt(%qr1_7, %padded_tokens)] : index
-  %qs7 = view.load %qs_view[%qr7, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs7 = view.load %qs_view[%head, %qr7] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv7 = vector.insert %qs7 into %qsv6[7] : f32, vector<8xf32>
   %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%row_max = %negative_vector : vector<8xf32>, %row_sum = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
     %key_origin1 = index.mul %key_tile, %c16 : index
@@ -287,11 +275,11 @@ kernel.def target(@krea2_attention_sage_i4_fast_gfx11) export("krea2_attention_s
       // stage K and V tiles (rows past the sequence are zero headroom)
       %st_row0 = index.add %key_origin0, %st_key : index
       %st_row = index.assume %st_row0 [lt(%st_row0, %padded_tokens)] : index
-      %pkcol0 = index.div %st_col, %c8 : index
-      %pklimit = index.sub %k_packed_stride, %c2 : index
-      %pkcol = index.assume %pkcol0 [le(%pkcol0, %pklimit), mul(%pkcol0, 2)] : index
-      %pkchunk = index.div %st_chunk, %c8 : index
-      %k_chunk = vector.load %k_view[%st_row, %pkcol] : view<[%padded_tokens]x[%k_packed_stride]xi32> -> vector<2xi32>
+      %k_row_hm0 = index.add %k_row_base, %st_row : index
+      %k_row_hm = index.assume %k_row_hm0 [lt(%k_row_hm0, %k_rows)] : index
+      %pkchunk0 = index.div %st_chunk, %c8 : index
+      %pkchunk = index.assume %pkchunk0 [le(%pkchunk0, %pklimit), mul(%pkchunk0, 2)] : index
+      %k_chunk = vector.load %k_view[%k_row_hm, %pkchunk] : view<[%k_rows]x16xi32> -> vector<2xi32>
       vector.store %k_chunk, %k_tile[%st_key, %pkchunk] : vector<2xi32>, view<16x20xi32>
     } else {
       %v_chunk = vector.load %v_view[%vchan, %key_origin0] : view<[%kv_stride0]x[%padded_tokens]xf16> -> vector<16xf16>
@@ -301,32 +289,32 @@ kernel.def target(@krea2_attention_sage_i4_fast_gfx11) export("krea2_attention_s
 
     %local_key = index.add %key_origin0, %lane_column : index
     %key_valid = index.cmp ult, %local_key, %tokens0 : index
-    %k_data0 = vector.load %k_tile[%lane_column, %qc0] : view<16x20xi32> -> vector<2xi32>
+    %k_data0 = vector.load %k_tile[%lane_column, %qw0] : view<16x20xi32> -> vector<2xi32>
     %rhs0 = vector.fragment<rhs> %k_data0 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot0 = vector.mma %lhs0, %rhs0, %init_i4 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data1 = vector.load %k_tile[%lane_column, %qc1] : view<16x20xi32> -> vector<2xi32>
+    %k_data1 = vector.load %k_tile[%lane_column, %qw1] : view<16x20xi32> -> vector<2xi32>
     %rhs1 = vector.fragment<rhs> %k_data1 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot1 = vector.mma %lhs1, %rhs1, %dot0 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data2 = vector.load %k_tile[%lane_column, %qc2] : view<16x20xi32> -> vector<2xi32>
+    %k_data2 = vector.load %k_tile[%lane_column, %qw2] : view<16x20xi32> -> vector<2xi32>
     %rhs2 = vector.fragment<rhs> %k_data2 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot2 = vector.mma %lhs2, %rhs2, %dot1 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data3 = vector.load %k_tile[%lane_column, %qc3] : view<16x20xi32> -> vector<2xi32>
+    %k_data3 = vector.load %k_tile[%lane_column, %qw3] : view<16x20xi32> -> vector<2xi32>
     %rhs3 = vector.fragment<rhs> %k_data3 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot3 = vector.mma %lhs3, %rhs3, %dot2 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data4 = vector.load %k_tile[%lane_column, %qc4] : view<16x20xi32> -> vector<2xi32>
+    %k_data4 = vector.load %k_tile[%lane_column, %qw4] : view<16x20xi32> -> vector<2xi32>
     %rhs4 = vector.fragment<rhs> %k_data4 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot4 = vector.mma %lhs4, %rhs4, %dot3 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data5 = vector.load %k_tile[%lane_column, %qc5] : view<16x20xi32> -> vector<2xi32>
+    %k_data5 = vector.load %k_tile[%lane_column, %qw5] : view<16x20xi32> -> vector<2xi32>
     %rhs5 = vector.fragment<rhs> %k_data5 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot5 = vector.mma %lhs5, %rhs5, %dot4 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data6 = vector.load %k_tile[%lane_column, %qc6] : view<16x20xi32> -> vector<2xi32>
+    %k_data6 = vector.load %k_tile[%lane_column, %qw6] : view<16x20xi32> -> vector<2xi32>
     %rhs6 = vector.fragment<rhs> %k_data6 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot6 = vector.mma %lhs6, %rhs6, %dot5 : vector<2xi32>, vector<2xi32>, vector<8xi32>
-    %k_data7 = vector.load %k_tile[%lane_column, %qc7] : view<16x20xi32> -> vector<2xi32>
+    %k_data7 = vector.load %k_tile[%lane_column, %qw7] : view<16x20xi32> -> vector<2xi32>
     %rhs7 = vector.fragment<rhs> %k_data7 shape [%k_frag, %n] using {schema = %i4_schema : encoding<schema>} : vector<2xi32>
     %dot7 = vector.mma %lhs7, %rhs7, %dot6 : vector<2xi32>, vector<2xi32>, vector<8xi32>
     %key_bounded = index.assume %local_key [lt(%local_key, %padded_tokens)] : index
-    %kscalar = view.load %ks_view[%key_bounded, %kv_head] : view<[%padded_tokens]x[%kv_head_limit]xf32> -> f32
+    %kscalar = view.load %ks_view[%kv_head, %key_bounded] : view<[%kv_head_limit]x[%padded_tokens]xf32> -> f32
     %ksv = vector.splat %kscalar : vector<8xf32>
     %scales = vector.mulf %qsv7, %ksv : vector<8xf32>
     %dotf = vector.sitofp %dot7 : vector<8xi32> to vector<8xf32>

@@ -69,8 +69,19 @@ version 2 fixed the preprocessing contract to 64-token query groups and transpos
 V, version 3 added the GEMM tile rows (128 or 256), the operand row pitches and a
 raster group of 1 for a single tile row. The host derives every field from the same
 rules (`host/gemm_shape.h`, mirrored by `scripts/build_kernels.py`) and rejects a
-bundle that disagrees before loading weights. Deployment sources are the `kernels/`
-directory; the FP16 comparison kernel lives under `experiments/`.
+bundle that disagrees before loading weights; the last field is the attention code
+width (4, or 8 for the int8-QK twin selected with `KREA2_ATTN_QK=8`). Deployment
+sources are the `kernels/` directory; the FP16 comparison kernel lives under
+`experiments/`.
+
+The Q/K operands are head-major: codes `[heads][capacity][64 B]` (128 B for int8)
+and scales `[heads][capacity]`, written by `sage_quant_{q,k}` and read by the
+attention kernels through `[heads * capacity] x 16` (or 32) i32 views, so one key
+tile is a contiguous block. `tools/gen_sage_attention.py` derives the int8 twins
+(`attention_sage_i8_fast{,_prefetch}`) from the finished int4 text: int8 operand
+schema, 16x36 i32 K tiles, doubled packed columns, LDS offsets moved by 1 KB per K
+slot. Outputs of the layout change were byte-identical; the int8 twins match their own
+oracle to cosine 1.0 but compile at 256 VGPRs with small spills.
 
 SA2 supports 16 through 16,896 total tokens, head dimension 128 and four Q heads
 per KV head. The pipeline uses 48 Q heads and 12 KV heads. Its largest additional

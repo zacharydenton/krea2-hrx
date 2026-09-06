@@ -30,15 +30,22 @@ def generate():
     s = s.replace("index.constant 10496 : offset", "index.constant 7424 : offset")
     s = s.replace("index.constant 12544 : offset", "index.constant 9472 : offset")
     s = s.replace("view<16x136xf16>", "view<16x20xi32>")
-    insert = '''  %q_packed_stride = index.div %q_stride0, %c8 : index
-  %k_packed_stride = index.div %kv_stride0, %c8 : index
+    # Head-major operands (tools/gen_native_ops.py quant): codes [heads][capacity][16 i32],
+    # scales [heads][capacity]; a key tile is one contiguous 1 KB block.
+    insert = '''  %q_rows = index.mul %head_limit, %padded_tokens : index
+  %k_rows = index.mul %kv_head_limit, %padded_tokens : index
+  %q_row_base = index.mul %head, %padded_tokens : index
+  %k_row_base = index.mul %kv_head, %padded_tokens : index
   %query_lane0 = index.add %query_origin0, %lane_column : index
   %query_lane = index.assume %query_lane0 [lt(%query_lane0, %padded_tokens)] : index
+  %q_row_hm0 = index.add %q_row_base, %query_lane : index
+  %q_row_hm = index.assume %q_row_hm0 [lt(%q_row_hm0, %q_rows)] : index
+  %pklimit = index.constant 14 : index
   %qs_global = buffer.assume.memory_space<global> %qs : buffer
   %ks_global = buffer.assume.memory_space<global> %ks : buffer
   %corr_global = buffer.assume.memory_space<global> %correction : buffer
-  %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<[%padded_tokens]x[%head_limit]xf32>
-  %ks_view = buffer.view %ks_global[%c0_offset] : buffer -> view<[%padded_tokens]x[%kv_head_limit]xf32>
+  %qs_view = buffer.view %qs_global[%c0_offset] : buffer -> view<[%head_limit]x[%padded_tokens]xf32>
+  %ks_view = buffer.view %ks_global[%c0_offset] : buffer -> view<[%kv_head_limit]x[%padded_tokens]xf32>
   %mean_c63 = index.constant 63 : index
   %mean_rounded = index.add %tokens0, %mean_c63 : index
   %mean_tiles = index.div %mean_rounded, %c64 : index
@@ -50,43 +57,41 @@ def generate():
   %corr_view = buffer.view %corr_global[%c0_offset] : buffer -> view<[%corr_rows]x[%padded_tokens]xf32>
 '''
     s = s.replace("  %q_view =", insert + "  %q_view =")
-    s = s.replace("view<[%padded_tokens]x[%q_stride0]xf16>", "view<[%padded_tokens]x[%q_packed_stride]xi32>")
-    s = s.replace("view<[%padded_tokens]x[%kv_stride0]xf16>", "view<[%padded_tokens]x[%k_packed_stride]xi32>", 1)
+    s = s.replace("view<[%padded_tokens]x[%q_stride0]xf16>", "view<[%q_rows]x16xi32>")
+    s = s.replace("view<[%padded_tokens]x[%kv_stride0]xf16>", "view<[%k_rows]x16xi32>", 1)
     # Replace resident Q fragments and construct the row-scale vector matching
     # the gfx11 accumulator map: row=2*element+lane/16, column=lane%16.
     start = s.index("  %q_channel0 =")
     end = s.index("  %final_max", start)
-    q = "  %packed_head = index.div %head_base0, %c8 : index\n"
+    q = ""
     for c in range(8):
         q += f'''  %qc{c} = index.constant {c*2} : index
-  %qcol0_{c} = index.add %packed_head, %qc{c} : index
-  %qlimit{c} = index.sub %q_packed_stride, %c2 : index
-  %qcol{c} = index.assume %qcol0_{c} [le(%qcol0_{c}, %qlimit{c}), mul(%qcol0_{c}, 2)] : index
-  %qdata{c} = vector.load %q_view[%query_lane, %qcol{c}] : view<[%padded_tokens]x[%q_packed_stride]xi32> -> vector<2xi32>
+  %qw{c} = index.constant {c*2} : index
+  %qdata{c} = vector.load %q_view[%q_row_hm, %qw{c}] : view<[%q_rows]x16xi32> -> vector<2xi32>
   %lhs{c} = vector.fragment<lhs> %qdata{c} shape [%m, %k_frag] using {{schema = %i4_schema : encoding<schema>}} : vector<2xi32>
   %qr0_{c} = index.add %query_origin0, %qc{c} : index
   %qr1_{c} = index.add %qr0_{c}, %lane_group : index
   %qr{c} = index.assume %qr1_{c} [lt(%qr1_{c}, %padded_tokens)] : index
-  %qs{c} = view.load %qs_view[%qr{c}, %head] : view<[%padded_tokens]x[%head_limit]xf32> -> f32
+  %qs{c} = view.load %qs_view[%head, %qr{c}] : view<[%head_limit]x[%padded_tokens]xf32> -> f32
   %qsv{c} = vector.insert %qs{c} into {"%zero_vector" if c == 0 else f"%qsv{c-1}"}[{c}] : f32, vector<8xf32>
 '''
     s = s[:start] + q + s[end:]
-    s = s.replace("    %k_chunk = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>", '''    %pkcol0 = index.div %st_col, %c8 : index
-    %pklimit = index.sub %k_packed_stride, %c2 : index
-    %pkcol = index.assume %pkcol0 [le(%pkcol0, %pklimit), mul(%pkcol0, 2)] : index
-    %pkchunk = index.div %st_chunk, %c8 : index
-    %k_chunk = vector.load %k_view[%st_row, %pkcol] : view<[%padded_tokens]x[%k_packed_stride]xi32> -> vector<2xi32>''')
+    s = s.replace("    %k_chunk = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>", '''    %k_row_hm0 = index.add %k_row_base, %st_row : index
+    %k_row_hm = index.assume %k_row_hm0 [lt(%k_row_hm0, %k_rows)] : index
+    %pkchunk0 = index.div %st_chunk, %c8 : index
+    %pkchunk = index.assume %pkchunk0 [le(%pkchunk0, %pklimit), mul(%pkchunk0, 2)] : index
+    %k_chunk = vector.load %k_view[%k_row_hm, %pkchunk] : view<[%k_rows]x16xi32> -> vector<2xi32>''')
     s = s.replace("vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>", "vector.store %k_chunk, %k_tile[%st_key, %pkchunk] : vector<2xi32>")
     start = s.index("    %k_data0 =")
     end = s.index("    %scaled0 =", start)
     dot = ""
     for c in range(8):
-        dot += f'''    %k_data{c} = vector.load %k_tile[%lane_column, %qc{c}] : view<16x20xi32> -> vector<2xi32>
+        dot += f'''    %k_data{c} = vector.load %k_tile[%lane_column, %qw{c}] : view<16x20xi32> -> vector<2xi32>
     %rhs{c} = vector.fragment<rhs> %k_data{c} shape [%k_frag, %n] using {{schema = %i4_schema : encoding<schema>}} : vector<2xi32>
     %dot{c} = vector.mma %lhs{c}, %rhs{c}, {"%init_i4" if c == 0 else f"%dot{c-1}"} : vector<2xi32>, vector<2xi32>, vector<8xi32>
 '''
     dot += '''    %key_bounded = index.assume %local_key [lt(%local_key, %padded_tokens)] : index
-    %kscalar = view.load %ks_view[%key_bounded, %kv_head] : view<[%padded_tokens]x[%kv_head_limit]xf32> -> f32
+    %kscalar = view.load %ks_view[%kv_head, %key_bounded] : view<[%kv_head_limit]x[%padded_tokens]xf32> -> f32
     %ksv = vector.splat %kscalar : vector<8xf32>
     %scales = vector.mulf %qsv7, %ksv : vector<8xf32>
     %dotf = vector.sitofp %dot7 : vector<8xi32> to vector<8xf32>
@@ -213,6 +218,34 @@ def waves8(s):
     return s
 
 
+def int8(s):
+    """The int8-QK twin of a finished int4 kernel: the same softmax, PV and epilogue on
+    int8 codes (four per i32 word, 32 words per head) from the int8 preparation
+    (absmax/127). Every substitution must fire; the LDS K tile grows from 16x20 to 16x36
+    i32 (32 data words plus the bank pad), so every offset past it moves by 1024 per
+    K slot."""
+    def sub(old, new, count=None, regex=False):
+        nonlocal s
+        text, n = (re.subn(old, new, s) if regex else (s.replace(old, new), s.count(old)))
+        assert n and (count is None or n == count), (old, n)
+        s = text
+    sub("attention_sage_i4", "attention_sage_i8")
+    sub("element_format=i4, payload_elements=16, payload_registers=2", "element_format=i8, payload_elements=16, payload_registers=4", 1)
+    sub("%i4_schema", "%i8_schema")
+    sub("vector<2xi32>", "vector<4xi32>")
+    sub("view<16x20xi32>", "view<16x36xi32>")
+    sub("x16xi32>", "x32xi32>")
+    # %qw{c}: the packed word column of 16-channel chunk c (%qc{c} is the accumulator row offset 2c and stays)
+    sub(r"(%qw\d) = index.constant (\d+) : index", lambda m: f"{m[1]} = index.constant {2 * int(m[2])} : index", 8, regex=True)
+    sub("  %pklimit = index.constant 14 : index", "  %pklimit = index.constant 28 : index", 1)
+    sub(r"(%pkchunk0\w*) = index.div %st_chunk, %c8 : index", r"\1 = index.div %st_chunk, %c4 : index", regex=True)
+    sub(r"mul\((%pkchunk0\w*), 2\)\]", r"mul(\1, 4)]", regex=True)
+    moves = {1280: 2304, 7424: 8448, 14848: 16896, 16896: 18944, 18944: 20992}
+    sub(r"index.constant (\d+) : offset", lambda m: f"index.constant {moves.get(int(m[1]), int(m[1]))} : offset", regex=True)
+    s = s.replace("Smoothed INT4 QK", "Smoothed INT8 QK (int8 twin of the INT4 kernel)")
+    return s
+
+
 if __name__ == "__main__":
     source = generate()
     for name, text in (("attention_sage_i4_fast", waves8(double_buffer(transposed_v(source))).replace("attention_sage_i4", "attention_sage_i4_fast")),
@@ -220,3 +253,6 @@ if __name__ == "__main__":
         out = ROOT / "kernels" / (name + ".loom")
         out.write_text(text)
         print(out)
+        wide = ROOT / "kernels" / (name.replace("i4", "i8") + ".loom")
+        wide.write_text(int8(text))
+        print(wide)

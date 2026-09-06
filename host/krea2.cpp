@@ -188,15 +188,17 @@ public:
           (tokens + 16 + 31) / 32 * 32,
           (tokens + 63) / 64 * 64); // tokens+16 headroom, whole 64-key blocks
       // "3 tokens gemm_rows m_group capacity attention_waves pitch(6144)
-      // pitch(16384)": every field must match what this host derives.
+      // pitch(16384) attention_bits": every shape field must match what this
+      // host derives; attention_bits (4 or 8) is the builder's choice.
       std::ifstream metadata(kernels_dir + "/launch.txt");
       unsigned version = 0, compiled_tokens = 0, pitch_hidden = 0,
                pitch_inter = 0;
       size_t compiled_capacity = 0;
       if (!(metadata >> version >> compiled_tokens >> gemm_rows_ >> m_group_ >>
             compiled_capacity >> attention_waves_ >> pitch_hidden >>
-            pitch_inter) ||
+            pitch_inter >> attention_bits_) ||
           version != 3 || compiled_tokens != unsigned(tokens) ||
+          (attention_bits_ != 4 && attention_bits_ != 8) ||
           compiled_capacity != capacity_ ||
           gemm_rows_ != unsigned(krea2_shape::gemm_rows(tokens)) ||
           m_group_ !=
@@ -251,10 +253,14 @@ public:
       load(k_gemm_down_, "gemm_down",
            wide ? "krea2_gemm_i4_resid_256" : "krea2_gemm_i4_resid");
       load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
-      load(k_attention_, "attention",
-           attention_waves_ == 8 ? "krea2_attention_sage_i4_fast"
-                                 : "krea2_attention_sage_i4_fast_prefetch");
-      sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_));
+      std::string attention = attention_bits_ == 4
+                                  ? "krea2_attention_sage_i4_fast"
+                                  : "krea2_attention_sage_i8_fast";
+      if (attention_waves_ != 8)
+        attention += "_prefetch";
+      load(k_attention_, "attention", attention.c_str());
+      sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_), 48, 12,
+                                                int(attention_bits_));
       const size_t T = capacity_;
       x_ = gpu::allocate(T * HIDDEN * 2);
       // the widest prepared operand: down's K = 16384 at its padded pitch
@@ -500,7 +506,8 @@ private:
 
   int tokens_, layers_;
   size_t capacity_ = 0;
-  unsigned gemm_rows_ = 0, m_group_ = 0, attention_waves_ = 4;
+  unsigned gemm_rows_ = 0, m_group_ = 0, attention_waves_ = 4,
+           attention_bits_ = 4;
   std::mutex mutex_;
   std::vector<Block> blocks_;
   std::unique_ptr<SagePreparation> sage_;

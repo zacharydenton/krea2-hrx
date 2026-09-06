@@ -923,19 +923,22 @@ for kind in ["key_partial", "key_mean", "query_mean"]:
     means(kind)
 
 
-def quant(query):
+def quant(query, bits=4):
     # One wave handles one 128-channel row, four channels per lane. Eight rows
     # share a workgroup, with no LDS allocation or workgroup barriers.
+    # bits 4: codes in -7..7, four per i16 (64 B per head row); bits 8: -127..127,
+    # four per i32 (128 B per head row). Either way 32 words per head row.
     cfg = ["tokens", "heads", "tiles", "capacity", "xsize", "msize", "psize", "ssize"]
+    word_type, levels, mask, shift = ("i16", 7, 15, 4) if bits == 4 else ("i32", 127, 255, 8)
     bufs = [
         ("x", "f16", "%xsize"),
         ("mean", "f32", "%msize"),
-        ("packed", "i16", "%psize"),
+        ("packed", word_type, "%psize"),
         ("scale", "f32", "%ssize"),
     ]
     if not query:
         bufs.append(("centered", "f16", "%xsize"))
-    k = Kernel("sage_quant_q" if query else "sage_quant_k", bufs, cfg)
+    k = Kernel(("sage_quant_q" if query else "sage_quant_k") + ("" if bits == 4 else "_i8"), bufs, cfg)
     lane = k.rem("%lane", k.c(32))
     row = k.add(k.mul("%group", k.c(8)), k.div("%lane", k.c(32)))
     head = "%group_y"
@@ -967,34 +970,41 @@ def quant(query):
         )
         maximum = k.math("maxnumf", maximum, other)
     scale = k.math(
-        "divf", k.math("maxnumf", maximum, k.c("1e-30", "f32")), k.c("7.0", "f32")
+        "divf", k.math("maxnumf", maximum, k.c("1e-30", "f32")), k.c(f"{levels}.0", "f32")
     )
+    # Head-major outputs: codes [heads][capacity][64 B], scales [heads][capacity], so a
+    # key tile is one contiguous block for the attention kernel's staging loads.
     k.begin(k.cmp(lane, k.c(0), "eq"))
-    k.store("scale", k.add(k.mul(row, "%heads"), head), scale)
+    k.store("scale", k.add(k.mul(head, "%capacity"), row), scale)
     k.end()
     word = k.c(0, "i32")
     for j, value in enumerate(values):
         code = k.math("roundevenf", k.math("divf", value, scale))
         code = k.math(
-            "minnumf", k.math("maxnumf", code, k.c("-7.0", "f32")), k.c("7.0", "f32")
+            "minnumf", k.math("maxnumf", code, k.c(f"-{levels}.0", "f32")), k.c(f"{levels}.0", "f32")
         )
-        code = k.op("scalar.andi", k.cast(code, "f32", "i32"), k.c(15, "i32"), t="i32")
+        code = k.op("scalar.andi", k.cast(code, "f32", "i32"), k.c(mask, "i32"), t="i32")
         word = k.op(
             "scalar.ori",
             word,
-            k.op("scalar.shli", code, k.c(4 * j, "i32"), t="i32"),
+            k.op("scalar.shli", code, k.c(shift * j, "i32"), t="i32"),
             t="i32",
         )
-    packed = k.var()
-    k.emit(f"{packed} = scalar.trunci {word} : i32 to i16")
-    at = k.add(k.mul(k.add(k.mul(row, "%heads"), head), k.c(32)), lane)
-    k.store("packed", at, packed, src="i16")
+    at = k.add(k.mul(k.add(k.mul(head, "%capacity"), row), k.c(32)), lane)
+    if bits == 4:
+        packed = k.var()
+        k.emit(f"{packed} = scalar.trunci {word} : i32 to i16")
+        k.store("packed", at, packed, src="i16")
+    else:
+        k.store("packed", at, word, src="i32")
     k.end()
     save(k)
 
 
 quant(True)
 quant(False)
+quant(True, bits=8)
+quant(False, bits=8)
 
 
 def write():

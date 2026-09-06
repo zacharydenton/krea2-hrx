@@ -34,7 +34,7 @@ int main(int argc, char **argv) {
   assert(argc == 2);
   const auto dir = std::filesystem::path(argv[1]) / "session-fixture";
   std::filesystem::create_directory(dir);
-  std::ofstream(dir / "launch.txt") << "3 16 128 1 64 8 6144 16512\n";
+  std::ofstream(dir / "launch.txt") << "3 16 128 1 64 8 6144 16512 4\n";
   std::ofstream(dir / "manifest.txt") << "";
   std::ofstream(dir / "weights.bin") << "incomplete weights";
   for (int i = 0; i < 3; ++i) {
@@ -48,7 +48,7 @@ int main(int argc, char **argv) {
   }
   assert(allocations == 3);
   // Invalid metadata must be rejected before allocating weights.
-  std::ofstream(dir / "launch.txt") << "3 16 128 0 64 8 6144 16512\n";
+  std::ofstream(dir / "launch.txt") << "3 16 128 0 64 8 6144 16512 4\n";
   krea2_session *session = nullptr;
   char error[4096];
   assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
@@ -58,13 +58,14 @@ int main(int argc, char **argv) {
   assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
                       sizeof(error)) == KREA2_INVALID_ARGUMENT);
   assert(allocations == 3 && outstanding == 0);
-  std::ofstream(dir / "launch.txt") << "3 16 128 1 64 4 6144 16512\n";
+  std::ofstream(dir / "launch.txt") << "3 16 128 1 64 4 6144 16512 4\n";
   assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
                       sizeof(error)) == KREA2_INVALID_ARGUMENT);
   assert(allocations == 3 && outstanding == 0);
   // A dense down-projection pitch or a 256-row tile below 4096 tokens is a
   // bundle built by a different rule.
-  for (const char *metadata : {"3 16 128 1 64 8 6144 16384\n", "3 16 256 4 64 8 6144 16512\n"}) {
+  for (const char *metadata : {"3 16 128 1 64 8 6144 16384 4\n", "3 16 256 4 64 8 6144 16512 4\n",
+                               "3 16 128 1 64 8 6144 16512 6\n", "3 16 128 1 64 8 6144 16512\n"}) {
     std::ofstream(dir / "launch.txt") << metadata;
     assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
                         sizeof(error)) == KREA2_INVALID_ARGUMENT);

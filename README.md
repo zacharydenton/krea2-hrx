@@ -91,6 +91,10 @@ through HRX. Quantization uses four channels per lane and wave shuffles, with no
 workgroup barriers. V is transposed once per block. Below 8,192 tokens, eight waves share
 K/V across two query tiles with alternating LDS slots; longer sequences use four
 waves with explicit prefetch. Kernel selection and GEMM grouping are automatic.
+Q/K codes and scales are laid out head-major so a key tile is one contiguous block.
+`KREA2_ATTN_QK=8` at kernel-build time selects the int8-QK twin of the same kernel
+(codes in -127..127, about twice the attention time): a quality fallback, recorded in
+the bundle's launch metadata and honoured by both the Python and native builders.
 
 ```sh
 scripts/build_native.sh

@@ -33,11 +33,16 @@ int main(int argc, char **argv) {
         kv = std::stoi(argv[5]), cap = std::stoi(argv[6]),
         repeat = std::stoi(argv[8]);
     const std::string symbol = argv[2];
-    int waves = symbol == "krea2_attention_sage_i4_fast"            ? 8
-                : symbol == "krea2_attention_sage_i4_fast_prefetch" ? 4
-                                                                    : 0;
-    if ((waves != 4 && waves != 8) || tokens < 16 || cap < tokens + 16 ||
-        cap % 32 || heads != 4 * kv || kv < 1 || repeat < 1)
+    // krea2_attention_sage_i{4,8}_fast[_prefetch]: the code width selects the
+    // preparation, the suffix the wave count.
+    int bits = symbol.rfind("krea2_attention_sage_i4_fast", 0) == 0   ? 4
+               : symbol.rfind("krea2_attention_sage_i8_fast", 0) == 0 ? 8
+                                                                      : 0;
+    std::string tail = symbol.substr(std::min(symbol.size(), size_t(28)));
+    int waves = tail.empty() ? 8 : tail == "_prefetch" ? 4 : 0;
+    if (!bits || (waves != 4 && waves != 8) || tokens < 16 ||
+        cap < tokens + 16 || cap % 32 || heads != 4 * kv || kv < 1 ||
+        repeat < 1)
       throw std::runtime_error("invalid dimensions");
     std::filesystem::path dir(argv[7]);
     Buffer q(size_t(cap) * heads * 128 * 2), k(size_t(cap) * kv * 128 * 2),
@@ -45,7 +50,7 @@ int main(int argc, char **argv) {
     q.read(dir / "q.bin", size_t(cap) * heads * 128 * 2);
     k.read(dir / "k.bin", size_t(cap) * kv * 128 * 2);
     v.read(dir / "v.bin", size_t(cap) * kv * 128 * 2);
-    SagePreparation prep(tokens, cap, heads, kv);
+    SagePreparation prep(tokens, cap, heads, kv, bits);
     gpu::Kernel kernel(argv[1], argv[2]);
     gpu::Args args;
     args.i32(tokens)
