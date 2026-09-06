@@ -149,5 +149,8 @@ only the scale also lost. The existing attention schedules remain selected.
 These local experiments do not establish a state-of-the-art ranking.
 
 A later down-projection sweep measured a 1.06×–1.09× kernel speedup, but an
-integrated warm generation changed its checksum. That candidate remains outside
-the production path; see [the experiment report](down-gemm-experiment.md).
+integrated warm generation changed its checksum. The subsequent investigation
+reproduced the fault in production VAE decoding alone and isolated a shared-memory
+race in auxiliary softmax. Maximum and sum reductions now use separate LDS
+regions. The wide down kernel still awaits clean whole-image timing before
+selection; see [the experiment report](down-gemm-experiment.md).

@@ -32,6 +32,8 @@ step "generated kernels match their generators" bash -c '
 step "build host"                 ./scripts/build_host.sh
 step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
+step "repeat-image failure capture" python3 tests/test_bench_native.py
+step "softmax shared-memory reuse regression" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_softmax_repeat.cpp -Lbuild -lkrea2 -Wl,-rpath,"$PWD/build" -o "$tmpdir/test-softmax-repeat" && "$tmpdir/test-softmax-repeat"'
 step "native constructor cleanup" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_session.cpp build/obj/{gpu,krea2,sage,native_kernels}.o "${HRXLIBS[@]}" -Wl,--wrap=hrx_buffer_allocate,--wrap=hrx_buffer_release -o "$tmpdir/test-session" && "$tmpdir/test-session" "$tmpdir"'
 step "auxiliary Loom kernel regressions" bash -c 'source .venv/bin/activate && python3 tests/test_native_ops.py'
 step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && python3 tests/test_ref_vs_diffusers.py'

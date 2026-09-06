@@ -8,9 +8,10 @@ The 30 KiB operand stage retains register prefetching. Four-tile raster groups
 shorten at the end, avoiding empty workgroups.
 
 The candidate remains in `experiments/gemm_down_i4.loom`. It is **not selected
-by either production builder**: an integrated trial produced a different image
-on its warm repeat. The isolated kernel's speedup is insufficient evidence to
-change the default while that observation remains unexplained.
+by either production builder** pending clean whole-image timings. An integrated
+trial's repeat-image failure prompted withdrawal. The follow-up investigation
+below reproduced that failure class in the production VAE without the wide
+kernel and fixed a shared-memory race in auxiliary softmax.
 
 ## Kernel measurements
 
@@ -60,8 +61,8 @@ twice at 1024² and eight steps:
 The first hash matches `db476cf`. A separate trial again produced that first
 hash. Repeating individual encoder, transformer and 1024² VAE calls was exact,
 including a transformer call after changing its timestep and after decoding.
-No root cause or pixel-error magnitude has been established for the differing
-warm image. The saved baseline reproduced the expected hash on both its first
+The original differing image's pixels were not retained. The saved baseline
+reproduced the expected hash on both its first
 and warm calls in a separate process; their timings were not comparable to the
 candidate's contended run.
 
@@ -76,6 +77,70 @@ patch are retained locally under `build/down-candidate/` for further diagnosis.
 `tools/bench_native.py` now fails if an identical prompt/seed repeat changes the
 RGB checksum, rather than merely printing the different hashes. No whole-image
 speedup or state-of-the-art ranking is claimed from this experiment.
+
+## Follow-up: auxiliary softmax race
+
+Replaying the saved candidate produced four exact full images. A diagnostic
+build also captured identical initial latents, encoder taps, fused text, all
+eight velocities and all eight updated latents across three generations.
+Another diagnostic compared both down kernels on the same real inputs in every
+block: all 448 projections across two full generations matched bit for bit.
+These diagnostics add synchronization, so they alone could not exclude a race.
+
+Concurrent candidate/baseline generation reproduced an image mismatch. The
+candidate's first RGB hash was
+`189999e53a084add31ca3c6ce8d7de75905a2833607607dd75f9e3b9056391b6`;
+its next call and the baseline's first call produced the expected `65507120…`
+hash. The saved image pair differed in 676 pixels / 723 channels, each by just
+one 8-bit level. Every difference lay inside x=195..336, y=961..1023, suggesting
+a VAE edge tile. Extra diagnostic processes were stopped when another workload
+grew and available memory fell below 2 GiB; unrelated jobs were left alone.
+
+Replaying the known final latent through the **unchanged production decoder**
+then failed on call nine. No transformer or wide INT4 kernel ran in that test.
+Capturing each tile on another replay showed identical latent input and one
+changed decoded tile. Tracing that tile's operations isolated attention;
+tracing attention's intermediates showed identical Q, K, V and QK scores but
+different softmax probabilities. One softmax row had all 256 probabilities
+changed. Small final RGB differences do not describe the size of this internal
+error.
+
+Both auxiliary softmax variants reused one 1 KiB LDS buffer for the maximum and
+sum reductions. The old 256-token binary contains this sequence at 0x1290:
+
+```asm
+ds_load_b32 v1, v1   ; broadcast maximum
+s_barrier           ; no lgkmcnt wait before the barrier
+```
+
+The wait occurs later, before consuming the loaded value. A different wave
+can cross the barrier and overwrite the same LDS location with its partial sum
+before an outstanding maximum read completes. Separate 1 KiB regions for the
+two reductions remove that overlap. No region is overwritten after its final
+broadcast; the two post-broadcast barriers are therefore unnecessary and have
+been removed. Reduction order, exponentiation and BF16 rounding are unchanged.
+The changed embedded source automatically selects a new kernel-cache entry.
+
+`tests/test_softmax_repeat.cpp` uses constant logits, whose uniform probabilities
+are independently known exactly. It failed against `db476cf` on the second
+256-token dispatch. The fixed kernels passed 704 repeated resident dispatches
+across 33, 256, 257 and 1024 tokens, including causal masking. The regression is
+part of `scripts/test.sh` and requires neither models nor Torch.
+
+After the fix, `scripts/test.sh --quick --native` passed in full. All 20 replays
+of the previously failing final latent matched the expected RGB bytes. Rebuilding
+the saved wide-kernel candidate with the corrected auxiliary kernels produced
+four matching full images, including three warm repeats; decoder replays and
+generation overlapped during part of this validation. These runs validate the
+fix, not an isolated performance comparison. [Recorded results](benchmarks/softmax-race-2026-09-06.json)
+include the failing and corrected runs.
+
+`tools/bench_native.py` now retains the first and differing lossless PPM images,
+checksums, input settings and pixel-error statistics in a unique
+`build/native-mismatch-*` directory before failing. Its host regression checks
+that a later call cannot overwrite the retained first image and that failure
+still destroys the pipeline. The original `83a6f66b…` image was never saved, so
+its exact pixels cannot be retrospectively compared with the reproduced faults.
 
 ## Other rejected candidates
 

@@ -142,9 +142,10 @@ They preserve the accumulation and rounding order. The resident-buffer A/B
 benchmark and rejected INT4/prefetch experiments are documented in
 [HRX runtime details](docs/hrx-runtime.md#auxiliary-gemm-optimization).
 
-A later wide INT4 down-projection candidate remains experimental: kernel timing
-improved, but an integrated warm repeat changed the image checksum. See the
-[measurements and unresolved repeat-image check](docs/down-gemm-experiment.md).
+A later wide INT4 down-projection candidate remains experimental pending clean
+whole-image timings. The repeat-image failure observed during its trial was
+reproduced in the production VAE and traced to a shared-memory race in auxiliary
+softmax. That race is fixed; see the [investigation](docs/down-gemm-experiment.md).
 
 For stage timings, set `KREA2_NATIVE_PROFILE=1` when running the CLI. This adds
 synchronization and prints text encoding, denoising, VAE and transformer-stage

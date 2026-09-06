@@ -557,30 +557,36 @@ def softmax(causal):
         k.c("-3.402823466e+38", "f32"),
         lambda j, a: k.math("maxnumf", a, score(j)),
     )
-    k.emit("%lds_bytes = index.constant 1024 : offset")
+    k.emit("%lds_bytes = index.constant 2048 : offset")
     k.emit("%lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer")
-    k.emit("%buf = buffer.view %lds[%zero_offset] : buffer -> view<256xf32>")
+    k.emit("%sum_offset = index.constant 1024 : offset")
+    k.emit("%max_buf = buffer.view %lds[%zero_offset] : buffer -> view<256xf32>")
+    k.emit("%sum_buf = buffer.view %lds[%sum_offset] : buffer -> view<256xf32>")
 
-    def reduce(value, op):
-        k.emit(f"view.store {value}, %buf[%lane] : f32, view<256xf32>")
+    def reduce(value, op, buf):
+        k.emit(f"view.store {value}, {buf}[%lane] : f32, view<256xf32>")
         for d in [128, 64, 32, 16, 8, 4, 2, 1]:
             k.emit("kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
             k.begin(k.cmp("%lane", k.c(d)))
             peer = k.add("%lane", k.c(d))
             a = k.var()
             b = k.var()
-            k.emit(f"{a} = view.load %buf[%lane] : view<256xf32> -> f32")
-            k.emit(f"{b} = view.load %buf[{peer}] : view<256xf32> -> f32")
+            k.emit(f"{a} = view.load {buf}[%lane] : view<256xf32> -> f32")
+            k.emit(f"{b} = view.load {buf}[{peer}] : view<256xf32> -> f32")
             v = k.math(op, a, b)
-            k.emit(f"view.store {v}, %buf[%lane] : f32, view<256xf32>")
+            k.emit(f"view.store {v}, {buf}[%lane] : f32, view<256xf32>")
             k.end()
         k.emit("kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
         v = k.var()
-        k.emit(f"{v} = view.load %buf[{k.c(0)}] : view<256xf32> -> f32")
-        k.emit("kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+        k.emit(f"{v} = view.load {buf}[{k.c(0)}] : view<256xf32> -> f32")
         return v
 
-    mx = reduce(maximum, "maxnumf")
+    # Keep the maximum alive in its own LDS region. The gfx1151 lowering can
+    # emit ds_load; s_barrier without waiting for that read to finish. Reusing
+    # the same region lets a faster wave overwrite the maximum with a partial
+    # sum while another wave's broadcast read is still outstanding. Separate
+    # regions also eliminate the two post-broadcast barriers.
+    mx = reduce(maximum, "maxnumf", "%max_buf")
     su = k.loop(
         "%lane",
         end,
@@ -588,7 +594,7 @@ def softmax(causal):
         k.c("0.0", "f32"),
         lambda j, a: k.math("addf", a, k.math("expf", k.math("subf", score(j), mx))),
     )
-    total = reduce(su, "addf")
+    total = reduce(su, "addf", "%sum_buf")
     j = k.var()
     k.emit(f"scf.for {j} = [%lane to %tokens step {k.c(256)}] {{")
     k.begin(k.cmp(j, end))

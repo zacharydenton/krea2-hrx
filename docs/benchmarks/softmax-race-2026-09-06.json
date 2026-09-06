@@ -1,0 +1,301 @@
+{
+  "date": "2026-09-06",
+  "hardware": "gfx1151",
+  "finding": "Auxiliary softmax reused maximum-reduction LDS while broadcast reads could remain outstanding across s_barrier.",
+  "fix": "Separate 1 KiB LDS regions for maximum and sum reductions; omit post-broadcast barriers.",
+  "image_case": {
+    "prompt": "a red fox in the snow",
+    "seed": 0,
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "tokens": 4107
+  },
+  "expected_rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09",
+  "candidate_sequential": [
+    {
+      "load_seconds": 15.90059705398744
+    },
+    {
+      "run": 0,
+      "seconds": 29.338627904013265,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 1,
+      "seconds": 25.44506012497004,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 2,
+      "seconds": 31.991053255973384,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 3,
+      "seconds": 32.41989462199854,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    }
+  ],
+  "candidate_stage_trace": [
+    {
+      "load_seconds": 3.0663198689580895
+    },
+    {
+      "run": 0,
+      "seconds": 33.310726985975634,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 1,
+      "seconds": 32.99812334601302,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 2,
+      "seconds": 33.691784414986614,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    }
+  ],
+  "candidate_differential": {
+    "down_projections": 448,
+    "all_bit_exact": true,
+    "generations": [
+      {
+        "load_seconds": 2.764782529033255
+      },
+      {
+        "run": 0,
+        "seconds": 46.302842440025415,
+        "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+      },
+      {
+        "run": 1,
+        "seconds": 42.84293460199842,
+        "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+      }
+    ]
+  },
+  "candidate_overlap": [
+    {
+      "load_seconds": 9.524342344026081
+    },
+    {
+      "run": 0,
+      "seconds": 97.79551142000128,
+      "rgb_sha256": "189999e53a084add31ca3c6ce8d7de75905a2833607607dd75f9e3b9056391b6"
+    },
+    {
+      "run": 1,
+      "seconds": 181.97621237498242,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    }
+  ],
+  "baseline_overlap": [
+    {
+      "load_seconds": 9.5108712890069
+    },
+    {
+      "run": 0,
+      "seconds": 95.43842443299945,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    }
+  ],
+  "baseline_overlap_note": "Stopped during second generation when another workload grew and available system memory fell below 2 GiB.",
+  "captured_image_failure": {
+    "library": "/home/zach/code/krea2-loom/build/down-candidate/libkrea2_pipeline.so",
+    "bundle": "/home/zach/code/krea2-loom/build/native-deploy",
+    "prompt": "a red fox in the snow",
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "seed": 0,
+    "first_run": 0,
+    "repeat_run": 1,
+    "first_rgb_sha256": "189999e53a084add31ca3c6ce8d7de75905a2833607607dd75f9e3b9056391b6",
+    "repeat_rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09",
+    "changed_channels": 723,
+    "changed_pixels": 676,
+    "max_absolute_error": 1,
+    "mean_absolute_error": 0.00022983551025390625
+  },
+  "production_decode_only": {
+    "failed_call": 9,
+    "rgb_sha256": "9a0376b9e282e80cad02b3c2304c26e42e1b5768d7ccf4c9702b5b73c1990dbd",
+    "changed_channels": 499,
+    "changed_pixels": 474,
+    "max_absolute_error": 1,
+    "bbox_xyxy": [
+      195,
+      963,
+      312,
+      1023
+    ]
+  },
+  "traced_tile_failure": {
+    "failed_call": 15,
+    "changed_tile_latent_yx": [
+      48,
+      120
+    ],
+    "latent_identical": true,
+    "changed_bf16_elements": 3059,
+    "max_absolute_error": 0.0078125
+  },
+  "operation_trace": {
+    "first_changed_operation": "softmax probabilities",
+    "Q_K_V_QK_scores_identical": true,
+    "changed_row": 46,
+    "changed_probabilities": 256
+  },
+  "old_regression": "softmax tokens=256 repeat=1 row=766 col=0 expected=0.003906 actual=0.000000",
+  "fixed_regression": [
+    "PASS softmax tokens=256 256 exact repeats",
+    "PASS softmax_causal tokens=256 256 exact repeats",
+    "PASS softmax tokens=33 32 exact repeats",
+    "PASS softmax_causal tokens=33 32 exact repeats",
+    "PASS softmax tokens=257 32 exact repeats",
+    "PASS softmax_causal tokens=257 32 exact repeats",
+    "PASS softmax tokens=1024 32 exact repeats",
+    "PASS softmax_causal tokens=1024 32 exact repeats"
+  ],
+  "binaries": {
+    "build/baseline-db476cf/libkrea2.so": "9ceb6ebb9e6b108ccefee12e383881074b8de96373684c2f123950c87b0e8b3a",
+    "build/down-candidate/libkrea2.so": "40146fdb540c1af2bdc7987680d25ce49b753d9ccf8a970b5a7a40b804e2cd3b",
+    "build/libkrea2.so": "ca12c794f49fdb14f0f3e2eb55142838359ebc032db2d0358576bbf559568036",
+    "build/down-candidate-fixed/libkrea2.so": "b867fbdd8c79611aa5936b004fa6b17c5e527ea9d3de5f8c6f04e20aab83b703"
+  },
+  "original_83a6_image_available": false,
+  "timing_note": "Diagnostic timings are not performance comparisons; shared GPU/CPU workloads and instrumentation vary.",
+  "fixed_decode_replays": [
+    {
+      "run": 0,
+      "seconds": 2.547798788989894,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 1,
+      "seconds": 2.856251240009442,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 2,
+      "seconds": 2.5046667119604535,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 3,
+      "seconds": 2.351834023022093,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 4,
+      "seconds": 2.892119937983807,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 5,
+      "seconds": 4.735071723989677,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 6,
+      "seconds": 5.91117471997859,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 7,
+      "seconds": 8.34738416899927,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 8,
+      "seconds": 8.25645769800758,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 9,
+      "seconds": 8.279458505043294,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 10,
+      "seconds": 4.843314691039268,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 11,
+      "seconds": 3.849373134027701,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 12,
+      "seconds": 4.280083058984019,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 13,
+      "seconds": 4.694840390002355,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 14,
+      "seconds": 4.857645609008614,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 15,
+      "seconds": 4.722117026976775,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 16,
+      "seconds": 4.663748478051275,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 17,
+      "seconds": 4.789571097004227,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 18,
+      "seconds": 4.744996519002598,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 19,
+      "seconds": 4.677142453962006,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    }
+  ],
+  "full_validation": {
+    "command": "scripts/test.sh --quick --native",
+    "result": "all checks passed"
+  },
+  "fixed_candidate_generations": [
+    {
+      "load_seconds": 3.267008643015288
+    },
+    {
+      "run": 0,
+      "seconds": 55.96693169500213,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 1,
+      "seconds": 42.3507319780183,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 2,
+      "seconds": 34.12343401001999,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    },
+    {
+      "run": 3,
+      "seconds": 34.46825387800345,
+      "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"
+    }
+  ]
+}

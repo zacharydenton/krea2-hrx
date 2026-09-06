@@ -1604,85 +1604,86 @@ kernel.def target(@krea2_softmax_target) export("krea2_softmax") @krea2_softmax(
     %v13 = scalar.maxnumf %v8, %v12 : f32
     scf.yield %v13 : f32
   }
-  %lds_bytes = index.constant 1024 : offset
+  %lds_bytes = index.constant 2048 : offset
   %lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer
-  %buf = buffer.view %lds[%zero_offset] : buffer -> view<256xf32>
-  view.store %v9, %buf[%lane] : f32, view<256xf32>
+  %sum_offset = index.constant 1024 : offset
+  %max_buf = buffer.view %lds[%zero_offset] : buffer -> view<256xf32>
+  %sum_buf = buffer.view %lds[%sum_offset] : buffer -> view<256xf32>
+  view.store %v9, %max_buf[%lane] : f32, view<256xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v15 = index.cmp ult, %lane, %v14 : index
   scf.if %v15 {
     %v16 = index.add %lane, %v14 : index
-    %v17 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v18 = view.load %buf[%v16] : view<256xf32> -> f32
+    %v17 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v18 = view.load %max_buf[%v16] : view<256xf32> -> f32
     %v19 = scalar.maxnumf %v17, %v18 : f32
-    view.store %v19, %buf[%lane] : f32, view<256xf32>
+    view.store %v19, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v21 = index.cmp ult, %lane, %v20 : index
   scf.if %v21 {
     %v22 = index.add %lane, %v20 : index
-    %v23 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v24 = view.load %buf[%v22] : view<256xf32> -> f32
+    %v23 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v24 = view.load %max_buf[%v22] : view<256xf32> -> f32
     %v25 = scalar.maxnumf %v23, %v24 : f32
-    view.store %v25, %buf[%lane] : f32, view<256xf32>
+    view.store %v25, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v27 = index.cmp ult, %lane, %v26 : index
   scf.if %v27 {
     %v28 = index.add %lane, %v26 : index
-    %v29 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v30 = view.load %buf[%v28] : view<256xf32> -> f32
+    %v29 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v30 = view.load %max_buf[%v28] : view<256xf32> -> f32
     %v31 = scalar.maxnumf %v29, %v30 : f32
-    view.store %v31, %buf[%lane] : f32, view<256xf32>
+    view.store %v31, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v33 = index.cmp ult, %lane, %v32 : index
   scf.if %v33 {
     %v34 = index.add %lane, %v32 : index
-    %v35 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v36 = view.load %buf[%v34] : view<256xf32> -> f32
+    %v35 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v36 = view.load %max_buf[%v34] : view<256xf32> -> f32
     %v37 = scalar.maxnumf %v35, %v36 : f32
-    view.store %v37, %buf[%lane] : f32, view<256xf32>
+    view.store %v37, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v39 = index.cmp ult, %lane, %v38 : index
   scf.if %v39 {
     %v40 = index.add %lane, %v38 : index
-    %v41 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v42 = view.load %buf[%v40] : view<256xf32> -> f32
+    %v41 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v42 = view.load %max_buf[%v40] : view<256xf32> -> f32
     %v43 = scalar.maxnumf %v41, %v42 : f32
-    view.store %v43, %buf[%lane] : f32, view<256xf32>
+    view.store %v43, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v45 = index.cmp ult, %lane, %v44 : index
   scf.if %v45 {
     %v46 = index.add %lane, %v44 : index
-    %v47 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v48 = view.load %buf[%v46] : view<256xf32> -> f32
+    %v47 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v48 = view.load %max_buf[%v46] : view<256xf32> -> f32
     %v49 = scalar.maxnumf %v47, %v48 : f32
-    view.store %v49, %buf[%lane] : f32, view<256xf32>
+    view.store %v49, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v51 = index.cmp ult, %lane, %v50 : index
   scf.if %v51 {
     %v52 = index.add %lane, %v50 : index
-    %v53 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v54 = view.load %buf[%v52] : view<256xf32> -> f32
+    %v53 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v54 = view.load %max_buf[%v52] : view<256xf32> -> f32
     %v55 = scalar.maxnumf %v53, %v54 : f32
-    view.store %v55, %buf[%lane] : f32, view<256xf32>
+    view.store %v55, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v57 = index.cmp ult, %lane, %v56 : index
   scf.if %v57 {
     %v58 = index.add %lane, %v56 : index
-    %v59 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v60 = view.load %buf[%v58] : view<256xf32> -> f32
+    %v59 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v60 = view.load %max_buf[%v58] : view<256xf32> -> f32
     %v61 = scalar.maxnumf %v59, %v60 : f32
-    view.store %v61, %buf[%lane] : f32, view<256xf32>
+    view.store %v61, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  %v62 = view.load %buf[%v63] : view<256xf32> -> f32
-  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %v62 = view.load %max_buf[%v63] : view<256xf32> -> f32
   %v67 = scf.for %v65 = [%lane to %tokens step %v1](%v66 = %v64 : f32) -> (f32) {
     %v68 = index.add %v4, %v65 : index
     %v69 = index.assume %v68 [range(%v68, 0, 1073741824), lt(%v68, %xsize)] : index
@@ -1692,82 +1693,81 @@ kernel.def target(@krea2_softmax_target) export("krea2_softmax") @krea2_softmax(
     %v73 = scalar.addf %v66, %v72 : f32
     scf.yield %v73 : f32
   }
-  view.store %v67, %buf[%lane] : f32, view<256xf32>
+  view.store %v67, %sum_buf[%lane] : f32, view<256xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v74 = index.cmp ult, %lane, %v14 : index
   scf.if %v74 {
     %v75 = index.add %lane, %v14 : index
-    %v76 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v77 = view.load %buf[%v75] : view<256xf32> -> f32
+    %v76 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v77 = view.load %sum_buf[%v75] : view<256xf32> -> f32
     %v78 = scalar.addf %v76, %v77 : f32
-    view.store %v78, %buf[%lane] : f32, view<256xf32>
+    view.store %v78, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v79 = index.cmp ult, %lane, %v20 : index
   scf.if %v79 {
     %v80 = index.add %lane, %v20 : index
-    %v81 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v82 = view.load %buf[%v80] : view<256xf32> -> f32
+    %v81 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v82 = view.load %sum_buf[%v80] : view<256xf32> -> f32
     %v83 = scalar.addf %v81, %v82 : f32
-    view.store %v83, %buf[%lane] : f32, view<256xf32>
+    view.store %v83, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v84 = index.cmp ult, %lane, %v26 : index
   scf.if %v84 {
     %v85 = index.add %lane, %v26 : index
-    %v86 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v87 = view.load %buf[%v85] : view<256xf32> -> f32
+    %v86 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v87 = view.load %sum_buf[%v85] : view<256xf32> -> f32
     %v88 = scalar.addf %v86, %v87 : f32
-    view.store %v88, %buf[%lane] : f32, view<256xf32>
+    view.store %v88, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v89 = index.cmp ult, %lane, %v32 : index
   scf.if %v89 {
     %v90 = index.add %lane, %v32 : index
-    %v91 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v92 = view.load %buf[%v90] : view<256xf32> -> f32
+    %v91 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v92 = view.load %sum_buf[%v90] : view<256xf32> -> f32
     %v93 = scalar.addf %v91, %v92 : f32
-    view.store %v93, %buf[%lane] : f32, view<256xf32>
+    view.store %v93, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v94 = index.cmp ult, %lane, %v38 : index
   scf.if %v94 {
     %v95 = index.add %lane, %v38 : index
-    %v96 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v97 = view.load %buf[%v95] : view<256xf32> -> f32
+    %v96 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v97 = view.load %sum_buf[%v95] : view<256xf32> -> f32
     %v98 = scalar.addf %v96, %v97 : f32
-    view.store %v98, %buf[%lane] : f32, view<256xf32>
+    view.store %v98, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v99 = index.cmp ult, %lane, %v44 : index
   scf.if %v99 {
     %v100 = index.add %lane, %v44 : index
-    %v101 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v102 = view.load %buf[%v100] : view<256xf32> -> f32
+    %v101 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v102 = view.load %sum_buf[%v100] : view<256xf32> -> f32
     %v103 = scalar.addf %v101, %v102 : f32
-    view.store %v103, %buf[%lane] : f32, view<256xf32>
+    view.store %v103, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v104 = index.cmp ult, %lane, %v50 : index
   scf.if %v104 {
     %v105 = index.add %lane, %v50 : index
-    %v106 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v107 = view.load %buf[%v105] : view<256xf32> -> f32
+    %v106 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v107 = view.load %sum_buf[%v105] : view<256xf32> -> f32
     %v108 = scalar.addf %v106, %v107 : f32
-    view.store %v108, %buf[%lane] : f32, view<256xf32>
+    view.store %v108, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v109 = index.cmp ult, %lane, %v56 : index
   scf.if %v109 {
     %v110 = index.add %lane, %v56 : index
-    %v111 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v112 = view.load %buf[%v110] : view<256xf32> -> f32
+    %v111 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v112 = view.load %sum_buf[%v110] : view<256xf32> -> f32
     %v113 = scalar.addf %v111, %v112 : f32
-    view.store %v113, %buf[%lane] : f32, view<256xf32>
+    view.store %v113, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  %v114 = view.load %buf[%v63] : view<256xf32> -> f32
-  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %v114 = view.load %sum_buf[%v63] : view<256xf32> -> f32
   scf.for %v115 = [%lane to %tokens step %v1] {
     %v116 = index.cmp ult, %v115, %tokens : index
     scf.if %v116 {
@@ -1844,85 +1844,86 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v15 = scalar.maxnumf %v10, %v14 : f32
     scf.yield %v15 : f32
   }
-  %lds_bytes = index.constant 1024 : offset
+  %lds_bytes = index.constant 2048 : offset
   %lds = buffer.alloca<workgroup> align(16) %lds_bytes : buffer
-  %buf = buffer.view %lds[%zero_offset] : buffer -> view<256xf32>
-  view.store %v11, %buf[%lane] : f32, view<256xf32>
+  %sum_offset = index.constant 1024 : offset
+  %max_buf = buffer.view %lds[%zero_offset] : buffer -> view<256xf32>
+  %sum_buf = buffer.view %lds[%sum_offset] : buffer -> view<256xf32>
+  view.store %v11, %max_buf[%lane] : f32, view<256xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v17 = index.cmp ult, %lane, %v16 : index
   scf.if %v17 {
     %v18 = index.add %lane, %v16 : index
-    %v19 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v20 = view.load %buf[%v18] : view<256xf32> -> f32
+    %v19 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v20 = view.load %max_buf[%v18] : view<256xf32> -> f32
     %v21 = scalar.maxnumf %v19, %v20 : f32
-    view.store %v21, %buf[%lane] : f32, view<256xf32>
+    view.store %v21, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v23 = index.cmp ult, %lane, %v22 : index
   scf.if %v23 {
     %v24 = index.add %lane, %v22 : index
-    %v25 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v26 = view.load %buf[%v24] : view<256xf32> -> f32
+    %v25 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v26 = view.load %max_buf[%v24] : view<256xf32> -> f32
     %v27 = scalar.maxnumf %v25, %v26 : f32
-    view.store %v27, %buf[%lane] : f32, view<256xf32>
+    view.store %v27, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v29 = index.cmp ult, %lane, %v28 : index
   scf.if %v29 {
     %v30 = index.add %lane, %v28 : index
-    %v31 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v32 = view.load %buf[%v30] : view<256xf32> -> f32
+    %v31 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v32 = view.load %max_buf[%v30] : view<256xf32> -> f32
     %v33 = scalar.maxnumf %v31, %v32 : f32
-    view.store %v33, %buf[%lane] : f32, view<256xf32>
+    view.store %v33, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v35 = index.cmp ult, %lane, %v34 : index
   scf.if %v35 {
     %v36 = index.add %lane, %v34 : index
-    %v37 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v38 = view.load %buf[%v36] : view<256xf32> -> f32
+    %v37 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v38 = view.load %max_buf[%v36] : view<256xf32> -> f32
     %v39 = scalar.maxnumf %v37, %v38 : f32
-    view.store %v39, %buf[%lane] : f32, view<256xf32>
+    view.store %v39, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v41 = index.cmp ult, %lane, %v40 : index
   scf.if %v41 {
     %v42 = index.add %lane, %v40 : index
-    %v43 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v44 = view.load %buf[%v42] : view<256xf32> -> f32
+    %v43 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v44 = view.load %max_buf[%v42] : view<256xf32> -> f32
     %v45 = scalar.maxnumf %v43, %v44 : f32
-    view.store %v45, %buf[%lane] : f32, view<256xf32>
+    view.store %v45, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v47 = index.cmp ult, %lane, %v46 : index
   scf.if %v47 {
     %v48 = index.add %lane, %v46 : index
-    %v49 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v50 = view.load %buf[%v48] : view<256xf32> -> f32
+    %v49 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v50 = view.load %max_buf[%v48] : view<256xf32> -> f32
     %v51 = scalar.maxnumf %v49, %v50 : f32
-    view.store %v51, %buf[%lane] : f32, view<256xf32>
+    view.store %v51, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v53 = index.cmp ult, %lane, %v52 : index
   scf.if %v53 {
     %v54 = index.add %lane, %v52 : index
-    %v55 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v56 = view.load %buf[%v54] : view<256xf32> -> f32
+    %v55 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v56 = view.load %max_buf[%v54] : view<256xf32> -> f32
     %v57 = scalar.maxnumf %v55, %v56 : f32
-    view.store %v57, %buf[%lane] : f32, view<256xf32>
+    view.store %v57, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v58 = index.cmp ult, %lane, %v6 : index
   scf.if %v58 {
     %v59 = index.add %lane, %v6 : index
-    %v60 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v61 = view.load %buf[%v59] : view<256xf32> -> f32
+    %v60 = view.load %max_buf[%lane] : view<256xf32> -> f32
+    %v61 = view.load %max_buf[%v59] : view<256xf32> -> f32
     %v62 = scalar.maxnumf %v60, %v61 : f32
-    view.store %v62, %buf[%lane] : f32, view<256xf32>
+    view.store %v62, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  %v63 = view.load %buf[%v64] : view<256xf32> -> f32
-  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %v63 = view.load %max_buf[%v64] : view<256xf32> -> f32
   %v68 = scf.for %v66 = [%lane to %v7 step %v1](%v67 = %v65 : f32) -> (f32) {
     %v69 = index.add %v4, %v66 : index
     %v70 = index.assume %v69 [range(%v69, 0, 1073741824), lt(%v69, %xsize)] : index
@@ -1932,82 +1933,81 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v74 = scalar.addf %v67, %v73 : f32
     scf.yield %v74 : f32
   }
-  view.store %v68, %buf[%lane] : f32, view<256xf32>
+  view.store %v68, %sum_buf[%lane] : f32, view<256xf32>
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v75 = index.cmp ult, %lane, %v16 : index
   scf.if %v75 {
     %v76 = index.add %lane, %v16 : index
-    %v77 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v78 = view.load %buf[%v76] : view<256xf32> -> f32
+    %v77 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v78 = view.load %sum_buf[%v76] : view<256xf32> -> f32
     %v79 = scalar.addf %v77, %v78 : f32
-    view.store %v79, %buf[%lane] : f32, view<256xf32>
+    view.store %v79, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v80 = index.cmp ult, %lane, %v22 : index
   scf.if %v80 {
     %v81 = index.add %lane, %v22 : index
-    %v82 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v83 = view.load %buf[%v81] : view<256xf32> -> f32
+    %v82 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v83 = view.load %sum_buf[%v81] : view<256xf32> -> f32
     %v84 = scalar.addf %v82, %v83 : f32
-    view.store %v84, %buf[%lane] : f32, view<256xf32>
+    view.store %v84, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v85 = index.cmp ult, %lane, %v28 : index
   scf.if %v85 {
     %v86 = index.add %lane, %v28 : index
-    %v87 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v88 = view.load %buf[%v86] : view<256xf32> -> f32
+    %v87 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v88 = view.load %sum_buf[%v86] : view<256xf32> -> f32
     %v89 = scalar.addf %v87, %v88 : f32
-    view.store %v89, %buf[%lane] : f32, view<256xf32>
+    view.store %v89, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v90 = index.cmp ult, %lane, %v34 : index
   scf.if %v90 {
     %v91 = index.add %lane, %v34 : index
-    %v92 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v93 = view.load %buf[%v91] : view<256xf32> -> f32
+    %v92 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v93 = view.load %sum_buf[%v91] : view<256xf32> -> f32
     %v94 = scalar.addf %v92, %v93 : f32
-    view.store %v94, %buf[%lane] : f32, view<256xf32>
+    view.store %v94, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v95 = index.cmp ult, %lane, %v40 : index
   scf.if %v95 {
     %v96 = index.add %lane, %v40 : index
-    %v97 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v98 = view.load %buf[%v96] : view<256xf32> -> f32
+    %v97 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v98 = view.load %sum_buf[%v96] : view<256xf32> -> f32
     %v99 = scalar.addf %v97, %v98 : f32
-    view.store %v99, %buf[%lane] : f32, view<256xf32>
+    view.store %v99, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v100 = index.cmp ult, %lane, %v46 : index
   scf.if %v100 {
     %v101 = index.add %lane, %v46 : index
-    %v102 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v103 = view.load %buf[%v101] : view<256xf32> -> f32
+    %v102 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v103 = view.load %sum_buf[%v101] : view<256xf32> -> f32
     %v104 = scalar.addf %v102, %v103 : f32
-    view.store %v104, %buf[%lane] : f32, view<256xf32>
+    view.store %v104, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v105 = index.cmp ult, %lane, %v52 : index
   scf.if %v105 {
     %v106 = index.add %lane, %v52 : index
-    %v107 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v108 = view.load %buf[%v106] : view<256xf32> -> f32
+    %v107 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v108 = view.load %sum_buf[%v106] : view<256xf32> -> f32
     %v109 = scalar.addf %v107, %v108 : f32
-    view.store %v109, %buf[%lane] : f32, view<256xf32>
+    view.store %v109, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   %v110 = index.cmp ult, %lane, %v6 : index
   scf.if %v110 {
     %v111 = index.add %lane, %v6 : index
-    %v112 = view.load %buf[%lane] : view<256xf32> -> f32
-    %v113 = view.load %buf[%v111] : view<256xf32> -> f32
+    %v112 = view.load %sum_buf[%lane] : view<256xf32> -> f32
+    %v113 = view.load %sum_buf[%v111] : view<256xf32> -> f32
     %v114 = scalar.addf %v112, %v113 : f32
-    view.store %v114, %buf[%lane] : f32, view<256xf32>
+    view.store %v114, %sum_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  %v115 = view.load %buf[%v64] : view<256xf32> -> f32
-  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %v115 = view.load %sum_buf[%v64] : view<256xf32> -> f32
   scf.for %v116 = [%lane to %tokens step %v1] {
     %v117 = index.cmp ult, %v116, %v7 : index
     scf.if %v117 {
