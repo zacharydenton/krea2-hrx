@@ -20,7 +20,8 @@ THREADS = 32 * WAVES
 # The tile is staged by the first 128 threads whatever the workgroup size, as in H3's kernel:
 # more query tiles per workgroup are there to reuse the tile, not to stage it faster.
 ONE_PASS = False
-OUT = ROOT / "kernels" / f"{STEM}.loom"
+SHIPPED = "attention_gqa_lds_f16_wmma"
+OUT = ROOT / ("kernels" if STEM == SHIPPED else "experiments") / f"{STEM}.loom"   # tuning variants stay out of the deployment set
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
 import os
