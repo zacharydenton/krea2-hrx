@@ -199,7 +199,7 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--quant", default="none", choices=["none", "w4a4"])
     ap.add_argument("--backend", default="torch", choices=["torch", "loom"], help="run the 28 blocks in Loom (int4) instead of torch")
-    ap.add_argument("--weights", default=None, help="exported block weights for --backend loom (build/weights_int8 for W8A8)")
+    ap.add_argument("--weights", default=None, help="ComfyUI's int8 ConvRot checkpoint for --backend loom (default: krea2_loom.DEFAULT_MODEL, KREA2_MODEL)")
     ap.add_argument("--model", choices=("turbo", "raw"), default="turbo", help="raw: the undistilled checkpoint (dynamic shift, guidance 3.5, 52 steps by default)")
     ap.add_argument("--checkpoint", default=None, help="bf16 ComfyUI-format checkpoint (default ~/krea2-models/krea2_<model>_bf16.safetensors)")
     ap.add_argument("--guidance", type=float, default=None, help="Krea's guidance scale, cond + g*(cond - uncond); default 0 for turbo, 3.5 for raw")

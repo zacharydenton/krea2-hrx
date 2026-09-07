@@ -5,8 +5,10 @@
 Same settings as below (1024x1024, eight Euler steps, CFG 1, seed 0, `a red fox in the
 snow`), nothing else on the GPU, the two backends alternated: ComfyUI three images, native
 three, ComfyUI two, native two. ComfyUI ran through `toolbox run -c amd-strix-halo-comfyui`
-(the container's runtime had to be restarted first). Native is `build/native-deploy` at
-commit `5eeb51e` (padded down pitch, 256x128 tiles, head-major attention operands).
+(the container's runtime had to be restarted first). Native was the exported W4A4 bundle at
+commit `5eeb51e` (padded down pitch, 256x128 tiles, head-major attention operands); since
+then the runtime reads ComfyUI's checkpoints directly and the W8A8 row below is the
+like-for-like path.
 
 | Backend | first image | warm images | warm median |
 | --- | ---: | ---: | ---: |
@@ -30,7 +32,7 @@ toolbox run -c amd-strix-halo-comfyui bash -c 'cd ~/code/ComfyUI && \
   /opt/venv/bin/python /home/zach/code/krea2-loom/tools/bench_comfyui.py --runs 3'
 source scripts/env.sh
 env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE .venv/bin/python tools/bench_native.py \
-  --bundle build/native-deploy --runs 3
+  --model ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors --runs 3
 ```
 
 ## 2026-09-05, contended box
@@ -98,7 +100,7 @@ PYTHONPATH=/home/zach/code/krea2-loom/build/comfy-bench-deps \
 # On the host, after the ComfyUI benchmark exits:
 source scripts/env.sh
 env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE \
-  python3 tools/bench_native.py --bundle build/native-deploy --runs 3
+  python3 tools/bench_native.py --model ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors --runs 3
 ```
 
 Raw logs and machine-readable results are in `build/comfy-comparison/`.

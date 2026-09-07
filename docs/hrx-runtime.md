@@ -46,7 +46,8 @@ come from the local HRX checkout. The build copies HRX and the compatible HSA
 provider into `build/runtime` and publishes libraries by rename. The C++ loader
 locates the provider beside `libkrea2.so`; a standalone process needs no
 `LD_LIBRARY_PATH` setting. Deployment includes both Krea libraries, the `runtime`
-directory, the exported model bundle, and populated caches or `loom-compile`.
+directory, ComfyUI's model files (read as they are; the tokenizer and kernel
+sources are embedded in the library), and populated caches or `loom-compile`.
 The GPU still needs Linux's amdgpu/KFD driver and normal device permissions.
 HIP, BLAS and Python are absent from the native dependency graph.
 

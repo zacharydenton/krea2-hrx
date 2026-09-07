@@ -186,7 +186,6 @@ struct Weight {
 };
 struct Weights {
   std::map<std::string, Weight> values;
-  Weights() = default;
   // A ComfyUI checkpoint's tensors as they are, renamed (an empty name skips
   // the tensor): bf16 and float32 keep their dtype, float8 e4m3fn rows with a
   // per-tensor weight_scale are dequantised to bf16, and 5-D causal-conv
@@ -285,71 +284,6 @@ struct Weights {
       values.emplace(it.name, std::move(weight));
     }
   }
-  explicit Weights(const std::string &directory) {
-    std::ifstream meta(directory + "/weights.json");
-    if (!meta)
-      throw std::runtime_error("cannot read " + directory + "/weights.json");
-    json entries;
-    meta >> entries;
-    const auto path = directory + "/weights.bin";
-    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-      throw std::runtime_error("cannot open " + path);
-    struct File {
-      int fd;
-      ~File() { close(fd); }
-    } file{fd};
-    struct stat info;
-    if (fstat(fd, &info) || info.st_size <= 0 || info.st_size % 2)
-      throw std::runtime_error("invalid weight file: " + path);
-    size_t bytes = size_t(info.st_size);
-    // Validate every view before allocating or uploading the bundle.
-    for (auto &[name, entry] : entries.items()) {
-      auto dims = entry["shape"].get<std::vector<int>>();
-      if (dims.empty())
-        throw std::runtime_error("empty weight shape: " + name);
-      size_t count = 1;
-      for (int n : dims) {
-        if (n < 1 || count > size_t(INT32_MAX) / size_t(n))
-          throw std::runtime_error("invalid weight dimensions");
-        count *= n;
-      }
-      size_t offset = entry["offset"], length = entry["bytes"];
-      const bool f32 = entry.value("dtype", "bf16") == "f32";
-      if (length != count * (f32 ? 4 : 2) || offset % (f32 ? 4 : 2) ||
-          offset > bytes || length > bytes - offset || count > INT32_MAX)
-        throw std::runtime_error("invalid weight span: " + name);
-      Tensor view;
-      view.rows = 1;
-      view.cols = int(count);
-      Weight weight{std::move(view), std::move(dims)};
-      weight.f32 = f32 ? reinterpret_cast<const float *>(1) : nullptr;
-      values.emplace(name, std::move(weight));
-    }
-    void *mapped = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mapped == MAP_FAILED)
-      throw std::runtime_error("cannot map " + path);
-    struct Mapping {
-      void *p;
-      size_t bytes;
-      ~Mapping() { munmap(p, bytes); }
-    } mapping{mapped, bytes};
-    auto storage = device_storage(bytes);
-    gpu::copy(storage.get(), mapped, bytes);
-    const char *mapped_bytes = static_cast<const char *>(mapped);
-    for (auto &[name, weight] : values) {
-      size_t offset = entries.at(name).at("offset");
-      weight.t.storage = storage;
-      char *data = static_cast<char *>(storage.get()) + offset;
-      if (weight.f32) {
-        weight.f32 = reinterpret_cast<const float *>(data);
-        weight.bf16_of_f32(mapped_bytes + offset, weight.count());
-      } else {
-        weight.t.ptr = reinterpret_cast<B *>(data);
-      }
-    }
-  }
-
   const Weight &operator[](const std::string &name) const {
     return values.at(name);
   }

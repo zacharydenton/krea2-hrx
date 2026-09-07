@@ -5,6 +5,7 @@
 #include <fstream>
 #include <hrx_runtime.h>
 #include <iostream>
+#include <vector>
 
 static int outstanding = 0, allocations = 0;
 extern "C" hrx_status_t __real_hrx_buffer_allocate(hrx_stream_t, size_t,
@@ -34,50 +35,52 @@ int main(int argc, char **argv) {
   assert(argc == 2);
   const auto dir = std::filesystem::path(argv[1]) / "session-fixture";
   std::filesystem::create_directory(dir);
-  std::ofstream(dir / "launch.txt") << "3 16 128 1 64 8 6144 16512 4 4\n";
-  std::ofstream(dir / "manifest.txt") << "";
-  std::ofstream(dir / "weights.bin") << "incomplete weights";
+  const char *valid = "3 16 256 4 64 8 6144 16448 4 8\n";
+  std::ofstream(dir / "launch.txt") << valid;
+  // A checkpoint with one block's wq only: every other tensor is missing.
+  const auto checkpoint = dir / "incomplete.safetensors";
+  {
+    const std::string header =
+        R"({"blocks.0.attn.wq.weight":{"dtype":"I8","shape":[16,6144],"data_offsets":[0,98304]}})";
+    std::ofstream f(checkpoint, std::ios::binary);
+    uint64_t length = header.size();
+    f.write((const char *)&length, 8);
+    f << header;
+    std::vector<char> zeros(98304);
+    f.write(zeros.data(), zeros.size());
+  }
   for (int i = 0; i < 3; ++i) {
     krea2_session *session = nullptr;
     char error[4096];
-    assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
-                        sizeof(error)) == KREA2_ERROR);
+    assert(krea2_create(checkpoint.c_str(), dir.c_str(), 16, 1, &session,
+                        error, sizeof(error)) == KREA2_ERROR);
     assert(!session);
     assert(std::string(error).find("missing tensor") != std::string::npos);
     assert(outstanding == 0);
   }
-  assert(allocations == 3);
-  // Invalid metadata must be rejected before allocating weights.
-  std::ofstream(dir / "launch.txt") << "3 16 128 0 64 8 6144 16512 4 4\n";
+  // An incomplete checkpoint is rejected before any device allocation.
+  assert(allocations == 0);
+  // Invalid metadata must be rejected before reading weights: a raster group
+  // of 0, an old version, the wrong wave count, a dense down-projection pitch,
+  // a 128-row tile for int8 (the int8 family has only the 256-row one), a bad
+  // attention width, and a missing field.
   krea2_session *session = nullptr;
   char error[4096];
-  assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
-                      sizeof(error)) == KREA2_INVALID_ARGUMENT);
-  assert(allocations == 3 && outstanding == 0);
-  std::ofstream(dir / "launch.txt") << "2 16 1 64 8\n";
-  assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
-                      sizeof(error)) == KREA2_INVALID_ARGUMENT);
-  assert(allocations == 3 && outstanding == 0);
-  std::ofstream(dir / "launch.txt") << "3 16 128 1 64 4 6144 16512 4 4\n";
-  assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
-                      sizeof(error)) == KREA2_INVALID_ARGUMENT);
-  assert(allocations == 3 && outstanding == 0);
-  // A dense down-projection pitch or a 256-row tile below 4096 tokens is a
-  // bundle built by a different rule.
-  for (const char *metadata : {"3 16 128 1 64 8 6144 16384 4 4\n", "3 16 256 4 64 8 6144 16512 4 4\n",
-                               "3 16 128 1 64 8 6144 16512 6 4\n", "3 16 128 1 64 8 6144 16512 4\n",
-                               "3 16 128 1 64 8 6144 16512 4 8\n"}) {
+  for (const char *metadata :
+       {"3 16 256 0 64 8 6144 16448 4 8\n", "2 16 1 64 8\n",
+        "3 16 256 4 64 4 6144 16448 4 8\n", "3 16 256 4 64 8 6144 16384 4 8\n",
+        "3 16 128 1 64 8 6144 16448 4 8\n", "3 16 256 4 64 8 6144 16448 6 8\n",
+        "3 16 256 4 64 8 6144 16448 4\n"}) {
     std::ofstream(dir / "launch.txt") << metadata;
-    assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
-                        sizeof(error)) == KREA2_INVALID_ARGUMENT);
-    assert(allocations == 3 && outstanding == 0);
+    assert(krea2_create(checkpoint.c_str(), dir.c_str(), 16, 1, &session,
+                        error, sizeof(error)) == KREA2_INVALID_ARGUMENT);
+    assert(allocations == 0 && outstanding == 0);
   }
-  // A consistent int8 bundle against int4 weights is only known once the
-  // weights' manifest is read: rejected after that one allocation, released.
-  std::ofstream(dir / "launch.txt") << "3 16 256 4 64 8 6144 16448 4 8\n";
+  // A path that is not a checkpoint.
+  std::ofstream(dir / "launch.txt") << valid;
   assert(krea2_create(dir.c_str(), dir.c_str(), 16, 1, &session, error,
-                      sizeof(error)) == KREA2_INVALID_ARGUMENT);
-  assert(std::string(error).find("int8") != std::string::npos);
-  assert(allocations == 4 && outstanding == 0);
+                      sizeof(error)) == KREA2_ERROR);
+  assert(std::string(error).find(".safetensors") != std::string::npos);
+  assert(allocations == 0 && outstanding == 0);
   std::cout << "PASS native constructor cleanup and launch metadata\n";
 }

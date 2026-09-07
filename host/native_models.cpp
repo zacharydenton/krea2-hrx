@@ -1,5 +1,7 @@
 #include "native_models.h"
 #include "embedded.h"
+#include <cctype>
+#include <filesystem>
 namespace krea_native {
 static Tensor columns(const Tensor &x, int start, int n) {
   Tensor y(x.rows, n);
@@ -223,11 +225,41 @@ Models::Models(const std::string &checkpoint, const std::string &text_encoder,
       block_tables(28 * 6, 6144) {
   tables();
 }
-Models::Models(const std::string &root)
-    : text(root + "/text"), transformer(root + "/transformer"),
-      vae(root + "/vae"), tokenizer(root + "/tokenizer.json"),
-      block_tables(28 * 6, 6144) {
-  tables();
+Models::Models(const ComfyFiles &files)
+    : Models(files.checkpoint, files.text_encoder, files.vae) {}
+ComfyFiles resolve_comfy_files(const std::string &model,
+                               const std::string &text_encoder,
+                               const std::string &vae, int distilled) {
+  namespace fs = std::filesystem;
+  ComfyFiles files;
+  fs::path checkpoint = fs::absolute(model);
+  if (!fs::is_regular_file(checkpoint))
+    throw std::invalid_argument("cannot read " + checkpoint.string());
+  files.checkpoint = checkpoint.string();
+  fs::path root = checkpoint.parent_path().parent_path();
+  files.text_encoder = text_encoder;
+  if (files.text_encoder.empty())
+    for (const char *name : {"qwen3vl_4b_bf16.safetensors", "qwen3vl_4b_fp8_scaled.safetensors"})
+      if (fs::is_regular_file(root / "text_encoders" / name)) {
+        files.text_encoder = (root / "text_encoders" / name).string();
+        break;
+      }
+  files.vae = vae;
+  if (files.vae.empty() && fs::is_regular_file(root / "vae" / "qwen_image_vae.safetensors"))
+    files.vae = (root / "vae" / "qwen_image_vae.safetensors").string();
+  if (files.text_encoder.empty() || files.vae.empty())
+    throw std::invalid_argument(
+        "text encoder and VAE not found beside " + checkpoint.string() +
+        " (expected <models>/text_encoders/qwen3vl_4b_{bf16,fp8_scaled}.safetensors and "
+        "<models>/vae/qwen_image_vae.safetensors; pass them explicitly)");
+  if (distilled < 0) {
+    std::string name = checkpoint.filename().string();
+    for (auto &ch : name)
+      ch = char(std::tolower((unsigned char)ch));
+    distilled = name.find("raw") == std::string::npos;
+  }
+  files.distilled = distilled != 0;
+  return files;
 }
 void Models::tables() {
   for (int i = 0; i < 28; ++i) {

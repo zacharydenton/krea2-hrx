@@ -13,6 +13,8 @@ import numpy as np
 import torch
 
 ROOT = Path(__file__).resolve().parent
+# ComfyUI's int8 ConvRot checkpoint (KREA2_MODEL overrides): the block weights are read from it as they are.
+DEFAULT_MODEL = Path(os.environ.get("KREA2_MODEL") or Path.home() / "comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
 from scripts.build_kernels import build as build_kernels
 
 _ABI = 2
@@ -29,19 +31,16 @@ class Krea2Blocks:
         self.tokens, self.layers = tokens, layers
         if not 1 <= layers <= 28:
             raise ValueError("layers must be 1..28")
-        weights = Path(weights or ROOT / "build/weights")
+        weights = Path(weights or DEFAULT_MODEL)
         library = Path(library or ROOT / "build/libkrea2.so")
         native = ctypes.CDLL(str(library))
         native.krea2_abi_version.restype = ctypes.c_uint32
         if native.krea2_abi_version() != _ABI:
             raise Krea2Error("ABI mismatch; rebuild with scripts/build_host.sh")
-        if weights.suffix == ".safetensors":  # ComfyUI's checkpoint, read directly: its rows' dtype decides
-            with weights.open("rb") as f:
-                header = json.loads(f.read(int.from_bytes(f.read(8), "little")))
-            bits = 8 if header["blocks.0.attn.wq.weight"]["dtype"] == "I8" else 4
-        else:
-            config = weights / "config.json"
-            bits = json.loads(config.read_text()).get("bits", 4) if config.is_file() else 4
+        # ComfyUI's int8 ConvRot checkpoint, read directly; its rows' dtype decides the GEMM family.
+        with weights.open("rb") as f:
+            header = json.loads(f.read(int.from_bytes(f.read(8), "little")))
+        bits = 8 if header["blocks.0.attn.wq.weight"]["dtype"] == "I8" else 4
         kernels = build_kernels(tokens, bits)
         native.krea2_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p, ctypes.c_size_t]
         native.krea2_run.argtypes = [ctypes.c_void_p, _U16P, ctypes.c_size_t, _F32P, ctypes.c_size_t, _F32P, _F32P, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]

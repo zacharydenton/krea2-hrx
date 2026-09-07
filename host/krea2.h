@@ -12,7 +12,7 @@ typedef struct krea2_session krea2_session;
 uint32_t krea2_abi_version(void);
 // kernels_dir holds the HSACOs and launch.txt produced by scripts/build_kernels.py
 // for exactly `tokens` (16..16896), targeting gfx1151; weights_dir is ComfyUI's int8 ConvRot
-// checkpoint (a .safetensors file, read as it is) or an exported directory (weights.bin + manifest.txt).
+// checkpoint (a .safetensors file, read as it is).
 int krea2_create(const char *weights_dir, const char *kernels_dir, int tokens, int layers,
                  krea2_session **out_session, char *error, size_t error_capacity);
 // x: f16 [tokens][6144] in and out (the residual stream after all blocks);

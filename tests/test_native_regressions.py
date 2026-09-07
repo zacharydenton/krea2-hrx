@@ -1,6 +1,6 @@
 """GPU scheduler, modulation, and resolution reuse checks without a Torch model.
 
-Requires scripts/build_native.sh and build/native-deploy. Torch is only an oracle.
+Requires scripts/build_native.sh and ComfyUI's checkpoint (krea2_loom.DEFAULT_MODEL). Torch is only an oracle.
 """
 import ctypes as C
 import json
@@ -51,27 +51,24 @@ def scheduler_check(root):
     print("PASS CUDA scheduler: all 5,050 steps across step counts 1..100, exact bf16 outputs", flush=True)
 
 
-def modulation_check(root, bundle):
+def modulation_check(root, checkpoint):
     rng = np.random.default_rng(33)
     rng.normal(size=(12, 2560)).astype(np.float32).tofile(root / "text.bin")
     rng.normal(size=(16, 6144)).astype(np.float32).tofile(root / "hidden.bin")
-    subprocess.run([str(BIN / "krea2-native-components"), str(bundle), str(root)], check=True)
+    subprocess.run([str(BIN / "krea2-native-components"), str(checkpoint), str(root)], check=True)
     mod = torch.from_numpy(np.fromfile(root / "mod.bin", np.float32)).cuda().bfloat16()
-    meta = json.loads((bundle / "transformer/weights.json").read_text())
     expected = []
-    with (bundle / "transformer/weights.bin").open("rb") as weights:
+    from safetensors import safe_open
+    with safe_open(str(checkpoint), framework="pt", device="cuda") as f:
         for i in range(28):
-            entry = meta[f"blocks.{i}.mod.lin"]
-            weights.seek(entry["offset"])
-            raw = np.frombuffer(weights.read(entry["bytes"]), np.uint16).copy()
-            table = torch.from_numpy(raw).view(torch.bfloat16).cuda()
+            table = f.get_tensor(f"blocks.{i}.mod.lin").to(torch.bfloat16)
             expected.append((mod + table).float().cpu().numpy())
     got = np.fromfile(root / "block_mod.bin", np.float32).reshape(28, -1)
     np.testing.assert_array_equal(got, np.stack(expected))
     print("PASS device modulation: all 28 tables exactly match bf16 Torch addition", flush=True)
 
 
-def pipeline_check(root, bundle):
+def pipeline_check(root, checkpoint):
     lib = C.CDLL(str(BIN / "libkrea2_pipeline.so"))
     ptr, size, char = C.c_void_p, C.c_size_t, C.c_char_p
     lib.krea2_pipeline_create.argtypes = [char, char, C.POINTER(ptr), char, size]
@@ -82,28 +79,34 @@ def pipeline_check(root, bundle):
     lib.krea2_decode.argtypes = [ptr, ptr, size, C.c_int, C.c_int, ptr, size, char, size]
     lib.krea2_generate.argtypes = [ptr, char, C.c_int, C.c_int, C.c_int, C.c_uint64, ptr, size, ptr, size, char, size]
     session, error = ptr(), C.create_string_buffer(4096)
-    # Missing JSON files must identify the exact path through the C ABI.
-    missing = root / "missing"
+    # Missing files must identify the exact path through the C ABI.
+    missing = root / "models" / "diffusion_models" / "missing.safetensors"
+    missing.parent.mkdir(parents=True)
     assert lib.krea2_pipeline_create(os.fsencode(missing), None, C.byref(session), error, len(error)) != 0
-    assert os.fsencode(missing / "native.json") in error.value and not session
-    missing.mkdir()
-    (missing / "native.json").write_text('{"version":1,"model":"krea2-turbo"}')
-    assert lib.krea2_pipeline_create(os.fsencode(missing), None, C.byref(session), error, len(error)) != 0
-    assert os.fsencode(missing / "text/weights.json") in error.value and not session
-    print("PASS missing bundle JSON errors include file paths", flush=True)
+    assert os.fsencode(missing) in error.value and not session
+    # A checkpoint without the text encoder and VAE beside it names what is expected.
+    lonely = root / "models" / "diffusion_models" / "lonely.safetensors"
+    lonely.symlink_to(checkpoint)
+    assert lib.krea2_pipeline_create(os.fsencode(lonely), None, C.byref(session), error, len(error)) != 0
+    assert b"text encoder" in error.value and b"text_encoders" in error.value and not session
+    print("PASS missing checkpoint and sibling errors include file paths", flush=True)
 
-    # Only private symlinks are removed; source bundle files are untouched.
-    private = root / "bundle"
-    private.mkdir()
-    for name in ("native.json", "text", "transformer", "vae", "tokenizer.json", "sources", "kernels"):
-        (private / name).symlink_to(bundle / name)
-    (private / "blocks").mkdir()
-    for name in ("weights.bin", "manifest.txt"):
-        (private / "blocks" / name).symlink_to(bundle / "blocks" / name)
+    # A private tree of symlinks in ComfyUI's layout; the model link is removed
+    # after the first call and the resident weights carry on.
+    models = checkpoint.parent.parent
+    private = root / "private"
+    for sub, name in (("diffusion_models", checkpoint.name), ("vae", "qwen_image_vae.safetensors")):
+        (private / sub).mkdir(parents=True)
+        (private / sub / name).symlink_to(models / sub / name)
+    (private / "text_encoders").mkdir()
+    for name in ("qwen3vl_4b_bf16.safetensors", "qwen3vl_4b_fp8_scaled.safetensors"):
+        if (models / "text_encoders" / name).is_file():
+            (private / "text_encoders" / name).symlink_to(models / "text_encoders" / name)
+            break
     def call(fn, *args):
         if fn(*args, error, len(error)):
             raise RuntimeError(error.value.decode())
-    call(lib.krea2_pipeline_create, os.fsencode(private), None, C.byref(session))
+    call(lib.krea2_pipeline_create, os.fsencode(private / "diffusion_models" / checkpoint.name), None, C.byref(session))
     try:
         prompt = b"a red fox in the snow"
         count = size()
@@ -119,8 +122,7 @@ def pipeline_check(root, bundle):
                  latents.ctypes.data, latents.size, w, h, timestep, out.ctypes.data, out.size)
             return out
         first = forward(initial, 64, 64, .75)
-        (private / "blocks/weights.bin").unlink()
-        (private / "blocks/manifest.txt").unlink()
+        (private / "diffusion_models" / checkpoint.name).unlink()
         forward(rectangle, 64, 128, .75)
         np.testing.assert_array_equal(forward(initial, 64, 64, .75), first)
         print("PASS 64x64 -> 64x128 -> 64x64: exact output, no weight file available after first call", flush=True)
@@ -142,7 +144,8 @@ def pipeline_check(root, bundle):
 
 
 def main():
-    bundle = (ROOT / "build/native-deploy").resolve()
+    from krea2_loom import DEFAULT_MODEL
+    bundle = Path(DEFAULT_MODEL).resolve()
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         with torch.no_grad():

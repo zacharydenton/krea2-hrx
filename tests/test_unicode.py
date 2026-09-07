@@ -10,7 +10,7 @@ lib.tok_free.argtypes = [C.c_void_p]
 lib.tok_encode.argtypes = [C.c_void_p, C.c_char_p, C.POINTER(C.c_int32)]
 lib.nfc.argtypes = [C.c_char_p, C.c_char_p]
 lib.hash.argtypes = [C.c_char_p, C.c_size_t, C.c_char_p]
-path = str(ROOT / "build/native/tokenizer.json")
+path = str(ROOT / "assets/tokenizer.json")
 tok = lib.tok_create(path.encode())
 assert tok
 ref = Tokenizer.from_file(path)

@@ -10,14 +10,13 @@ extern "C" {
 #define KREA2_PIPELINE_ABI_VERSION 2u
 typedef struct krea2_pipeline krea2_pipeline;
 uint32_t krea2_pipeline_abi_version(void);
-// bundle is ComfyUI's diffusion model checkpoint (a .safetensors file such as
-// diffusion_models/krea2_turbo_int8_convrot.safetensors, with the text encoder
-// and VAE found beside it in ComfyUI's layout) or a directory produced by
-// tools/export_native.py. compiler names a native loom-compile executable, or
-// NULL to use LOOM_COMPILE/PATH. Compilation only occurs when preparing an
-// unseen sequence length; compiled kernels are cached (in the bundle, or under
-// $XDG_CACHE_HOME/krea2-loom for a checkpoint).
-int krea2_pipeline_create(const char *bundle, const char *compiler,
+// model is ComfyUI's int8 ConvRot diffusion model checkpoint (for example
+// diffusion_models/krea2_turbo_int8_convrot.safetensors); the text encoder and
+// VAE are found beside it in ComfyUI's models layout. compiler names a native
+// loom-compile executable, or NULL to use LOOM_COMPILE/PATH. Compilation only
+// occurs when preparing an unseen sequence length; compiled kernels are cached
+// under $XDG_CACHE_HOME/krea2-loom (or ~/.cache/krea2-loom).
+int krea2_pipeline_create(const char *model, const char *compiler,
                           krea2_pipeline **out, char *error,
                           size_t error_capacity);
 // ComfyUI's files named explicitly: the int8 ConvRot diffusion model, the

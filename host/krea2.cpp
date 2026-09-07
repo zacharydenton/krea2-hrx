@@ -39,61 +39,23 @@ constexpr int QKVG = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN; // 15360
 constexpr int GATE_OFFSET = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 constexpr int THREADS = 256;
 
-// A tensor's home on the device, and where its bytes come from: a span of
-// weights.bin (the exported manifest layout), or, for a ComfyUI checkpoint
-// read directly, a run of row segments from the safetensors mapping (the fused
-// qkv|gate and interleaved gate|up operands are assembled here) or a small
-// host-built array (their per-row scales). GEMM weights ("<name>.q": int4
-// nibbles [N][K/2] as torch.uint8, or int8 rows [N][K] as torch.int8) are
-// re-pitched on upload to their padded row pitch; everything else keeps its
-// layout.
+// A tensor's home on the device, and where its bytes come from: a run of row
+// segments of ComfyUI's checkpoint mapping (the fused qkv|gate and interleaved
+// gate|up operands are assembled here) or a small host-built array (their
+// per-row scales). GEMM weights ("<name>.q", int8 rows [N][K]) are re-pitched
+// on upload to their padded row pitch; everything else keeps its layout.
 struct Segment {
   const char *source;
   size_t rows;
 };
 struct Span {
-  size_t offset = 0, bytes = 0;
+  size_t bytes = 0; // as the session counts the tensor (its file bytes)
   size_t device_offset = 0, device_bytes = 0;
   size_t rows = 0, row_bytes = 0, device_row_bytes = 0; // .q tensors only
   int bits = 0;                                          // .q tensors only
-  std::vector<Segment> segments; // checkpoint rows, in order (else offset)
-  std::vector<char> host;        // host-built bytes (else offset/segments)
+  std::vector<Segment> segments; // checkpoint rows, in order
+  std::vector<char> host;        // host-built bytes (else segments)
 };
-
-std::map<std::string, Span> read_manifest(const std::string &path) {
-  std::map<std::string, Span> spans;
-  std::ifstream in(path);
-  if (!in)
-    throw std::runtime_error("cannot read " + path);
-  std::string line;
-  while (std::getline(in, line)) {
-    std::istringstream ls(line);
-    std::string name, dtype, shape;
-    size_t offset, bytes;
-    if (!(ls >> name >> offset >> bytes >> dtype >> shape))
-      continue;
-    Span span;
-    span.offset = offset;
-    span.bytes = bytes;
-    size_t rows = 0, columns = 0;
-    char x = 0;
-    std::istringstream ss(shape);
-    if (name.size() > 2 && name.compare(name.size() - 2, 2, ".q") == 0 &&
-        ss >> rows >> x >> columns && x == 'x' && rows && columns &&
-        rows * columns == bytes) {
-      span.bits = dtype == "torch.int8" ? 8 : 4;
-      int k = int(columns * 8 / span.bits); // K elements per row
-      span.rows = rows;
-      span.row_bytes = columns;
-      span.device_row_bytes =
-          size_t(krea2_shape::gemm_pitch(k, span.bits)) * span.bits / 8;
-    }
-    span.device_bytes =
-        span.rows ? span.rows * span.device_row_bytes : span.bytes;
-    spans[name] = span;
-  }
-  return spans;
-}
 
 // ComfyUI's checkpoint as it is: per block the int8 ConvRot rows of wq, wk,
 // wv and the attention gate become one qkv|gate operand, the MLP gate and up
@@ -209,62 +171,13 @@ struct krea2_weights {
   std::map<std::string, Span> spans;
   std::shared_ptr<void> storage;
   int bits = 4;
-  // directory: an exported weights directory (manifest.txt + weights.bin), or
-  // a ComfyUI int8 ConvRot checkpoint (.safetensors) read as it is.
-  explicit krea2_weights(const std::string &directory) {
-    std::unique_ptr<krea_native::SafeTensors> checkpoint;
-    const char *mapped = nullptr;
-    size_t bytes = 0;
-    int fd = -1;
-    if (is_safetensors(directory)) {
-      checkpoint = std::make_unique<krea_native::SafeTensors>(directory);
-      spans = checkpoint_spans(*checkpoint, bits);
-    } else {
-      spans = read_manifest(directory + "/manifest.txt");
-      bits = 0;
-      for (const auto &[name, span] : spans)
-        if (span.bits) {
-          if (bits && bits != span.bits)
-            throw std::runtime_error("mixed GEMM operand widths in " +
-                                     directory);
-          bits = span.bits;
-        }
-      if (!bits)
-        bits = 4;
-      const auto path = directory + "/weights.bin";
-      fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-      if (fd < 0)
-        throw std::runtime_error("cannot read " + path);
-      struct stat info;
-      if (fstat(fd, &info) || info.st_size <= 0) {
-        close(fd);
-        throw std::runtime_error("invalid weight file: " + path);
-      }
-      bytes = size_t(info.st_size);
-      for (const auto &[name, span] : spans)
-        if (span.offset > bytes || span.bytes > bytes - span.offset) {
-          close(fd);
-          throw std::runtime_error("manifest span '" + name + "' runs past " +
-                                   path);
-        }
-      void *m = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-      if (m == MAP_FAILED) {
-        close(fd);
-        throw std::runtime_error("cannot map " + path);
-      }
-      mapped = static_cast<const char *>(m);
-    }
-    struct Mapping {
-      const char *p;
-      size_t bytes;
-      int fd;
-      ~Mapping() {
-        if (p)
-          munmap(const_cast<char *>(p), bytes);
-        if (fd >= 0)
-          close(fd);
-      }
-    } mapping{mapped, bytes, fd};
+  // checkpoint: ComfyUI's int8 ConvRot diffusion model (.safetensors), read
+  // as it is.
+  explicit krea2_weights(const std::string &checkpoint) {
+    if (!is_safetensors(checkpoint))
+      throw std::runtime_error(checkpoint + " is not a ComfyUI checkpoint (.safetensors)");
+    krea_native::SafeTensors file(checkpoint);
+    spans = checkpoint_spans(file, bits);
     // Device layout: each tensor at a 256-byte boundary, GEMM weights with
     // their padded row pitch.
     size_t total = 0;
@@ -283,29 +196,9 @@ struct krea2_weights {
         gpu::copy(dst, span.host.data(), span.host.size());
         continue;
       }
-      if (span.segments.empty()) { // a manifest span
-        const char *src = mapped + span.offset;
-        if (!span.rows || span.device_row_bytes == span.row_bytes) {
-          gpu::copy(dst, src, span.bytes);
-          continue;
-        }
-        // Re-pitch through host staging chunks; the pad bytes stay zero (the
-        // kernels never read them, tests/test_gemm_i4.py GEMM_KPAD).
-        size_t rows_per_chunk =
-            std::max<size_t>(1, chunk_bytes / span.device_row_bytes);
-        staging.assign(rows_per_chunk * span.device_row_bytes, 0);
-        for (size_t first = 0; first < span.rows; first += rows_per_chunk) {
-          size_t count = std::min(rows_per_chunk, span.rows - first);
-          for (size_t r = 0; r < count; ++r)
-            std::memcpy(staging.data() + r * span.device_row_bytes,
-                        src + (first + r) * span.row_bytes, span.row_bytes);
-          gpu::copy(dst + first * span.device_row_bytes, staging.data(),
-                    count * span.device_row_bytes);
-        }
-        continue;
-      }
       // Checkpoint rows: assemble the operand's rows in order, at the device
-      // pitch, a staging chunk at a time.
+      // pitch (the pad bytes stay zero: the kernels never read them,
+      // tests/test_gemm_i4.py GEMM_KPAD), a staging chunk at a time.
       const size_t pitch = span.rows ? span.device_row_bytes : span.row_bytes;
       const size_t width = span.row_bytes;
       size_t rows_per_chunk = std::max<size_t>(1, chunk_bytes / pitch);

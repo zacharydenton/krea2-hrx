@@ -709,3 +709,26 @@ bf16 for the native bundle. It now keeps float32 tensors as float32 (`dtype` in
 everywhere (bf16-stored scales, the text encoder's and VAE's, are upcast losslessly once
 at load). Nothing else in the checkpoints is float32; the text encoder and VAE files are
 entirely bf16. The bundle is otherwise unchanged; the whole-image hash moves with it.
+
+## ComfyUI's checkpoints as they are; no export (2026-09-07)
+
+The export step is gone. The block session (`krea2_create`, `Krea2Blocks`) takes ComfyUI's
+int8 ConvRot checkpoint and assembles the fused operands at upload: wq, wk, wv and the
+attention gate rows become the qkv|gate operand, the MLP gate and up rows are interleaved
+in 16-row groups, wo and down stay as they are, each with its per-row f32 scales, and the
+RMSNorm scales are the checkpoint's f32 tensors; rows are re-pitched through 16 MB host
+staging chunks. The native pipeline takes the same checkpoint for its outer tensors and
+modulation tables, ComfyUI's Qwen3-VL-4B text encoder (bf16, or the fp8_scaled file
+dequantised to bf16 at load with its per-tensor scale) and ComfyUI's Qwen-Image VAE
+(Wan-style names mapped onto the decoder's, the last temporal tap of each 3-D
+convolution), found beside the checkpoint in ComfyUI's models layout. The tokenizer
+(`assets/tokenizer.json`) and the block kernel sources are embedded in the library;
+compiled block kernels cache under `$XDG_CACHE_HOME/krea2-loom/blocks-gfx1151-v1`.
+
+Checks: a full 28-block forward from the checkpoint equals the one from the previous
+exported layout bit for bit; the Turbo image hash (`e438c3da…`) and a Raw guided run
+are identical between the two; the native component comparison against the Python
+reference improved to a complete-transformer cosine of 0.99889 (0.99025 with the exported
+bf16-cast norms). Loading the 12 GB of int8 rows takes about 17 s (row-by-row assembly
+from the mapped file) against 13 s for the flat export. bf16 checkpoints are not
+quantised at load: the int8 ConvRot file is the weight source, as in ComfyUI.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The one test command: generated kernels against their generators, every kernel test
 # against the reference, the host build, and the native blocks against the fixture.
-#   scripts/test.sh          everything (needs build/weights, build/fixture_step0.pt and the models)
+#   scripts/test.sh          everything (needs ComfyUI's checkpoint, build/fixture_step0.pt and the models)
 #   scripts/test.sh --quick  host, API and kernel regressions
 #   scripts/test.sh --native include full native pipeline comparisons
 set -uo pipefail

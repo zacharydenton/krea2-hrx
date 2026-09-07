@@ -5,7 +5,6 @@
 #include "native_models.h"
 #include "native_profile.h"
 #include "native_schedule.h"
-#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -13,17 +12,9 @@
 #include <random>
 
 using namespace krea_native;
-// Where a pipeline's pieces come from: an exported bundle directory, or
-// ComfyUI's files as they are.
-struct Sources {
-  std::string blocks;      // the block weights: a checkpoint file or bundle/blocks
-  std::string kernel_cache; // compiled block kernels go here
-  std::string kernel_sources; // .loom sources, or empty for the embedded ones
-  bool distilled = true;
-};
 struct krea2_pipeline {
-  Sources sources;
-  std::string compiler;
+  ComfyFiles files;
+  std::string compiler, kernel_cache;
   Models models;
   std::mutex mutex;
   std::shared_ptr<BufferPool> pool = std::make_shared<BufferPool>();
@@ -33,13 +24,10 @@ struct krea2_pipeline {
   krea2_session *blocks = nullptr;
   int block_tokens = 0;
   bool distilled = true; // Turbo: fixed shift, no guidance; Raw: dynamic shift
-  krea2_pipeline(const std::string &bundle, std::string c, bool d)
-      : sources{bundle + "/blocks", bundle + "/kernels", bundle + "/sources", d},
-        compiler(std::move(c)), models(bundle), distilled(d) {}
-  krea2_pipeline(const std::string &checkpoint, const std::string &text,
-                 const std::string &vae, std::string c, bool d)
-      : sources{checkpoint, user_cache_directory() + "/blocks-gfx1151-v1", "", d},
-        compiler(std::move(c)), models(checkpoint, text, vae), distilled(d) {}
+  krea2_pipeline(ComfyFiles f, std::string c)
+      : files(std::move(f)), compiler(std::move(c)),
+        kernel_cache(user_cache_directory() + "/blocks-gfx1151-v1"),
+        models(files), distilled(files.distilled) {}
   ~krea2_pipeline() { krea2_destroy(blocks); }
   Tensor forward(const Tensor &latents, const Tensor &text, float t, int width,
                  int height) {
@@ -58,10 +46,9 @@ struct krea2_pipeline {
       blocks = nullptr;
       block_tokens = 0;
       if (!block_weights)
-        block_weights = krea2_load_weights(sources.blocks);
-      auto kernels =
-          prepare_kernels(sources.kernel_cache, sources.kernel_sources,
-                          compiler, tokens, krea2_weights_bits(*block_weights));
+        block_weights = krea2_load_weights(files.checkpoint);
+      auto kernels = prepare_kernels(kernel_cache, compiler, tokens,
+                                     krea2_weights_bits(*block_weights));
       blocks = krea2_create_shared(block_weights, kernels, tokens, 28);
       block_tokens = tokens;
     }
@@ -156,17 +143,6 @@ template <class F> int guard(krea2_pipeline *p, char *e, size_t n, F f) {
 extern "C" uint32_t krea2_pipeline_abi_version() {
   return KREA2_PIPELINE_ABI_VERSION;
 }
-namespace {
-bool is_safetensors(const std::string &path) {
-  return path.size() > 12 &&
-         path.compare(path.size() - 12, 12, ".safetensors") == 0;
-}
-std::string lower(std::string s) {
-  for (auto &ch : s)
-    ch = char(std::tolower((unsigned char)ch));
-  return s;
-}
-} // namespace
 extern "C" int krea2_pipeline_create_files(const char *model,
                                            const char *text_encoder,
                                            const char *vae, int distilled,
@@ -177,36 +153,14 @@ extern "C" int krea2_pipeline_create_files(const char *model,
   if (out)
     *out = nullptr;
   try {
-    namespace fs = std::filesystem;
     if (!out || !model)
       throw std::invalid_argument("model and output pointer are required");
-    fs::path checkpoint = fs::absolute(model);
-    if (!fs::is_regular_file(checkpoint))
-      throw std::invalid_argument("cannot read " + checkpoint.string());
-    // ComfyUI's layout: <models>/diffusion_models/<model>.safetensors beside
-    // <models>/text_encoders/qwen3vl_4b_*.safetensors and <models>/vae/qwen_image_vae.safetensors
-    fs::path root = checkpoint.parent_path().parent_path();
-    std::string te = text_encoder ? text_encoder : "";
-    if (te.empty())
-      for (const char *name : {"qwen3vl_4b_bf16.safetensors", "qwen3vl_4b_fp8_scaled.safetensors"})
-        if (fs::is_regular_file(root / "text_encoders" / name)) {
-          te = (root / "text_encoders" / name).string();
-          break;
-        }
-    std::string v = vae ? vae : "";
-    if (v.empty() && fs::is_regular_file(root / "vae" / "qwen_image_vae.safetensors"))
-      v = (root / "vae" / "qwen_image_vae.safetensors").string();
-    if (te.empty() || v.empty())
-      throw std::invalid_argument(
-          "text encoder and VAE not found beside " + checkpoint.string() +
-          " (expected <models>/text_encoders/qwen3vl_4b_{bf16,fp8_scaled}.safetensors and "
-          "<models>/vae/qwen_image_vae.safetensors; pass them explicitly)");
-    if (distilled < 0)
-      distilled = lower(checkpoint.filename().string()).find("raw") == std::string::npos;
+    auto files = resolve_comfy_files(model, text_encoder ? text_encoder : "",
+                                     vae ? vae : "", distilled);
     const char *env = getenv("LOOM_COMPILE");
     native_compiler(c ? c : env ? env : "loom-compile");
-    *out = new krea2_pipeline(checkpoint.string(), te, v,
-                              c ? c : env ? env : "loom-compile", distilled != 0);
+    *out = new krea2_pipeline(std::move(files),
+                              c ? c : env ? env : "loom-compile");
     return 0;
   } catch (const std::exception &ex) {
     if (e && n)
@@ -218,41 +172,9 @@ extern "C" int krea2_pipeline_create_files(const char *model,
     return 1;
   }
 }
-extern "C" int krea2_pipeline_create(const char *b, const char *c,
+extern "C" int krea2_pipeline_create(const char *model, const char *c,
                                      krea2_pipeline **out, char *e, size_t n) {
-  if (b && is_safetensors(b))
-    return krea2_pipeline_create_files(b, nullptr, nullptr, -1, c, out, e, n);
-  if (e && n)
-    e[0] = 0;
-  if (out)
-    *out = nullptr;
-  try {
-    if (!out || !b)
-      throw std::invalid_argument("bundle and output pointer are required");
-    std::ifstream f(std::string(b) + "/native.json");
-    if (!f)
-      throw std::runtime_error("cannot read " + std::string(b) +
-                               "/native.json");
-    json j;
-    f >> j;
-    const std::string model = j.at("model");
-    if (j.at("version") != 1 ||
-        (model != "krea2-turbo" && model != "krea2-raw"))
-      throw std::invalid_argument("unsupported native bundle");
-    const char *env = getenv("LOOM_COMPILE");
-    native_compiler(c ? c : env ? env : "loom-compile");
-    *out = new krea2_pipeline(b, c ? c : env ? env : "loom-compile",
-                              model == "krea2-turbo");
-    return 0;
-  } catch (const std::exception &ex) {
-    if (e && n)
-      snprintf(e, n, "%s", ex.what());
-    return 1;
-  } catch (...) {
-    if (e && n)
-      snprintf(e, n, "native initialization failed");
-    return 1;
-  }
+  return krea2_pipeline_create_files(model, nullptr, nullptr, -1, c, out, e, n);
 }
 extern "C" void krea2_pipeline_destroy(krea2_pipeline *p) { delete p; }
 extern "C" int krea2_tokenize(krea2_pipeline *p, const char *text, int32_t *out,

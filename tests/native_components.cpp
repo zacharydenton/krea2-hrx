@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
   try {
     if (argc != 3)
       return 2;
-    Models model(argv[1]);
+    Models model(resolve_comfy_files(argv[1], "", "", -1));
     std::filesystem::path dir = argv[2];
     write(dir / "condition.bin",
           model.text_fusion(read(dir / "text.bin", 2560)));

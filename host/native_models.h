@@ -2,16 +2,28 @@
 #include "native_ops.h"
 #include "native_tokenizer.h"
 namespace krea_native {
+// ComfyUI's models directory layout: <models>/diffusion_models/<checkpoint>
+// beside <models>/text_encoders/qwen3vl_4b_{bf16,fp8_scaled}.safetensors and
+// <models>/vae/qwen_image_vae.safetensors.
+struct ComfyFiles {
+  std::string checkpoint, text_encoder, vae;
+  bool distilled = true; // Turbo (fixed shift, no guidance) or Raw
+};
+// text_encoder / vae empty: found beside the checkpoint (bf16 preferred);
+// distilled -1: from the file name ("raw").
+ComfyFiles resolve_comfy_files(const std::string &checkpoint,
+                               const std::string &text_encoder,
+                               const std::string &vae, int distilled);
 struct Models {
   Ops ops;
   Weights text, transformer, vae;
   Tokenizer tokenizer;
-  explicit Models(const std::string &root);
   // ComfyUI's files as they are: the diffusion model checkpoint (its
   // non-block tensors and modulation tables), the text encoder (bf16 or
   // fp8_scaled) and the VAE; the tokenizer is embedded.
   Models(const std::string &checkpoint, const std::string &text_encoder,
          const std::string &vae_file);
+  explicit Models(const struct ComfyFiles &files);
   static constexpr size_t modulation_elements = 28 * 6 * 6144;
   Tensor lin(const Tensor &x, const Weights &w, const std::string &p) {
     return ops.linear(x, w[p + ".weight"],

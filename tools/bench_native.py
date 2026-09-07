@@ -6,6 +6,7 @@ If a repeat changes, both lossless images and a report are saved under build/.
 """
 
 import argparse
+import os
 import ctypes as C
 import hashlib
 import json
@@ -51,7 +52,9 @@ def save_mismatch(first, current, args, run):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2_pipeline.so")
-    ap.add_argument("--bundle", type=Path, default=ROOT / "build/native-deploy")
+    ap.add_argument("--bundle", "--model", dest="bundle", type=Path,
+                    default=Path(os.environ.get("KREA2_MODEL") or Path.home() / "comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors"),
+                    help="ComfyUI's int8 ConvRot checkpoint (text encoder and VAE found beside it)")
     ap.add_argument("--prompt", default="a red fox in the snow")
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--steps", type=int, default=8)

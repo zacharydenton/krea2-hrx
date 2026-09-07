@@ -9,9 +9,9 @@ int main(int argc, char **argv) {
   try {
     std::map<std::string, std::string> args;
     const std::set<std::string> options = {
-        "--bundle",   "--model",    "--text-encoder", "--vae",   "--prompt",
-        "--out",      "--compiler", "--width",        "--height", "--steps",
-        "--seed",     "--negative", "--guidance",     "--checkpoint"};
+        "--model",    "--text-encoder", "--vae",    "--prompt",   "--out",
+        "--compiler", "--width",        "--height", "--steps",    "--seed",
+        "--negative", "--guidance",     "--checkpoint"};
     for (int i = 1; i < argc; i += 2) {
       if (i + 1 == argc)
         throw std::runtime_error("every option needs a value");
@@ -20,15 +20,14 @@ int main(int argc, char **argv) {
                                  std::string(argv[i]));
       args[argv[i]] = argv[i + 1];
     }
-    if (args.count("--bundle") + args.count("--model") != 1 ||
-        !args.count("--prompt") || !args.count("--out"))
+    if (!args.count("--model") || !args.count("--prompt") || !args.count("--out"))
       throw std::runtime_error(
           "usage: krea2-generate --model diffusion_models/krea2_turbo_int8_convrot.safetensors "
           "--prompt TEXT --out IMAGE.ppm [--text-encoder FILE] [--vae FILE] "
           "[--checkpoint turbo|raw] [--compiler PATH] [--width 1024] [--height 1024] "
           "[--steps N] [--seed 0] [--negative TEXT] [--guidance G]\n"
-          "--model is ComfyUI's checkpoint (text encoder and VAE found beside it in "
-          "ComfyUI's models layout); --bundle DIR takes an exported bundle instead.\n"
+          "--model is ComfyUI's int8 ConvRot checkpoint; the text encoder and VAE are "
+          "found beside it in ComfyUI's models layout.\n"
           "steps and guidance default to the checkpoint: Turbo 8 and 0 (no guidance), "
           "Raw 52 and 3.5");
     auto integer = [&](const char *key, int fallback) {
@@ -65,24 +64,17 @@ int main(int argc, char **argv) {
     auto start = std::chrono::steady_clock::now();
     const char *compiler =
         args.count("--compiler") ? args["--compiler"].c_str() : nullptr;
-    int failed;
-    if (args.count("--model")) {
-      int distilled = -1;
-      if (args.count("--checkpoint")) {
-        if (args["--checkpoint"] != "turbo" && args["--checkpoint"] != "raw")
-          throw std::runtime_error("--checkpoint must be turbo or raw");
-        distilled = args["--checkpoint"] == "turbo";
-      }
-      failed = krea2_pipeline_create_files(
-          args["--model"].c_str(),
-          args.count("--text-encoder") ? args["--text-encoder"].c_str() : nullptr,
-          args.count("--vae") ? args["--vae"].c_str() : nullptr, distilled,
-          compiler, &p, error, sizeof(error));
-    } else {
-      failed = krea2_pipeline_create(args["--bundle"].c_str(), compiler, &p,
-                                     error, sizeof(error));
+    int distilled = -1;
+    if (args.count("--checkpoint")) {
+      if (args["--checkpoint"] != "turbo" && args["--checkpoint"] != "raw")
+        throw std::runtime_error("--checkpoint must be turbo or raw");
+      distilled = args["--checkpoint"] == "turbo";
     }
-    if (failed)
+    if (krea2_pipeline_create_files(
+            args["--model"].c_str(),
+            args.count("--text-encoder") ? args["--text-encoder"].c_str() : nullptr,
+            args.count("--vae") ? args["--vae"].c_str() : nullptr, distilled,
+            compiler, &p, error, sizeof(error)))
       throw std::runtime_error(error);
     struct Cleanup {
       krea2_pipeline *p;

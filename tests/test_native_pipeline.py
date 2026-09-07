@@ -32,7 +32,8 @@ def main():
         rc = fn(*args, err, len(err))
         if rc:
             raise RuntimeError(err.value.decode())
-    call(lib.krea2_pipeline_create, os.fsencode(ROOT / "build/native"), compiler.encode(), C.byref(session))
+    from krea2_loom import DEFAULT_MODEL
+    call(lib.krea2_pipeline_create, os.fsencode(DEFAULT_MODEL), compiler.encode(), C.byref(session))
     try:
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(str(Path.home() / "krea2-models/qwen3-vl-4b"))
@@ -84,7 +85,7 @@ def main():
             want.tofile(td / "text.bin")
             hidden = torch.linspace(-2, 2, 6144, device="cuda").bfloat16()[None, None]
             hidden.float().cpu().numpy().tofile(td / "hidden.bin")
-            subprocess.run([str(BIN / "krea2-native-components"), str(ROOT / "build/native"), str(td)], check=True)
+            subprocess.run([str(BIN / "krea2-native-components"), str(DEFAULT_MODEL), str(td)], check=True)
             e, m = reference.time_embed(torch.tensor([0.75], device="cuda", dtype=torch.bfloat16))
             for name, expected_component in (("condition", reference.text_in(states)), ("temb", e), ("mod", m), ("final", reference.final(hidden, e))):
                 a = np.fromfile(td / f"{name}.bin", np.float32)

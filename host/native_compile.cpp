@@ -32,7 +32,6 @@ std::string user_cache_directory() {
   return root.string();
 }
 std::string prepare_kernels(const std::string &cache_parent,
-                            const std::string &sources_dir,
                             const std::string &compiler, int tokens,
                             int bits) {
   if (tokens < 16 || tokens > 16896)
@@ -48,16 +47,10 @@ std::string prepare_kernels(const std::string &cache_parent,
   namespace fs = std::filesystem;
   fs::path parent = cache_parent;
   auto source_text = [&](const std::string &name) {
-    if (sources_dir.empty()) {
-      auto it = block_sources().find(name);
-      if (it == block_sources().end())
-        throw std::runtime_error("no embedded kernel source: " + name);
-      return it->second;
-    }
-    std::ifstream source(fs::path(sources_dir) / (name + ".loom"));
-    if (!source)
-      throw std::runtime_error("missing kernel source: " + name);
-    return std::string(std::istreambuf_iterator<char>(source), {});
+    auto it = block_sources().find(name);
+    if (it == block_sources().end())
+      throw std::runtime_error("no embedded kernel source: " + name);
+    return it->second;
   };
   int capacity = std::max((tokens + 47) / 32 * 32, (tokens + 63) / 64 * 64);
   // The GEMM tile, raster group and operand pitches come from gemm_shape.h,
@@ -182,11 +175,8 @@ std::string prepare_kernels(const std::string &cache_parent,
     }
   } cleanup{staging};
   for (const auto &j : jobs) {
-    fs::path source_path = sources_dir.empty()
-                               ? staging / (j.source + ".loom")
-                               : fs::path(sources_dir) / (j.source + ".loom");
-    if (sources_dir.empty())
-      std::ofstream(source_path) << source_text(j.source);
+    fs::path source_path = staging / (j.source + ".loom");
+    std::ofstream(source_path) << source_text(j.source);
     std::vector<std::string> args = {
         compiler,
         source_path.string(),
@@ -198,8 +188,7 @@ std::string prepare_kernels(const std::string &cache_parent,
       args.push_back("--config=krea2." + j.source + "." + k + "=" + v);
     run_compiler(args, staging / (j.stem + ".log"), j.source);
     fs::remove(staging / (j.stem + ".log"));
-    if (sources_dir.empty())
-      fs::remove(source_path);
+    fs::remove(source_path);
   }
   std::ofstream(staging / "launch.txt") << metadata;
   std::ofstream(staging / "signature", std::ios::binary) << signature;
