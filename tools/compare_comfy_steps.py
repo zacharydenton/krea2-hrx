@@ -19,6 +19,20 @@ sys.path.insert(0, str(ROOT))
 from krea2_loom import DEFAULT_MODEL
 
 
+# ComfyUI returns the sampler's latent with the Wan latent format applied
+# (x * std + mean); the pipeline's own decoder applies it, so undo it first.
+LATENT_MEAN = np.array([-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
+                        0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921],
+                       np.float32).reshape(1, 16, 1, 1, 1)
+LATENT_STD = np.array([2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
+                       3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160],
+                      np.float32).reshape(1, 16, 1, 1, 1)
+
+
+def sampler_latent(processed):
+    return (processed - LATENT_MEAN) / LATENT_STD
+
+
 def pack(latent):
     """ComfyUI's [1][16][1][H/8][W/8] latent as the C API's [tokens][64]."""
     _, c, _, h, w = latent.shape
@@ -77,7 +91,7 @@ def main():
                  state.ctypes.data, state.size, size, size, float(sigma),
                  velocity.ctypes.data, velocity.size)
             step = state + velocity * np.float32(sigmas[i + 1] - sigma)
-            after = pack(states[i + 1]) if i + 1 < steps else pack(np.load(a.dumps / "latent_out.npy"))
+            after = pack(states[i + 1]) if i + 1 < steps else pack(sampler_latent(np.load(a.dumps / "latent_out.npy")))
             same = (f"step {i} on ComfyUI's state: velocity cosine {cosine(velocity, truth):.6f}  "
                     f"rel rms {np.linalg.norm(velocity - truth) / np.linalg.norm(truth):.4f}  "
                     f"next state cosine {cosine(step, after):.6f}")
@@ -87,7 +101,7 @@ def main():
             drift = cosine(chained, state)
             chained = chained + velocity * np.float32(sigmas[i + 1] - sigmas[i])
             print(f"{same}  chained state cosine {drift:.6f}")
-        truth = pack(np.load(a.dumps / "latent_out.npy"))
+        truth = pack(sampler_latent(np.load(a.dumps / "latent_out.npy")))
         print(f"final latent: cosine {cosine(chained, truth):.6f}  "
               f"rel rms {np.linalg.norm(chained - truth) / np.linalg.norm(truth):.4f}")
     finally:

@@ -61,7 +61,7 @@ seed 0, `a red fox in the snow`. Every run of each backend produced the same RGB
 | text encoding | 0.3-0.6 s | 0.2 s |
 | VAE decode | 0.66 s | 3.2 s (tiled) |
 | first image of a process | 57.3 s | 28.4 s |
-| image PSNR against the bf16 pipeline, seed 0 | | 26.8 dB |
+| image PSNR against the bf16 pipeline, seed 0 | | 26.8 dB (on the earlier kernels) |
 
 Both run the same int8 ConvRot rows from the same file; this runtime feeds them int8
 per-token activations on the `iu8` WMMA instead of dequantizing to bf16, and is 1.3x
@@ -92,10 +92,8 @@ That is what int8 GEMMs summing in a different order look like: no block is an o
 The residual stream is bf16 with ComfyUI's three rounding points inside a block, and
 attention is the fp16 kernel because ComfyUI calls PyTorch SDPA in bf16; the int4-QK
 kernel is 5.4 ms faster per block but only reaches cosine 0.995 on the same test.
-Eight steps from the same noise still end at a visibly different picture (final latent
-cosine 0.81): the last Euler step subtracts two nearly equal terms, so a 1.4% velocity
-difference becomes a large latent one. The images are the same fox in the same pose and
-light, ours slightly softer. `docs/notes.md` has the full measurements.
+`docs/notes.md` has the full measurements, including how ComfyUI's returned latent has to
+be un-scaled before an end-to-end comparison means anything.
 
 ## Status
 
@@ -110,6 +108,11 @@ Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
 | text encoding and fusion | 0.2 s | 0.2 s (prompt and negative) |
 | image PSNR vs the bf16 pipeline (seed 0) | 26.8 dB (latent 17.9) | 28.1 dB (latent 18.3) |
 | 28-block update cosine vs bf16 on the fixture | 0.99910 | 0.9986 |
+
+The PSNR row predates the bf16 residual stream and the fp16 attention default and has not
+been re-measured: the bf16 checkpoint it compares against is no longer on this box, and
+both changes move the kernels toward it. The agreement with ComfyUI above is the current
+evidence.
 
 Where a W4A4 forward goes (`tests/test_blocks.py --profile`; in W8A8 the four GEMMs are 80%
 of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
@@ -141,8 +144,8 @@ Kernel rates at 4115 tokens on an idle box (`tools/bench_i4_gemm.py`,
 At 8192 tokens the GEMMs reach 84-87 TOPS and attention 27 TFLOP/s; at 16384 tokens
 attention 30 TFLOP/s.
 
-Quality against the bf16 diffusers pipeline on the same initial noise (seed 0): W8A8
-26.8 dB image PSNR, W4A4 18.9 dB. The W4A4 picture is the same fox in the same pose and
+Quality against the bf16 diffusers pipeline on the same initial noise (seed 0), on the
+kernels of the day: W8A8 26.8 dB image PSNR, W4A4 18.9 dB. The W4A4 picture is the same fox in the same pose and
 light with different fur and snow detail; a published int4 ConvRot checkpoint of the same
 model that keeps 96 of its 224 block linears in int8 reports a minimum image PSNR of
 17.7 dB against bf16, and this port quantizes every block GEMM to int4 with per-row

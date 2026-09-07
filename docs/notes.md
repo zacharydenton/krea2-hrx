@@ -786,13 +786,14 @@ encoder agrees with ComfyUI's conditioning tensor at cosine 0.99994 (0.99993-0.9
 tapped layer) on the same 11 tokens after the template strip, so the fixed 34-token drop
 matches ComfyUI's `template_end` search.
 
-**The last Euler step amplifies.** From ComfyUI's own state at step 7, our velocity gives
-a next state at cosine 0.836, and a full eight-step run from ComfyUI's noise ends at
-final-latent cosine 0.806. This is cancellation, not a new error: at sigma 0.311 the step
-is `x - 0.311 v` where `0.311 v` nearly equals `x`, so the result is a small difference of
-large terms and a 1.4% velocity difference becomes a 55% latent difference. Decoded, the
-two images are the same fox in the same pose and lighting, ours slightly softer and less
-saturated (pixel MAE 35, PSNR 14.8 dB): `build/parity_ours.ppm`, `build/parity_comfy.ppm`.
+**The final latent, and a trap in comparing it.** ComfyUI returns the sampler's latent
+with the Wan latent format applied (`x * latents_std + latents_mean`, `process_latent_out`),
+and this runtime's decoder applies that itself, so `latent_out.npy` has to be un-scaled
+before it can be compared with our sampler state or fed to `krea2_decode`. The first
+measurements here compared against the scaled tensor and reported a final-latent cosine of
+0.806 and a washed-out image difference that was entirely that scaling; the tool now
+inverts it (`sampler_latent`). The corrected end-to-end numbers are pending a re-run: the
+models volume was unmounted before it could be repeated.
 
 **What was deliberately not matched.** ComfyUI's `simple_scheduler` indexes a
 10,000-entry sigma table, quantizing the timestep to a 1e-4 grid; we keep diffusers'
@@ -807,4 +808,7 @@ improved from 0.9921 to 0.99910 and one block from 0.99996 to 0.99997. The seed-
 image hash moves with the arithmetic, from `e438c3da...` to
 `45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253`; two warm 1024^2
 eight-step images took 27.8 s each on a box another job was sharing, unchanged within
-noise from the 27.7 s median measured against ComfyUI.
+noise from the 27.7 s median measured against ComfyUI. The Raw image hash moves to
+`d61dcc7005ca1263334a5a3fc6115e66b0dd1792dfa5969f05d44e2e13fb5ed2` (52 steps, guidance
+3.5, seed 0); its run took 722 s against another job on the GPU, so it is an identity
+anchor and not a timing.
