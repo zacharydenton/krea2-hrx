@@ -129,13 +129,15 @@ correctness. `docs/notes.md` records every decision and measurement.
 
 ## Quick start
 
-**Hardware and toolchain.** A Radeon 8060S (gfx1151) on Linux with a working HSA driver,
-and a build of [hrx-system](https://github.com/ROCm/hrx-system): the `loom-compile` and
-`loom-format` tools plus HRX's headers, library and HSA provider. `scripts/env.sh`
-points at them (`HRX_BUILD`, default `~/code/hrx-system/build-cuda`; the provider under
+**Dependencies.** A Radeon 8060S (gfx1151) on Linux with the amdgpu/KFD driver, a
+build of [hrx-system](https://github.com/ROCm/hrx-system) (HRX's headers, `libhrx`
+and its HSA provider, and the `loom-compile` tool that compiles kernels for a new
+sequence length), a C++17 compiler, and the nlohmann JSON headers. That is the whole
+list: no HIP, hipcc, BLAS, ICU, OpenSSL or Python. `scripts/env.sh` points at the HRX
+build (`HRX_BUILD`, default `~/code/hrx-system/build-cuda`; the provider under
 `~/.local/rocm-hrx`) and the build scripts package the runtime libraries under
-`build/runtime`. The host builds with any C++17 compiler; the only other C++ dependency
-is the nlohmann JSON headers. No HIP, hipcc, BLAS, ICU or OpenSSL. See
+`build/runtime`. Python, PyTorch and diffusers are used only by the tests, the kernel
+generators (`loom-format` too) and the diffusers-side tools. See
 [docs/hrx-runtime.md](docs/hrx-runtime.md).
 
 **Models.** ComfyUI's Krea 2 files from [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2),

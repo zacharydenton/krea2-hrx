@@ -53,10 +53,28 @@ link_shared() {
   "$CXX" -shared "${objects[@]}" "${HRXLIBS[@]}" -o "$output.tmp"
   mv -f "$output.tmp" "$output"
 }
+# host/block_sources.h: the block kernels (kernels/*.loom) as string literals, so the
+# native pipeline compiles them from the library itself. Regenerated when they change.
+gen_block_sources() {
+  local out=host/block_sources.h tmp=host/block_sources.h.tmp f name
+  {
+    printf '#pragma once\n#include <map>\n#include <string>\nnamespace krea_native {\n'
+    printf 'inline const std::map<std::string, std::string> &block_sources() {\n'
+    printf '  static const std::map<std::string, std::string> sources = {\n'
+    for f in kernels/*.loom; do
+      name=$(basename "$f" .loom)
+      printf '      {"%s", R"loomsrc(' "$name"
+      cat "$f"
+      printf ')loomsrc"},\n'
+    done
+    printf '  };\n  return sources;\n}\n} // namespace krea_native\n'
+  } > "$tmp"
+  if cmp -s "$tmp" "$out"; then rm -f "$tmp"; else mv -f "$tmp" "$out"; fi
+}
 link_pipeline() {
   local output="$1" name
   local objects=()
-  python3 tools/gen_block_sources.py
+  gen_block_sources
   for name in native_ops native_models native_tokenizer native_compile native_pipeline embedded; do
     compile "$name"
     objects+=("build/obj/$name.o")
