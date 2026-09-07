@@ -92,8 +92,10 @@ That is what int8 GEMMs summing in a different order look like: no block is an o
 The residual stream is bf16 with ComfyUI's three rounding points inside a block, and
 attention is the fp16 kernel because ComfyUI calls PyTorch SDPA in bf16; the int4-QK
 kernel is 5.4 ms faster per block but only reaches cosine 0.995 on the same test.
-`docs/notes.md` has the full measurements, including how ComfyUI's returned latent has to
-be un-scaled before an end-to-end comparison means anything.
+Eight steps from ComfyUI's own noise end at final-latent cosine 0.966, and the two decoded
+images are the same fox in the same pose, light and colour, apart in fur and snow detail
+(PSNR 19.4 dB). `docs/notes.md` has the full measurements, including how ComfyUI's returned
+latent has to be un-scaled before an end-to-end comparison means anything.
 
 ## Status
 

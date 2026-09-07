@@ -791,9 +791,15 @@ with the Wan latent format applied (`x * latents_std + latents_mean`, `process_l
 and this runtime's decoder applies that itself, so `latent_out.npy` has to be un-scaled
 before it can be compared with our sampler state or fed to `krea2_decode`. The first
 measurements here compared against the scaled tensor and reported a final-latent cosine of
-0.806 and a washed-out image difference that was entirely that scaling; the tool now
-inverts it (`sampler_latent`). The corrected end-to-end numbers are pending a re-run: the
-models volume was unmounted before it could be repeated.
+0.806, a step-7 next state at 0.836 and a washed-out image; all three were that scaling.
+Inverted (`sampler_latent` in `tools/compare_comfy_steps.py`): from ComfyUI's own state
+every Euler step lands at next-state cosine 0.99997 or better, and eight steps from
+ComfyUI's noise end at final-latent cosine 0.9660 (rel rms 0.26). The last step still
+amplifies -- the chained state is at 0.9807 entering it, because `x - 0.311 v` subtracts
+two nearly equal terms -- but by a factor of about two, not forty. Decoded through this
+runtime's VAE, the two images are the same fox in the same pose, light and colour, apart
+in fur and snow detail: pixel MAE 10.2, PSNR 19.4 dB, cosine 0.9894
+(`build/parity_ours.ppm`, `build/parity_comfy.ppm`, `build/parity_side.png`).
 
 **What was deliberately not matched.** ComfyUI's `simple_scheduler` indexes a
 10,000-entry sigma table, quantizing the timestep to a 1e-4 grid; we keep diffusers'
