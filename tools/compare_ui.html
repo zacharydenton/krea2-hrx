@@ -19,7 +19,7 @@
 <div class="toolbar"><span id="status" class="status" role="status">Ready when you are</span><div class="views"><button class="mode active" id="side">Side by side</button><button class="mode" id="wipeButton">Wipe</button></div></div>
 <div class="pair" id="pair"></div>
 <div id="wipeArea" class="hidden"><div class="wipe"><img id="wipeComfy" alt="ComfyUI result"><img id="wipeLoom" class="top" alt="Loom result"><div class="divider" id="divider"></div><span class="wipe-label left">Loom</span><span class="wipe-label right">ComfyUI</span><input id="slider" type="range" min="0" max="100" value="50" aria-label="Image comparison split"></div><p style="text-align:center">Drag across the image to compare. Use arrow keys for precise adjustment.</p></div>
-<div id="details" class="details">Loom uses INT4 projections and INT4 QK / FP16 PV attention. ComfyUI uses your installed INT8 ConvRot model and FP8 text encoder. This compares the complete pipelines, including their precision and sampler arithmetic.</div>
+<div id="details" class="details">Loom runs the served bundle's block weights (W8A8: ComfyUI's own int8 ConvRot rows with int8 activations; W4A4: int4) with INT4 QK / FP16 PV attention. ComfyUI uses your installed INT8 ConvRot model and FP8 text encoder. This compares the complete pipelines, including their precision and sampler arithmetic.</div>
 <pre id="error" class="error"></pre>
 </section></div></main>
 <script>

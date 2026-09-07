@@ -2,6 +2,7 @@
 import ctypes as C
 import hashlib
 import json
+import os
 from pathlib import Path
 import struct
 import sys
@@ -43,7 +44,8 @@ def main():
             raise RuntimeError(error.value.decode())
 
     start = time.perf_counter()
-    call(lib.krea2_pipeline_create, str(ROOT / 'build/native-deploy').encode(), None, C.byref(session))
+    bundle = Path(os.environ.get('KREA2_BUNDLE') or ROOT / 'build/native-deploy')  # build/native-int8 for W8A8
+    call(lib.krea2_pipeline_create, str(bundle).encode(), None, C.byref(session))
     loaded = time.perf_counter()
     try:
         call(lib.krea2_generate, session, job['prompt'].encode(), n, n, job['steps'],
