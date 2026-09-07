@@ -266,10 +266,11 @@ public:
       capacity_ = std::max<size_t>(
           (tokens + 16 + 31) / 32 * 32,
           (tokens + 63) / 64 * 64); // tokens+16 headroom, whole 64-key blocks
-      // "3 tokens gemm_rows m_group capacity attention_waves pitch(6144)
+      // "4 tokens gemm_rows m_group capacity attention_waves pitch(6144)
       // pitch(16384) attention_bits gemm_bits": every shape field must match
       // what this host derives for gemm_bits (the weights' width, 4 or 8);
-      // attention_bits (4 or 8) is the builder's choice.
+      // attention_bits (4, 8 or 16) is the builder's choice. Version 4 uses
+      // bf16 residual buffers; version 3 kernels expect incompatible fp16.
       std::ifstream metadata(kernels_dir + "/launch.txt");
       unsigned version = 0, compiled_tokens = 0, pitch_hidden = 0,
                pitch_inter = 0;
@@ -277,7 +278,7 @@ public:
       if (!(metadata >> version >> compiled_tokens >> gemm_rows_ >> m_group_ >>
             compiled_capacity >> attention_waves_ >> pitch_hidden >>
             pitch_inter >> attention_bits_ >> gemm_bits_) ||
-          version != 3 || compiled_tokens != unsigned(tokens) ||
+          version != 4 || compiled_tokens != unsigned(tokens) ||
           (attention_bits_ != 4 && attention_bits_ != 8 &&
            attention_bits_ != 16) ||
           (gemm_bits_ != 4 && gemm_bits_ != 8) ||

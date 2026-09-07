@@ -1,24 +1,27 @@
-import os
 """Torch oracle for the native blocks' fusion and storage boundaries.
 
-krea2_ref models the unfused bf16 transformer. Native blocks instead keep fused
-normalization, modulation, SwiGLU and residual arithmetic in fp32, with fp16
-storage between kernels. Quantization amplifies those rounding differences over
+krea2_ref models the unfused bf16 transformer. Native blocks keep fused
+normalization, modulation and SwiGLU arithmetic in fp32, with fp16 intermediates
+and a bf16 residual stream. Quantization amplifies those rounding differences over
 depth, so kernel agreement needs this separate oracle; model quality is still
 compared with the bf16 transformer.
 """
+import os
 import torch
 
 import krea2_ref as R
 
 
-def sage_attention(q, k, v):
-    """Independent Torch oracle for smoothed INT4 QK and the native correction.
+def attention(q, k, v):
+    """Independent oracle for the attention algorithm selected by both builders.
 
     Query chunks bound score storage; probability/PV arithmetic stays float32
     here to measure the fused kernel's fp16 fragment approximation separately.
     """
-    levels = 7 if int(os.environ.get("KREA2_ATTN_QK") or 4) == 4 else 127   # the int8-QK twin's codes
+    bits = int(os.environ.get("KREA2_ATTN_QK") or 16)
+    if bits not in (4, 8, 16):
+        raise ValueError("KREA2_ATTN_QK must be 4, 8 or 16")
+    levels = 7 if bits == 4 else 127
     def quantize(x):
         scale = x.abs().amax(-1, keepdim=True) / levels
         return torch.where(scale > 0, (x / scale).round().clamp(-levels, levels) * scale, 0)
@@ -28,13 +31,19 @@ def sage_attention(q, k, v):
         query = query.transpose(0, 1)
         key = key.transpose(0, 1)
         value = value.transpose(0, 1).repeat_interleave(4, 0)
-        centered_k = key - key.mean(1, keepdim=True)
-        k4 = quantize(centered_k).repeat_interleave(4, 0).transpose(1, 2)
-        kc = centered_k.half().float().repeat_interleave(4, 0).transpose(1, 2)
+        if bits == 16:
+            keys = key.repeat_interleave(4, 0).transpose(1, 2)
+        else:
+            centered_k = key - key.mean(1, keepdim=True)
+            k4 = quantize(centered_k).repeat_interleave(4, 0).transpose(1, 2)
+            kc = centered_k.half().float().repeat_interleave(4, 0).transpose(1, 2)
         chunks = []
         for block in query.split(64, 1):
-            mean = block.mean(1, keepdim=True)
-            scores = quantize(block - mean) @ k4 + mean.half().float() @ kc
+            if bits == 16:
+                scores = block @ keys
+            else:
+                mean = block.mean(1, keepdim=True)
+                scores = quantize(block - mean) @ k4 + mean.half().float() @ kc
             chunks.append((scores * (128 ** -0.5)).softmax(-1) @ value)
         outputs.append(torch.cat(chunks, 1).transpose(0, 1))
     return torch.stack(outputs)
@@ -81,7 +90,7 @@ class LoomBlocksRef(R.Krea2Ref):
         gate = self.project(f"{p}.attn.gate.weight", prepared).half()
         q = R.apply_rope(R.rms_norm(q.float(), self.t(f"{p}.attn.qknorm.qnorm.scale", torch.float32)), cos, sin).half()
         k = R.apply_rope(R.rms_norm(k.float(), self.t(f"{p}.attn.qknorm.knorm.scale", torch.float32)), cos, sin).half()
-        attn = sage_attention(q, k, v).reshape(b, s, -1).half()
+        attn = attention(q, k, v).reshape(b, s, -1).half()
         attended = attn.float() * torch.sigmoid(gate.float())
         x = (x.float() + (pregate * self.project(f"{p}.attn.wo.weight", attended).bfloat16().float()).bfloat16().float()).bfloat16()
         normalized = R.rms_norm(x.float(), self.t(f"{p}.postnorm.scale", torch.float32))

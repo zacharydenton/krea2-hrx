@@ -16,9 +16,38 @@ sys.path.insert(0, str(ROOT))
 import krea2_loom as native_api
 from scripts import build_kernels as builder
 from tools.pipeline import ReferenceForward, cast_transformer_bf16
+from loom_ref import attention
+
+
+class AttentionTests(unittest.TestCase):
+    def test_default_and_16_use_unquantized_gqa(self):
+        generator = torch.Generator().manual_seed(19)
+        q = torch.randn(2, 65, 4, 128, generator=generator).half()
+        k = torch.randn(2, 65, 1, 128, generator=generator).half()
+        v = torch.randn(2, 65, 1, 128, generator=generator).half()
+        expected = torch.nn.functional.scaled_dot_product_attention(
+            q.float().transpose(1, 2),
+            k.float().transpose(1, 2).repeat_interleave(4, 1),
+            v.float().transpose(1, 2).repeat_interleave(4, 1)).transpose(1, 2)
+        for choice in ("", "16"):
+            with patch.dict(os.environ, {"KREA2_ATTN_QK": choice}):
+                torch.testing.assert_close(attention(q, k, v), expected)
+        for choice in ("4", "8"):
+            with patch.dict(os.environ, {"KREA2_ATTN_QK": choice}):
+                result = attention(q, k, v)
+                self.assertTrue(torch.isfinite(result).all())
+                self.assertFalse(torch.allclose(result, expected))
+        with patch.dict(os.environ, {"KREA2_ATTN_QK": "12"}):
+            with self.assertRaisesRegex(ValueError, "4, 8 or 16"):
+                attention(q, k, v)
 
 
 class CacheTests(unittest.TestCase):
+    def setUp(self):
+        env = patch.dict(os.environ, {"KREA2_ATTN_QK": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
     def test_config_source_changes_and_failed_publication(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -33,14 +62,14 @@ class CacheTests(unittest.TestCase):
                 self.assertEqual(builder.build(129), first)
                 self.assertEqual(compile_mock.call_count, 9)
                 wide = builder.build(4115, 8)
-                self.assertEqual((wide / "launch.txt").read_text(), "3 4115 256 4 4160 8 6144 16448 16 8\n")
+                self.assertEqual((wide / "launch.txt").read_text(), "4 4115 256 4 4160 8 6144 16448 16 8\n")
                 self.assertIn("gemm_i8_resid_256", (wide / "gemm_down.hsaco").read_text())
                 self.assertIn("prepare_plain_i8", (wide / "prepare_plain_i8.hsaco").read_text())
                 for tokens, waves in ((129, 8), (8191, 8), (8192, 4), (16896, 4)):
                     selected = builder.build(tokens)
                     launch = (selected / "launch.txt").read_text()
                     fields = launch.split()
-                    self.assertEqual(fields[0], "3")
+                    self.assertEqual(fields[0], "4")
                     self.assertEqual(fields[5], str(waves))
                     self.assertEqual(fields[2], str(builder.gemm_rows(tokens)))
                     self.assertEqual(fields[6:], ["6144", "16512", "16", "4"])

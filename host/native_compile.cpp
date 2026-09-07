@@ -64,7 +64,7 @@ std::string prepare_kernels(const std::string &cache_parent,
                         std::to_string(krea2_shape::gemm_pitch(16384, bits)),
                     ib = "i" + std::to_string(bits);
   auto group = std::to_string(m_group);
-  std::string metadata = "3 " + std::to_string(tokens) + " " +
+  std::string metadata = "4 " + std::to_string(tokens) + " " +
                          std::to_string(rows) + " " + group + " " +
                          std::to_string(capacity) + " " +
                          std::to_string(attention_waves) + " " +

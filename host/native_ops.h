@@ -277,7 +277,7 @@ struct Weights {
       Weight weight{std::move(view), it.shape};
       if (it.f32) {
         weight.f32 = reinterpret_cast<const float *>(dst);
-        weight.bf16_of_f32(src, it.count);
+        weight.bf16_of_f32(it.last_tap ? staging.data() : src, it.count);
       } else {
         weight.t.ptr = reinterpret_cast<B *>(dst);
       }

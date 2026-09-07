@@ -123,7 +123,7 @@ def build(tokens: int, bits: int = 4) -> Path:
     parent = ROOT / "build/kernels" / f"T{tokens}"
     parent.mkdir(parents=True, exist_ok=True)
     out = parent / fingerprint
-    launch = f"3 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter} {attention_bits} {bits}\n"
+    launch = f"4 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter} {attention_bits} {bits}\n"
     # Serialize publication, including across Python processes. A failed compilation
     # never exposes a partial bundle or overwrites kernels used by a live session.
     with (parent / ".lock").open("a") as lock:

@@ -32,50 +32,48 @@ struct SafeTensors {
   std::map<std::string, Entry> entries;
 
   explicit SafeTensors(const std::string &file) : path(file) {
-    fd_ = open(file.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd_ < 0)
-      throw std::runtime_error("cannot open " + file);
-    struct stat info;
-    if (fstat(fd_, &info) || info.st_size < 8) {
-      close(fd_);
-      throw std::runtime_error("invalid safetensors file: " + file);
-    }
-    size_ = size_t(info.st_size);
-    mapped_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
-    if (mapped_ == MAP_FAILED) {
-      close(fd_);
-      throw std::runtime_error("cannot map " + file);
-    }
-    uint64_t header = 0;
-    std::memcpy(&header, mapped_, 8);
-    if (header > size_ - 8)
-      throw std::runtime_error("corrupt safetensors header: " + file);
-    data_ = static_cast<const char *>(mapped_) + 8 + header;
-    const size_t data_bytes = size_ - 8 - header;
-    auto j = nlohmann::json::parse(static_cast<const char *>(mapped_) + 8,
-                                   static_cast<const char *>(mapped_) + 8 +
-                                       header);
-    for (auto &[name, value] : j.items()) {
-      if (name == "__metadata__")
-        continue;
-      Entry e;
-      e.dtype = value.at("dtype").get<std::string>();
-      e.shape = value.at("shape").get<std::vector<int64_t>>();
-      auto offsets = value.at("data_offsets").get<std::vector<size_t>>();
-      if (offsets.size() != 2 || offsets[1] < offsets[0] ||
-          offsets[1] > data_bytes)
-        throw std::runtime_error("corrupt tensor span: " + name);
-      e.offset = offsets[0];
-      e.bytes = offsets[1] - offsets[0];
-      entries.emplace(name, std::move(e));
+    try {
+      fd_ = open(file.c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd_ < 0)
+        throw std::runtime_error("cannot open " + file);
+      struct stat info;
+      if (fstat(fd_, &info) || info.st_size < 8) {
+        throw std::runtime_error("invalid safetensors file: " + file);
+      }
+      size_ = size_t(info.st_size);
+      mapped_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+      if (mapped_ == MAP_FAILED) {
+        throw std::runtime_error("cannot map " + file);
+      }
+      uint64_t header = 0;
+      std::memcpy(&header, mapped_, 8);
+      if (header > size_ - 8)
+        throw std::runtime_error("corrupt safetensors header: " + file);
+      data_ = static_cast<const char *>(mapped_) + 8 + header;
+      const size_t data_bytes = size_ - 8 - header;
+      auto j = nlohmann::json::parse(static_cast<const char *>(mapped_) + 8,
+                                     static_cast<const char *>(mapped_) + 8 +
+                                         header);
+      for (auto &[name, value] : j.items()) {
+        if (name == "__metadata__")
+          continue;
+        Entry e;
+        e.dtype = value.at("dtype").get<std::string>();
+        e.shape = value.at("shape").get<std::vector<int64_t>>();
+        auto offsets = value.at("data_offsets").get<std::vector<size_t>>();
+        if (offsets.size() != 2 || offsets[1] < offsets[0] ||
+            offsets[1] > data_bytes)
+          throw std::runtime_error("corrupt tensor span: " + name);
+        e.offset = offsets[0];
+        e.bytes = offsets[1] - offsets[0];
+        entries.emplace(name, std::move(e));
+      }
+    } catch (...) {
+      release();
+      throw;
     }
   }
-  ~SafeTensors() {
-    if (mapped_ != MAP_FAILED && mapped_)
-      munmap(mapped_, size_);
-    if (fd_ >= 0)
-      close(fd_);
-  }
+  ~SafeTensors() { release(); }
   SafeTensors(const SafeTensors &) = delete;
   SafeTensors &operator=(const SafeTensors &) = delete;
 
@@ -90,6 +88,12 @@ struct SafeTensors {
   const char *data(const std::string &name) const { return data(at(name)); }
 
 private:
+  void release() noexcept {
+    if (mapped_ != MAP_FAILED && mapped_)
+      munmap(mapped_, size_);
+    if (fd_ >= 0)
+      close(fd_);
+  }
   int fd_ = -1;
   void *mapped_ = nullptr;
   size_t size_ = 0;

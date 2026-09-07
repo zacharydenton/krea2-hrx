@@ -35,7 +35,7 @@ int main(int argc, char **argv) {
   assert(argc == 2);
   const auto dir = std::filesystem::path(argv[1]) / "session-fixture";
   std::filesystem::create_directory(dir);
-  const char *valid = "3 16 256 4 64 8 6144 16448 4 8\n";
+  const char *valid = "4 16 256 4 64 8 6144 16448 4 8\n";
   std::ofstream(dir / "launch.txt") << valid;
   // A checkpoint with one block's wq only: every other tensor is missing.
   const auto checkpoint = dir / "incomplete.safetensors";
@@ -67,10 +67,11 @@ int main(int argc, char **argv) {
   krea2_session *session = nullptr;
   char error[4096];
   for (const char *metadata :
-       {"3 16 256 0 64 8 6144 16448 4 8\n", "2 16 1 64 8\n",
-        "3 16 256 4 64 4 6144 16448 4 8\n", "3 16 256 4 64 8 6144 16384 4 8\n",
-        "3 16 128 1 64 8 6144 16448 4 8\n", "3 16 256 4 64 8 6144 16448 6 8\n",
-        "3 16 256 4 64 8 6144 16448 4\n"}) {
+       {"3 16 256 4 64 8 6144 16448 4 8\n",
+        "4 16 256 0 64 8 6144 16448 4 8\n", "2 16 1 64 8\n",
+        "4 16 256 4 64 4 6144 16448 4 8\n", "4 16 256 4 64 8 6144 16384 4 8\n",
+        "4 16 128 1 64 8 6144 16448 4 8\n", "4 16 256 4 64 8 6144 16448 6 8\n",
+        "4 16 256 4 64 8 6144 16448 4\n"}) {
     std::ofstream(dir / "launch.txt") << metadata;
     assert(krea2_create(checkpoint.c_str(), dir.c_str(), 16, 1, &session,
                         error, sizeof(error)) == KREA2_INVALID_ARGUMENT);

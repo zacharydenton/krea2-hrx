@@ -162,6 +162,10 @@ def cast_transformer_bf16(transformer):
 
 def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch", weights: str | None = None,
           checkpoint: Path = TURBO, distilled: bool = True):
+    if backend == "loom" and not weights:
+        weights = os.environ.get("KREA2_MODEL") or str(
+            Path.home() / "comfy-models/diffusion_models" /
+            ("krea2_turbo_int8_convrot.safetensors" if distilled else "krea2_raw_int8_convrot.safetensors"))
     from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from transformers import AutoTokenizer, Qwen3VLModel
@@ -195,11 +199,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompt", default="a red fox sitting in fresh snow at dawn, soft light, photograph")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--steps", type=int, default=8)
+    ap.add_argument("--steps", type=int, default=None)
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--quant", default="none", choices=["none", "w4a4"])
-    ap.add_argument("--backend", default="torch", choices=["torch", "loom"], help="run the 28 blocks in Loom (int4) instead of torch")
-    ap.add_argument("--weights", default=None, help="ComfyUI's int8 ConvRot checkpoint for --backend loom (default: krea2_loom.DEFAULT_MODEL, KREA2_MODEL)")
+    ap.add_argument("--backend", default="torch", choices=["torch", "loom"], help="run the 28 blocks in Loom instead of torch")
+    ap.add_argument("--weights", default=None, help="ComfyUI's int8 ConvRot checkpoint for --backend loom (default: KREA2_MODEL or the --model checkpoint under ~/comfy-models/diffusion_models)")
     ap.add_argument("--model", choices=("turbo", "raw"), default="turbo", help="raw: the undistilled checkpoint (dynamic shift, guidance 3.5, 52 steps by default)")
     ap.add_argument("--checkpoint", default=None, help="bf16 ComfyUI-format checkpoint (default ~/krea2-models/krea2_<model>_bf16.safetensors)")
     ap.add_argument("--guidance", type=float, default=None, help="Krea's guidance scale, cond + g*(cond - uncond); default 0 for turbo, 3.5 for raw")
@@ -212,8 +216,8 @@ def main() -> None:
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     raw = a.model == "raw"
     checkpoint = Path(a.checkpoint) if a.checkpoint else (TURBO.parent / "krea2_raw_bf16.safetensors" if raw else TURBO)
-    if raw and "--steps" not in sys.argv:
-        a.steps = 52
+    if a.steps is None:
+        a.steps = 52 if raw else 8
     guidance = a.guidance if a.guidance is not None else (3.5 if raw else 0.0)
     pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend, weights=a.weights,
                  checkpoint=checkpoint, distilled=not raw)

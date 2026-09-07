@@ -818,3 +818,53 @@ noise from the 27.7 s median measured against ComfyUI. The Raw image hash moves 
 `d61dcc7005ca1263334a5a3fc6115e66b0dd1792dfa5969f05d44e2e13fb5ed2` (52 steps, guidance
 3.5, seed 0); its run took 722 s against another job on the GPU, so it is an identity
 anchor and not a timing.
+
+## Where the remaining ComfyUI gap is (2026-09-07, CPU analysis)
+
+The final latent sits at cosine 0.966 against ComfyUI on the same noise. Three questions:
+what amplifies, what does not matter, and what is left to match.
+
+**The sampler is not the problem.** Replaying ComfyUI's own velocities through our Euler
+step reproduces its trajectory exactly in fp32; with our bf16 sampler state and bf16 delta
+rounding the final latent is still at cosine 0.999974, and our sigma grid (which differs
+from ComfyUI's table by one ulp at two of nine entries) changes nothing at all.
+
+**The trajectory amplifies by about 2.8x per step.** Chained from ComfyUI's noise, our
+state's `1 - cosine` runs 7e-6, 8.5e-5, 3.4e-4, 9.5e-4, 2.5e-3, 7.0e-3, 1.9e-2, 3.4e-2:
+a steady factor of 2.8 per step, so the final deviation is roughly 1300x the first step's
+and roughly linear in the per-step velocity error. That also explains why injecting error
+into ComfyUI's own trajectory is so much gentler: a fully correlated 6% velocity error
+applied at every step, without feedback, only reaches cosine 0.993, and 1.4% of white
+noise reaches 0.9999. The amplification is the model's sensitivity to its own state, not
+an error of ours; the only lever is a smaller per-step error.
+
+**The dominant per-step error is the precision we feed the quantizer.** ComfyUI's block is
+bf16 throughout: `RMSNorm` returns `.to(x.dtype)`, and `(1 + prescale) * norm + preshift`
+is three bf16 operations, so the tensor entering `wq/wk/wv/gate` -- and therefore
+`quantize_and_rotate_rowwise` -- is bf16. Our prepare kernel computes the whole expression
+in fp32 and quantizes from that. On ComfyUI's own block-0 input and modulation the two
+pre-quantization tensors differ by 0.32% relative rms, which flips **7.7% of the int8
+codes by one** and moves the dequantized rows by **0.93%** -- and block 0's measured
+update error against ComfyUI is 0.87%. That is essentially the whole per-block gap.
+
+The same pattern applies at the other quantizer inputs and at attention:
+
+| site | ComfyUI | ours |
+| --- | --- | --- |
+| attention and MLP inputs (`prepare norm`) | bf16 after norm, after `*(1+scale)`, after `+shift` | fp32 throughout |
+| `wo` input (`prepare gated`) | bf16 attention output, bf16 `sigmoid(gate)` product | f16 buffers, fp32 product |
+| down input (`gemm swiglu` epilogue) | bf16 after `silu(g)`, bf16 after `* u` | fp32, one f16 store |
+| attention q/k/v | bf16 | f16 |
+
+Rounding to bf16 at exactly those points costs nothing (a truncate/extend pair in kernels
+that are memory-bound anyway) and keeps the existing f16 buffers, since every bf16 value
+is representable in f16 at these magnitudes. A synthetic attention at the model's head
+shape puts the q/k/v dtype alone at 0.17% of the attention output.
+
+**Prediction, not yet measured:** cutting the per-block error from ~0.9% to the 0.1-0.2%
+left by the rotation kernel and the attention algorithm should cut the per-step velocity
+error about as much and, by the linear amplification above, land the final latent near
+cosine 0.99. Beyond that lies ComfyUI's attention algorithm (a different softmax and
+accumulation order) and its fused rotate/quantize kernel, which is a compiled binary here;
+matching those bit for bit is not on the table. The measurements are reproducible from the
+dumps in `build/comfy_parity` without touching the GPU.
