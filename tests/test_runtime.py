@@ -33,7 +33,7 @@ class CacheTests(unittest.TestCase):
                 self.assertEqual(builder.build(129), first)
                 self.assertEqual(compile_mock.call_count, 9)
                 wide = builder.build(4115, 8)
-                self.assertEqual((wide / "launch.txt").read_text(), "3 4115 256 4 4160 8 6144 16448 4 8\n")
+                self.assertEqual((wide / "launch.txt").read_text(), "3 4115 256 4 4160 8 6144 16448 16 8\n")
                 self.assertIn("gemm_i8_resid_256", (wide / "gemm_down.hsaco").read_text())
                 self.assertIn("prepare_plain_i8", (wide / "prepare_plain_i8.hsaco").read_text())
                 for tokens, waves in ((129, 8), (8191, 8), (8192, 4), (16896, 4)):
@@ -43,14 +43,20 @@ class CacheTests(unittest.TestCase):
                     self.assertEqual(fields[0], "3")
                     self.assertEqual(fields[5], str(waves))
                     self.assertEqual(fields[2], str(builder.gemm_rows(tokens)))
-                    self.assertEqual(fields[6:], ["6144", "16512", "4", "4"])
-                    expected = "attention_sage_i4_fast" + ("_prefetch" if waves == 4 else "")
-                    self.assertIn(expected, (selected / "attention.hsaco").read_text())
+                    self.assertEqual(fields[6:], ["6144", "16512", "16", "4"])
+                    self.assertIn("attention_gqa_lds_f16_wmma", (selected / "attention.hsaco").read_text())
                     self.assertEqual(builder.build(tokens), selected)
                     (selected / "launch.txt").write_text(launch.rsplit(" ", 1)[0] + " 9\n")
                     with self.assertRaisesRegex(RuntimeError, "launch metadata"):
                         builder.build(tokens)
                     (selected / "launch.txt").write_text(launch)
+                # The int4/int8 QK kernels stay selectable, prefetching above 8192 tokens.
+                for tokens, waves in ((129, 8), (8192, 4)):
+                    with patch.dict(os.environ, {"KREA2_ATTN_QK": "4"}):
+                        selected = builder.build(tokens)
+                    expected = "attention_sage_i4_fast" + ("_prefetch" if waves == 4 else "")
+                    self.assertIn(expected, (selected / "attention.hsaco").read_text())
+                    self.assertEqual((selected / "launch.txt").read_text().split()[8], "4")
                 source = root / "kernels/gemm_i4.loom"
                 source.write_text(source.read_text() + "\n// source changed\n")
                 before = set(first.parent.iterdir())
@@ -85,7 +91,10 @@ class WrapperTests(unittest.TestCase):
     def test_forward_does_not_alias_input(self):
         class Native:
             def krea2_run(self, handle, x, count, *args):
-                np.ctypeslib.as_array(x, shape=(count,)).view(np.float16)[:] += 1
+                # The residual stream is bf16: add one in the buffer's own dtype.
+                buffer = np.ctypeslib.as_array(x, shape=(count,))
+                values = torch.from_numpy(buffer.view(np.int16)).view(torch.bfloat16) + 1
+                buffer[:] = values.view(torch.int16).numpy().view(np.uint16)
                 return 0
         block = native_api.Krea2Blocks.__new__(native_api.Krea2Blocks)
         block.tokens, block.layers, block._handle, block._native = 16, 1, None, Native()

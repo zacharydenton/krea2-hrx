@@ -69,7 +69,9 @@ class LoomBlocksRef(R.Krea2Ref):
     def block(self, i, x, m, cos, sin):
         p = f"blocks.{i}"
         prescale, preshift, pregate, postscale, postshift, postgate = m.float().unbind(-2)
-        x = x.half()
+        # The residual stream is bf16 with ComfyUI's rounding points: the linear's
+        # output, the gated product, and the sum (the block stack's kernels do the same).
+        x = x.bfloat16()
         normalized = R.rms_norm(x.float(), self.t(f"{p}.prenorm.scale", torch.float32))
         prepared = normalized * (1 + prescale) + preshift
         b, s, _ = x.shape
@@ -81,11 +83,11 @@ class LoomBlocksRef(R.Krea2Ref):
         k = R.apply_rope(R.rms_norm(k.float(), self.t(f"{p}.attn.qknorm.knorm.scale", torch.float32)), cos, sin).half()
         attn = sage_attention(q, k, v).reshape(b, s, -1).half()
         attended = attn.float() * torch.sigmoid(gate.float())
-        x = (x.float() + pregate * self.project(f"{p}.attn.wo.weight", attended)).half()
+        x = (x.float() + (pregate * self.project(f"{p}.attn.wo.weight", attended).bfloat16().float()).bfloat16().float()).bfloat16()
         normalized = R.rms_norm(x.float(), self.t(f"{p}.postnorm.scale", torch.float32))
         prepared = normalized * (1 + postscale) + postshift
         g = self.project(f"{p}.mlp.gate.weight", prepared)
         u = self.project(f"{p}.mlp.up.weight", prepared)
         product = (g * torch.sigmoid(g) * u).half()
         down = self.project(f"{p}.mlp.down.weight", self.rotate_plain(product), rotated=True)
-        return (x.float() + postgate * down).half()
+        return (x.float() + (postgate * down.bfloat16().float()).bfloat16().float()).bfloat16()

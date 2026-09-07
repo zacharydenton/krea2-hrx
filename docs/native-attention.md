@@ -1,9 +1,23 @@
-# Native SA2-style attention on gfx1151
+# Native attention on gfx1151
 
-The Radeon 8060S runtime always uses tuned smoothed INT4 QK attention. It selects
-eight waves below 8,192 tokens and four waves with explicit prefetch at longer
-sequences. There are no attention selectors or fallback backends. Inference uses
-the C ABI with no Python or Torch dependency.
+The runtime's default is the fp16 WMMA kernel
+(`kernels/attention_gqa_lds_f16_wmma.loom`): fp16 QK and PV with fp32 online
+softmax, the closest match on this part to the bf16 PyTorch SDPA call ComfyUI
+makes. `KREA2_ATTN_QK=4` or `8` selects the smoothed SageAttention-style int4 or
+int8 QK kernels instead, which are faster and lose some agreement with ComfyUI;
+the choice is fixed when the kernels are compiled and recorded in the launch
+metadata. The Sage kernels select eight waves below 8,192 tokens and four waves
+with explicit prefetch at longer sequences. Inference uses the C ABI with no
+Python or Torch dependency.
+
+## Why fp16 is the default
+
+Against ComfyUI's own evaluation of the same checkpoint (`tools/comfy_step.py`
+dumps, `tools/compare_comfy.py`), one block run on ComfyUI's input to that block
+produces an update at cosine 0.995 with int4 QK and 0.99988 with fp16 QK; chained
+through all 28 blocks the state cosine goes from 0.969 to 0.9977. The fp16 kernel
+costs about 4% of a forward. Matching the reference implementation is worth more
+than that, so it is what a default build runs.
 
 ## Arithmetic and hardware adaptation
 
@@ -69,10 +83,10 @@ version 2 fixed the preprocessing contract to 64-token query groups and transpos
 V, version 3 added the GEMM tile rows (128 or 256), the operand row pitches and a
 raster group of 1 for a single tile row. The host derives every field from the same
 rules (`host/gemm_shape.h`, mirrored by `scripts/build_kernels.py`) and rejects a
-bundle that disagrees before loading weights; the last field is the attention code
-width (4, or 8 for the int8-QK twin selected with `KREA2_ATTN_QK=8`). Deployment
-sources are the `kernels/` directory; the FP16 comparison kernel lives under
-`experiments/`.
+bundle that disagrees before loading weights; the last two fields are the attention
+code width (16 by default, 4 or 8 for the Sage kernels selected with
+`KREA2_ATTN_QK`) and the GEMM operand width. Every deployment source, the fp16
+attention kernel included, lives in `kernels/`.
 
 The Q/K operands are head-major: codes `[heads][capacity][64 B]` (128 B for int8)
 and scales `[heads][capacity]`, written by `sage_quant_{q,k}` and read by the

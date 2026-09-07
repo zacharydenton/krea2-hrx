@@ -28,8 +28,8 @@ int krea2_pipeline_create_files(const char *model, const char *text_encoder,
                                 const char *compiler, krea2_pipeline **out,
                                 char *error, size_t error_capacity);
 void krea2_pipeline_destroy(krea2_pipeline *pipeline);
-// Tuned gfx1151 INT4-QK/fp16-PV attention is selected internally by sequence
-// length. All calls on a session are serialized. Destruction must not race a
+// Attention is the fp16 WMMA kernel; the smoothed int4/int8 QK kernels are a
+// compile-time choice (KREA2_ATTN_QK), selected internally by sequence length. All calls on a session are serialized. Destruction must not race a
 // call. Dimensions must be multiples of 16, between 64 and 2048. Output is
 // contiguous RGB8 HWC. Steps must be in 1..100. Optional initial_latents are
 // float32 packed [H/16 * W/16][64]. Otherwise seed initializes the native RNG,

@@ -12,7 +12,7 @@ krea2_session *krea2_create_shared(const std::shared_ptr<krea2_weights> &weights
                                     const std::string &kernels, int tokens, int layers);
 
 // Internal bridge for the native pipeline. x is a HRX device allocation of
-// bf16 [tokens][6144], converted on-device at the block stack's fp16 boundary.
+// bf16 [tokens][6144], the block stack's own residual dtype (no conversion).
 // Modulation is float32 device memory; rotary arrays are host pointers. Uses the ordered HRX stream,
 // serializes through the block session, completes before returning, and throws
 // on error. The public host-memory C ABI remains unchanged.

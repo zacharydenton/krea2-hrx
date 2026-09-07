@@ -4,7 +4,8 @@ Krea 2 (Turbo and Raw), prompt to image, as a native GPU pipeline in **Loom**, A
 language from [ROCm/hrx-system](https://github.com/ROCm/hrx-system), for the Radeon
 8060S (gfx1151, the Strix Halo APU). It reads ComfyUI's model files as they are: the
 int8 ConvRot checkpoints run as **W8A8** (int8 weights and int8 per-token activations on
-the part's `iu8` WMMA, with int4-QK attention), the text encoder and VAE beside them.
+the part's `iu8` WMMA, fp16 attention, a bf16 residual stream rounded where ComfyUI rounds
+it), the text encoder and VAE beside them.
 Every kernel with a tensor in it is Loom; the host is plain C++ on HRX's public C API. A
 1024x1024 eight-step Turbo image takes about 27 s warm, with no Python, Torch or HIP in
 the loop. The int4 (W4A4) kernel family is in the tree and measured (2x the int8 rate on
@@ -73,6 +74,29 @@ int4 kernels reached 16.6 s per image from a rotated-and-requantized export of t
 release, at 18.9 dB; that path is retired with the export, and the numbers stay in
 `docs/notes.md`.)
 
+## Against ComfyUI's arithmetic
+
+The kernels are checked against ComfyUI's own evaluation of the same checkpoint, not only
+against our reference: `tools/comfy_step.py` dumps every block's output, the sampler's
+states and its conditioning from a run inside ComfyUI, and `tools/compare_comfy.py` and
+`tools/compare_comfy_steps.py` replay them here.
+
+| replayed on ComfyUI's own input | agreement |
+| --- | --- |
+| each of the 28 blocks, its update | cosine 0.99978 or better (image rows), 0.5-2.1% relative rms |
+| the 28 blocks chained from block 0 | state cosine 0.99997 falling to 0.9977 |
+| the whole transformer, per sampling step | velocity cosine 0.9981 at the first step, 0.9989-0.9999 after |
+| the text encoder against ComfyUI's conditioning | cosine 0.99994, same 11 tokens |
+
+That is what int8 GEMMs summing in a different order look like: no block is an outlier.
+The residual stream is bf16 with ComfyUI's three rounding points inside a block, and
+attention is the fp16 kernel because ComfyUI calls PyTorch SDPA in bf16; the int4-QK
+kernel is 5.4 ms faster per block but only reaches cosine 0.995 on the same test.
+Eight steps from the same noise still end at a visibly different picture (final latent
+cosine 0.81): the last Euler step subtracts two nearly equal terms, so a 1.4% velocity
+difference becomes a large latent one. The images are the same fox in the same pose and
+light, ours slightly softer. `docs/notes.md` has the full measurements.
+
 ## Status
 
 Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
@@ -85,7 +109,7 @@ Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
 | VAE decode (tiled) | 3.2 s | 3.2 s |
 | text encoding and fusion | 0.2 s | 0.2 s (prompt and negative) |
 | image PSNR vs the bf16 pipeline (seed 0) | 26.8 dB (latent 17.9) | 28.1 dB (latent 18.3) |
-| 28-block update cosine vs bf16 on the fixture | 0.9921 | 0.9986 |
+| 28-block update cosine vs bf16 on the fixture | 0.99910 | 0.9986 |
 
 Where a W4A4 forward goes (`tests/test_blocks.py --profile`; in W8A8 the four GEMMs are 80%
 of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
@@ -93,7 +117,7 @@ of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
 | stage | share |
 | --- | ---: |
 | gate/up GEMM with the SwiGLU product in the epilogue | 28% |
-| INT4-QK attention | 22% |
+| attention | 22% (int4-QK; fp16 costs 5.4 ms more per block) |
 | qkv/gate GEMM | 14% |
 | down GEMM with the gated residual | 13% |
 | attention preprocessing (smoothing, quantization, V transpose) | 7% |
@@ -111,7 +135,8 @@ Kernel rates at 4115 tokens on an idle box (`tools/bench_i4_gemm.py`,
 | down GEMM with residual, 256x128 tile, padded pitch | 4115 x 6144 x 16384 | 10.3 ms | 81 TOPS |
 | out GEMM with residual, 256x128 tile | 4115 x 6144 x 6144 | 4.4 ms | 71 TOPS |
 | the same four in int8 (W8A8), from the block profile | | 20.0 / 43.2 / 22.2 / 8.8 ms | 39 / 38 / 37 / 35 TOPS (peak 54) |
-| INT4-QK attention, 48 heads of 128 | 4115 tokens | 14.0 ms | 30 TFLOP/s (21 with preprocessing) |
+| fp16 attention (the default), 48 heads of 128 | 4115 tokens | 25.2 ms | 16.5 TFLOP/s |
+| int4-QK attention, 48 heads of 128 | 4115 tokens | 14.0 ms | 30 TFLOP/s (21 with preprocessing) |
 
 At 8192 tokens the GEMMs reach 84-87 TOPS and attention 27 TFLOP/s; at 16384 tokens
 attention 30 TFLOP/s.
@@ -218,13 +243,15 @@ the cache, so the down projection's rows carry one 64-byte k step of padding
 float64 oracle and the int4 tiles against each other. The prepare kernels
 (`tools/gen_prepare.py`) write either width.
 
-**Attention.** SageAttention-style: Q centered per 64-token tile and K over the sequence,
-both int4 on the WMMA with an fp32 correction GEMM for the means, fp16 PV, fp32 online
-softmax. Below 8,192 tokens eight waves share one K/V tile across two query tiles with
+**Attention.** The default is the fp16 WMMA kernel, fp16 QK and PV with fp32 online
+softmax, which is what ComfyUI's bf16 SDPA call is closest to on this part.
+`KREA2_ATTN_QK=4` or `8` selects the SageAttention-style kernels instead at kernel-build
+time: Q centered per 64-token tile and K over the sequence, both int4 (or int8) on the
+WMMA with an fp32 correction GEMM for the means, fp16 PV, fp32 online softmax. Below
+8,192 tokens those use eight waves sharing one K/V tile across two query tiles with
 alternating LDS slots; longer sequences use four waves with explicit prefetch. Codes and
-scales are head-major so a key tile is one contiguous block. `KREA2_ATTN_QK=8` at
-kernel-build time selects the int8-QK twin of the same kernel (about twice the attention
-time, a quality fallback); the bundle's launch metadata records the choice.
+scales are head-major so a key tile is one contiguous block. The launch metadata records
+the choice.
 [docs/native-attention.md](docs/native-attention.md) has the arithmetic and measurements.
 
 **Sampler.** Flow-matching Euler over diffusers' shifted sigmas, `linspace(1, 1/steps)`
@@ -233,8 +260,8 @@ under an exponential shift of `mu` (Turbo 1.15 fixed; Raw from the image token c
 reproduced (`kernels/native/euler.loom`, checked exactly over 5,050 steps). Guidance is
 its own kernel with diffusers' per-operation bf16 rounding (`kernels/native/guidance.loom`).
 
-**Runtime.** Every launch goes through HRX's public C API. The session keeps the residual
-stream and its workspace on the GPU and converts bf16/fp16 there; block weights are one
+**Runtime.** Every launch goes through HRX's public C API. The session keeps the bf16
+residual stream and its workspace on the GPU; block weights are one
 resident device allocation shared by sessions of different lengths. Both kernel builders
 (`scripts/build_kernels.py` for Python, `host/native_compile.cpp` for the native
 pipeline) derive tile size, raster group and operand pitch from the rules in
@@ -251,7 +278,7 @@ bundle whose metadata disagrees with its own rules.
 | `assets/` | the tokenizer (Qwen3-VL's `tokenizer.json`), embedded |
 | `reference/` | diffusers' model transcribed onto the checkpoint names, and the Loom-arithmetic reference |
 | `tests/`, `tools/bench_*.py` | oracles and paired benchmarks |
-| `experiments/` | kernels kept for the record (the hand-written wide down projection, the FP16 attention) |
+| `experiments/` | kernels kept for the record |
 | `docs/` | notes, measurements and the benchmark records under `docs/benchmarks/` |
 
 ## Testing and benchmarking

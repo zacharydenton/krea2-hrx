@@ -739,3 +739,72 @@ encoding 0.3 s, denoising 360.5 s for the 104 forwards (3.47 s each, the uncondi
 branch paying the same as the conditional one), VAE decode 1.5 s. Seed-0 RGB hash
 `3da2cd0d…`. Against the bf16 Raw pipeline on the same noise the W8A8 latents sit at
 18.29 dB (image 28.12 dB), the 28-block fixture cosine at 0.99855.
+
+## Matching ComfyUI's arithmetic (2026-09-07)
+
+ComfyUI is the reference implementation for these checkpoints, so the parts of the
+runtime that had drifted from it were changed to match it, and a harness now measures
+the agreement directly rather than through our own bf16 reference.
+
+**The harness.** `tools/comfy_step.py` runs ComfyUI's own loaders, sampler and model in
+the `amd-strix-halo-comfyui` toolbox and dumps, for the first evaluation of an eight-step
+seed-0 run at 1024^2: the packed sequence entering block 0, the modulation vector, the
+RoPE tables, every block's output, the final layer's input and output, the conditioning
+tensor, the sigma grid, and (with `--dump-steps`) the sampler state and denoised
+prediction at every step. `tools/compare_comfy.py` replays each block on ComfyUI's own
+input to that block and on a chain from block 0; `tools/compare_comfy_steps.py` replays
+the whole transformer through the C ABI on ComfyUI's sampler states and its conditioning.
+The dumps are 100 MB per block, so they live under `build/` and are not committed.
+
+**bf16 residual stream.** ComfyUI keeps the residual stream in bf16 and rounds to bf16 at
+three points inside a block: the linear output, the gated product, and the sum with the
+prior state. The runtime carried an fp16 stream instead. A Torch replica isolated the
+choices: with the fp16 stream the replica sat at 1.58% / 2.90% relative rms against
+ComfyUI at blocks 1 and 2, and with ComfyUI's bf16 rounding points at 1.06% / 1.54%;
+rounding the norm, modulation, SwiGLU and gate products made no measurable difference
+(all under 0.2%). So the GEMM residual epilogues (`tools/gen_gemm.py`, `kernels/gemm_*_resid*.loom`)
+and the norm prepare kernels now read and write bf16, the session copies the caller's
+bf16 buffer straight in and out (no casts), and `KREA2_ABI_VERSION` is 3.
+
+**fp16 attention by default.** ComfyUI calls PyTorch SDPA in bf16. The smoothed int4-QK
+Sage kernel was the largest single divergence: one block on ComfyUI's input produced an
+update at cosine 0.995, and 0.99988 with the fp16 WMMA kernel; chained over 28 blocks
+0.969 against 0.9977. The fp16 kernel (`kernels/attention_gqa_lds_f16_wmma.loom`, moved
+out of `experiments/`) is now the default in both builders, with `KREA2_ATTN_QK=4` or `8`
+selecting the Sage kernels; the launch metadata's ninth field carries the width. At 4115
+tokens the fp16 kernel takes 25.2 ms (16.5 TFLOP/s) against 14.0 ms for the int4 kernel
+and about 19.8 ms including its preprocessing: 5.4 ms per block, near 4.5% of a forward.
+
+**Where that leaves the parity.** Every one of the 28 blocks, run on ComfyUI's own input
+to it, produces an update at image cosine 0.99978 or better (worst: block 17) and text
+cosine 0.99965 or better, with 0.5-2.1% relative rms; no block is an outlier, which is
+what int8 GEMMs summing in a different order look like. Chained from ComfyUI's block-0
+input the state cosine falls smoothly from 0.99997 to 0.9977 at block 27. Through the
+whole transformer on ComfyUI's sampler states, the velocity matches at cosine 0.9981 at
+the first step and 0.9989-0.9999 after it (rel rms 6.2% falling to 1.4%). The text
+encoder agrees with ComfyUI's conditioning tensor at cosine 0.99994 (0.99993-0.99999 per
+tapped layer) on the same 11 tokens after the template strip, so the fixed 34-token drop
+matches ComfyUI's `template_end` search.
+
+**The last Euler step amplifies.** From ComfyUI's own state at step 7, our velocity gives
+a next state at cosine 0.836, and a full eight-step run from ComfyUI's noise ends at
+final-latent cosine 0.806. This is cancellation, not a new error: at sigma 0.311 the step
+is `x - 0.311 v` where `0.311 v` nearly equals `x`, so the result is a small difference of
+large terms and a 1.4% velocity difference becomes a 55% latent difference. Decoded, the
+two images are the same fox in the same pose and lighting, ours slightly softer and less
+saturated (pixel MAE 35, PSNR 14.8 dB): `build/parity_ours.ppm`, `build/parity_comfy.ppm`.
+
+**What was deliberately not matched.** ComfyUI's `simple_scheduler` indexes a
+10,000-entry sigma table, quantizing the timestep to a 1e-4 grid; we keep diffusers'
+`linspace(1, 1/steps)` exactly, which our scheduler regression pins bit for bit over
+step counts 1..100. The two agree for step counts that divide 10,000 (Turbo's eight
+steps: equal to within one ulp at two of nine entries) and differ by up to 1e-4 in t
+elsewhere (Raw's 52). ComfyUI samples in fp32 and we round the Euler delta and product
+to bf16, as the diffusers CUDA pipeline does.
+
+**Fixture effect.** Against the bf16 reference on the fixture, the 28-block update cosine
+improved from 0.9921 to 0.99910 and one block from 0.99996 to 0.99997. The seed-0 Turbo
+image hash moves with the arithmetic, from `e438c3da...` to
+`45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253`; two warm 1024^2
+eight-step images took 27.8 s each on a box another job was sharing, unchanged within
+noise from the 27.7 s median measured against ComfyUI.

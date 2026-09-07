@@ -70,15 +70,15 @@ FORM = {
   %ns_global = buffer.assume.memory_space<global> %norm_scale : buffer
   %ms_global = buffer.assume.memory_space<global> %mod_scale : buffer
   %sh_global = buffer.assume.memory_space<global> %mod_shift : buffer
-  %h_view = buffer.view %h_global[%c0_offset] : buffer -> view<[%tokens_b]x[%width]xf16>
+  %h_view = buffer.view %h_global[%c0_offset] : buffer -> view<[%tokens_b]x[%width]xbf16>
   %ns_view = buffer.view %ns_global[%c0_offset] : buffer -> view<[%width]xf32>
   %ms_view = buffer.view %ms_global[%c0_offset] : buffer -> view<[%width]xf32>
   %sh_view = buffer.view %sh_global[%c0_offset] : buffer -> view<[%width]xf32>
 """,
         form="""  // sum of squares, then normalise, scale and modulate into LDS
   %ss_v = scf.for %ss_j = [%c0 to %chunks_per_lane step %c1](%ss_acc = %zero8 : vector<8xf32>) -> (vector<8xf32>) {
-""" + chunk("ss") + """    %ss_v16 = vector.load %h_view[%row, %ss_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
-    %ss_x = vector.extf %ss_v16 : vector<8xf16> to vector<8xf32>
+""" + chunk("ss") + """    %ss_v16 = vector.load %h_view[%row, %ss_i] : view<[%tokens_b]x[%width]xbf16> -> vector<8xbf16>
+    %ss_x = vector.extf %ss_v16 : vector<8xbf16> to vector<8xf32>
     %ss_sq = vector.mulf %ss_x, %ss_x : vector<8xf32>
     %ss_next = vector.addf %ss_acc, %ss_sq : vector<8xf32>
     scf.yield %ss_next : vector<8xf32>
@@ -92,8 +92,8 @@ FORM = {
   %rms_inv = scalar.rsqrtf %mean_eps : f32
   %rms_inv8 = vector.splat %rms_inv : vector<8xf32>
   scf.for %m_j = [%c0 to %chunks_per_lane step %c1] {
-""" + chunk("m") + """    %m_v16 = vector.load %h_view[%row, %m_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
-    %m_x = vector.extf %m_v16 : vector<8xf16> to vector<8xf32>
+""" + chunk("m") + """    %m_v16 = vector.load %h_view[%row, %m_i] : view<[%tokens_b]x[%width]xbf16> -> vector<8xbf16>
+    %m_x = vector.extf %m_v16 : vector<8xbf16> to vector<8xf32>
     %m_n = vector.mulf %m_x, %rms_inv8 : vector<8xf32>
     %m_ns = vector.load %ns_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
     %m_ns1 = vector.addf %m_ns, %one8 : vector<8xf32>

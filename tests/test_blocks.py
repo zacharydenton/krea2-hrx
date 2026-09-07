@@ -48,7 +48,7 @@ def main() -> int:
     ref = LoomBlocksRef(load(checkpoint), layers=max(depths), quant="w8a8")
     bf16 = R.Krea2Ref(w, quant="none", device="cuda", dtype=torch.bfloat16, layers=max(depths))
     gc, gs, gm = cos.cuda(), sin.cuda(), mods.cuda()
-    native_state, bf_state = x.half(), x[None].cuda().bfloat16()
+    native_state, bf_state = x.bfloat16(), x[None].cuda().bfloat16()
     composed, bf_outputs = {}, {}
     loom = Krea2Blocks(tokens, layers=max(depths), weights=checkpoint)
     try:

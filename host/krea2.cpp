@@ -278,7 +278,8 @@ public:
             compiled_capacity >> attention_waves_ >> pitch_hidden >>
             pitch_inter >> attention_bits_ >> gemm_bits_) ||
           version != 3 || compiled_tokens != unsigned(tokens) ||
-          (attention_bits_ != 4 && attention_bits_ != 8) ||
+          (attention_bits_ != 4 && attention_bits_ != 8 &&
+           attention_bits_ != 16) ||
           (gemm_bits_ != 4 && gemm_bits_ != 8) ||
           compiled_capacity != capacity_ ||
           gemm_rows_ !=
@@ -346,14 +347,17 @@ public:
       load(k_gemm_down_, "gemm_down",
            ("krea2_gemm_" + ib + "_resid" + tile).c_str());
       load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
-      std::string attention = attention_bits_ == 4
-                                  ? "krea2_attention_sage_i4_fast"
-                                  : "krea2_attention_sage_i8_fast";
-      if (attention_waves_ != 8)
+      // 4 / 8: smoothed int4 / int8 QK with the Sage preparation; 16: f16 QK
+      // and PV straight from the RoPE outputs (ComfyUI's SDPA class).
+      std::string attention = attention_bits_ == 16 ? "krea2_attention_gqa_lds_f16_wmma"
+                              : attention_bits_ == 4 ? "krea2_attention_sage_i4_fast"
+                                                     : "krea2_attention_sage_i8_fast";
+      if (attention_bits_ != 16 && attention_waves_ != 8)
         attention += "_prefetch";
       load(k_attention_, "attention", attention.c_str());
-      sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_), 48, 12,
-                                                int(attention_bits_));
+      if (attention_bits_ != 16)
+        sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_), 48,
+                                                  12, int(attention_bits_));
       const size_t T = capacity_;
       x_ = gpu::allocate(T * HIDDEN * 2);
       // the widest prepared operand: down's K = 16384 at its padded pitch
@@ -413,14 +417,8 @@ public:
       throw std::invalid_argument("mods has the wrong element count");
     if (rope_elements != T * HEAD_DIM)
       throw std::invalid_argument("cos/sin have the wrong element count");
-    if (device_bf16) {
-      gpu::Args args;
-      args.i32(x_elements).ptr(x).ptr(x_);
-      krea_native::native_launch("cast_bf16_f16", {}, args,
-                                 (x_elements + 255) / 256);
-    } else {
-      gpu::copy(x_, x, T * HIDDEN * 2);
-    }
+    // The residual stream is bf16 on the device and in the caller's buffer.
+    gpu::copy(x_, x, T * HIDDEN * 2);
     const float *device_mods = mods;
     if (!device_bf16) {
       gpu::copy(mods_, mods, mods_elements * 4);
@@ -430,16 +428,8 @@ public:
     gpu::copy(sin_, sin, rope_elements * 4);
     for (int i = first_block; i < first_block + block_count; ++i)
       block(i, device_mods);
-    if (device_bf16) {
-      gpu::Args args;
-      args.i32(x_elements).ptr(x_).ptr(x);
-      krea_native::native_launch("cast_f16_bf16", {}, args,
-                                 (x_elements + 255) / 256);
-      gpu::synchronize();
-    } else {
-      gpu::synchronize();
-      gpu::copy(x, x_, T * HIDDEN * 2);
-    }
+    gpu::synchronize();
+    gpu::copy(x, x_, T * HIDDEN * 2);
     if (profile) {
       double total = 0;
       for (auto &e : stage_us)
@@ -535,7 +525,16 @@ private:
       a.pointer(v_);
       launch(k_rope_, "qk norm + rope", T, 1, THREADS, a);
     }
-    {
+    if (attention_bits_ == 16) {
+      KernArgs a;
+      a.scalar_i32(T);
+      a.pointer(q_);
+      a.pointer(k_);
+      a.pointer(v_);
+      a.pointer(attn_);
+      launch(k_attention_, "f16 attention", unsigned((T + 15) / 16), KV_HEADS,
+             128, a);
+    } else {
       auto start = std::chrono::steady_clock::now();
       if (profile) {
         gpu::synchronize();

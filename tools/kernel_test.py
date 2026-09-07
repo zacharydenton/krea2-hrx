@@ -17,6 +17,17 @@ LOOMRUN = ROOT / "host/loomrun"
 TARGET = os.environ.get("LOOM_TARGET", "gfx1151")
 
 
+def bf16_bits(x: np.ndarray) -> np.ndarray:
+    """float32 -> bf16 bit patterns, round to nearest even (torch's and the kernels' rounding)."""
+    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
+    return ((u + 0x7FFF + ((u >> 16) & 1)) >> 16).astype(np.uint16)
+
+
+def bf16_round(x: np.ndarray) -> np.ndarray:
+    """float32 values rounded to bf16 precision (as float32)."""
+    return (bf16_bits(x).astype(np.uint32) << 16).view(np.float32)
+
+
 def compile_kernel(source: Path, root_symbol: str, config: dict, out: Path) -> None:
     cmd = [str(LOOM_COMPILE), str(source), "--backend=amdgpu-hal", f"--target={TARGET}",
            f"--root=@{root_symbol}", f"--output={out}"]
@@ -41,6 +52,16 @@ def launch(hsaco: Path, kernel: str, grid, block, args, workdir: Path, repeat: i
             path = workdir / f"in{index}.bin"
             np.ascontiguousarray(value, dtype=np.float16).tofile(path)
             cmd += ["--in", str(path)]
+        elif kind == "in_bf16":  # float32 values already representable in bf16, stored as their bf16 bits
+            path = workdir / f"in{index}.bin"
+            bf16_bits(np.ascontiguousarray(value, dtype=np.float32)).tofile(path)
+            cmd += ["--in", str(path)]
+        elif kind == "inout_bf16":
+            array, shape = value
+            path = workdir / f"io{index}.bin"
+            bf16_bits(np.ascontiguousarray(array, dtype=np.float32)).tofile(path)
+            cmd += ["--inout", str(path)]
+            outputs.append((path, shape, np.uint16))
         elif kind == "in_u8":
             path = workdir / f"in{index}.bin"
             np.ascontiguousarray(value, dtype=np.uint8).tofile(path)

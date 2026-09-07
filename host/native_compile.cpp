@@ -39,11 +39,12 @@ std::string prepare_kernels(const std::string &cache_parent,
   if (bits != 4 && bits != 8)
     throw std::invalid_argument("GEMM operand width must be 4 or 8");
   const int attention_waves = tokens < 8192 ? 8 : 4;
-  // KREA2_ATTN_QK=8 selects the int8-QK attention twin (quality fallback).
+  // KREA2_ATTN_QK: 16 (default) f16 QK and PV, ComfyUI's SDPA class; 4 / 8 the
+  // smoothed int4 / int8 QK kernels (faster, further from ComfyUI).
   const char *qk = std::getenv("KREA2_ATTN_QK");
-  const int attention_bits = qk && *qk ? std::atoi(qk) : 4;
-  if (attention_bits != 4 && attention_bits != 8)
-    throw std::invalid_argument("KREA2_ATTN_QK must be 4 or 8");
+  const int attention_bits = qk && *qk ? std::atoi(qk) : 16;
+  if (attention_bits != 4 && attention_bits != 8 && attention_bits != 16)
+    throw std::invalid_argument("KREA2_ATTN_QK must be 4, 8 or 16");
   namespace fs = std::filesystem;
   fs::path parent = cache_parent;
   auto source_text = [&](const std::string &name) {
@@ -114,9 +115,11 @@ std::string prepare_kernels(const std::string &cache_parent,
        {"kv_heads", "12"},
        {"k_offset", "6144"},
        {"eps", "1e-5"}});
-  add(std::string(attention_bits == 4 ? "attention_sage_i4_fast"
-                                      : "attention_sage_i8_fast") +
-          (attention_waves == 8 ? "" : "_prefetch"),
+  add(attention_bits == 16
+          ? std::string("attention_gqa_lds_f16_wmma")
+          : std::string(attention_bits == 4 ? "attention_sage_i4_fast"
+                                            : "attention_sage_i8_fast") +
+                (attention_waves == 8 ? "" : "_prefetch"),
       "attention",
       {{"q_stride", "6144"},
        {"kv_stride", "1536"},

@@ -57,7 +57,8 @@ def main() -> int:
     with workdir() as tmp:
         tmp = Path(tmp)
         # norm: h f16, norm_scale, mod scale/shift f32
-        h = (rng.standard_normal((tokens, width)) * 1.5).astype(np.float16)
+        from kernel_test import bf16_round
+        h = bf16_round((rng.standard_normal((tokens, width)) * 1.5).astype(np.float32))  # the bf16 residual stream
         ns = (rng.standard_normal(width) * 0.1).astype(np.float32)
         ms = (rng.standard_normal(width) * 0.2).astype(np.float32)
         sh = (rng.standard_normal(width) * 0.2).astype(np.float32)
@@ -66,7 +67,7 @@ def main() -> int:
         x = (1 + ms) * normed + sh
         normed_mod = x
         ok &= check("norm", tmp, tokens, width, x.astype(np.float32),
-                    [("in_f16", h), ("in", ns), ("in", ms), ("in", sh)], {"krea2.prepare_norm_i4.eps": 1e-5})
+                    [("in_bf16", h), ("in", ns), ("in", ms), ("in", sh)], {"krea2.prepare_norm_i4.eps": 1e-5})
         # gated: attn f16 [tokens][width], gate f16 [tokens][gate_stride] (a slice of the fused output)
         gate_stride = 15360
         attn = (rng.standard_normal((tokens, width)) * 0.5).astype(np.float16)
@@ -83,7 +84,7 @@ def main() -> int:
         ok &= check("plain", tmp, tokens, inter, x.astype(np.float32), [("in_f16", x)], {}, pad=128)
         # the int8 twins: the same rows at 127 levels, with and without a padded pitch
         ok &= check("norm", tmp, tokens, width, normed_mod.astype(np.float32),
-                    [("in_f16", h), ("in", ns), ("in", ms), ("in", sh)], {"krea2.prepare_norm_i8.eps": 1e-5}, bits=8)
+                    [("in_bf16", h), ("in", ns), ("in", ms), ("in", sh)], {"krea2.prepare_norm_i8.eps": 1e-5}, bits=8)
         ok &= check("gated", tmp, tokens, width, gated.astype(np.float32),
                     [("in_f16", attn), ("in_f16", fused)], {"krea2.prepare_gated_i8.gate_stride": gate_stride}, bits=8)
         ok &= check("plain", tmp, tokens, inter, x.astype(np.float32), [("in_f16", x)], {}, bits=8)

@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_MODEL = Path(os.environ.get("KREA2_MODEL") or Path.home() / "comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
 from scripts.build_kernels import build as build_kernels
 
-_ABI = 2
+_ABI = 3
 _ERR = 4096
 _U16P, _F32P = ctypes.POINTER(ctypes.c_uint16), ctypes.POINTER(ctypes.c_float)
 
@@ -63,7 +63,7 @@ class Krea2Blocks:
 
     def forward(self, x: torch.Tensor, mods: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                 *, first_block: int = 0, block_count: int | None = None) -> torch.Tensor:
-        """x [tokens][6144] (any float dtype) -> f16 residual stream after `layers` blocks.
+        """x [tokens][6144] (any float dtype) -> bf16 residual stream after `layers` blocks.
         mods [layers][6][6144] f32, cos/sin [tokens][128] f32.
         An optional contiguous block range uses the same full-session mods layout."""
         block_count = self.layers - first_block if block_count is None else block_count
@@ -71,7 +71,7 @@ class Krea2Blocks:
             raise ValueError("block range must be within the loaded layers")
         timing = os.environ.get("KREA2_TIMING") == "1"
         t0 = time.time()
-        xa = np.array(x.detach().to(torch.float16).cpu().numpy(), copy=True, order="C")
+        xa = np.array(x.detach().to(torch.bfloat16).contiguous().view(torch.int16).cpu().numpy().view(np.uint16), copy=True, order="C")
         ma = np.ascontiguousarray(mods.detach().float().cpu().numpy()[: self.layers])
         ca = np.ascontiguousarray(cos.detach().float().cpu().numpy()); sa = np.ascontiguousarray(sin.detach().float().cpu().numpy())
         t1 = time.time()
@@ -87,7 +87,7 @@ class Krea2Blocks:
         if rc:
             raise Krea2Error(err.value.decode())
         t2 = time.time()
-        out = torch.from_numpy(xa)
+        out = torch.from_numpy(xa.view(np.int16)).view(torch.bfloat16)
         if timing:
             print(f"  loom wrapper: to-host {t1 - t0:.3f} s, krea2_run {t2 - t1:.3f} s, from-host {time.time() - t2:.3f} s", file=sys.stderr)
         return out

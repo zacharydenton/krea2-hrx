@@ -1,4 +1,4 @@
-"""experiments/attention_gqa_lds_f16_wmma.loom: GQA attention with K/V tiles staged in LDS.
+"""kernels/attention_gqa_lds_f16_wmma.loom: GQA attention with K/V tiles staged in LDS.
 
 One workgroup of four waves per (16 query rows, key-value head): wave w is query head
 kv_head*4 + w. Per 16-key tile the workgroup loads the K tile [16][128] and the V tile
@@ -13,7 +13,7 @@ import os
 TILE = int(os.environ.get("ATTN_TILE", "16"))          # keys per staged tile (16 or 32)
 STEM = os.environ.get("ATTN_STEM", "attention_gqa_lds_f16_wmma")
 assert TILE in (16, 32)
-OUT = ROOT / "experiments" / f"{STEM}.loom"
+OUT = ROOT / "kernels" / f"{STEM}.loom"
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
 import os

@@ -82,10 +82,10 @@ def build(tokens: int, bits: int = 4) -> Path:
     if bits not in (4, 8):
         raise ValueError("bits must be 4 or 8")
     waves = 8 if tokens < 8192 else 4
-    attention_bits = int(os.environ.get("KREA2_ATTN_QK") or 4)   # 8: the int8-QK twin, a quality fallback
-    if attention_bits not in (4, 8):
-        raise ValueError("KREA2_ATTN_QK must be 4 or 8")
-    source = f"attention_sage_i{attention_bits}_fast" + ("" if waves == 8 else "_prefetch")
+    attention_bits = int(os.environ.get("KREA2_ATTN_QK") or 16)   # 16: f16 QK and PV (ComfyUI's SDPA class); 4 / 8: the smoothed int4 / int8 QK kernels
+    if attention_bits not in (4, 8, 16):
+        raise ValueError("KREA2_ATTN_QK must be 4, 8 or 16")
+    source = "attention_gqa_lds_f16_wmma" if attention_bits == 16 else f"attention_sage_i{attention_bits}_fast" + ("" if waves == 8 else "_prefetch")
     rows = gemm_rows(tokens, bits)
     m_group = gemm_m_group(tokens, rows)
     pitch_hidden, pitch_inter = gemm_pitch(HIDDEN, bits), gemm_pitch(INTER, bits)

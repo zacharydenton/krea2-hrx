@@ -59,7 +59,7 @@ def main() -> int:
         project = ROOT
         generated = Path(tmp) / "generated"
         (generated / "tools").mkdir(parents=True)
-        (generated / "experiments").mkdir()
+        (generated / "kernels").mkdir()
         generator = generated / "tools/gen_attention_lds.py"
         generator.write_text((project / "tools/gen_attention_lds.py").read_text())
         STEM = "attention_test_lds32"

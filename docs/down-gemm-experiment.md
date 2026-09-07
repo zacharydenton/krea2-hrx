@@ -7,11 +7,13 @@ the current kernel; total LDS operand reads per WMMA fall from 0.75 to 0.5.
 The 30 KiB operand stage retains register prefetching. Four-tile raster groups
 shorten at the end, avoiding empty workgroups.
 
-The candidate remains in `experiments/gemm_down_i4.loom`. It is **not selected
-by either production builder** pending clean whole-image timings. An integrated
-trial's repeat-image failure prompted withdrawal. The follow-up investigation
-below reproduced that failure class in the production VAE without the wide
-kernel and fixed a shared-memory race in auxiliary softmax.
+The candidate was **never selected by either production builder**: an integrated
+trial's repeat-image failure prompted withdrawal, and the follow-up investigation
+below reproduced that failure class in the production VAE without the wide kernel
+and fixed a shared-memory race in auxiliary softmax. Its idea arrived by another
+route when `tools/gen_gemm.py` grew the 256x128 tile for every projection, so the
+hand-written kernel, its test and its benchmark were removed; the measurements
+below are kept for the record and can be read back out of the history.
 
 ## Kernel measurements
 

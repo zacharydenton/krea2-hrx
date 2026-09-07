@@ -2,7 +2,7 @@
 256x128 workgroup tile (eight 64x64 wave tiles, 0.5 LDS operand reads per multiply), with the
 three epilogues the blocks need, the int4 arithmetic identical to the 128x128 kernels:
   plain  : C[m, n] = f16( acc * w_scale[n] * a_scale[m] )
-  resid  : x[m, n] = f16( x[m, n] + gate[n] * acc * w_scale[n] * a_scale[m] )   (in place on the f16 stream)
+  resid  : x[m, n] = bf16( x[m, n] + bf16( gate[n] * bf16( acc * w_scale[n] * a_scale[m] ) ) )   (in place on the bf16 stream)
   swiglu : C[m, o] = f16( silu(g) * u ), weight rows interleaved in 16-row gate/up groups
 A [M][K] and W [N][K] are int4 nibbles (low first) or int8 bytes, i32 accumulation, f32 scales.
 
@@ -111,8 +111,9 @@ def generate(mode: str, loads: str = "plain", raster: str = "shorten", bits: int
                  "// accumulator by the weight row's scale and the activation token's scale:\n"
                  "//   C[m, n] = f16( acc[m, n] * w_scale[n] * a_scale[m] )\n",
         "resid": "// Krea 2's residual int4 GEMM on the 256x128 tile: the scaled accumulator is gated per\n"
-                 "// column and added in place to the f16 residual stream:\n"
-                 "//   x[m, n] = f16( x[m, n] + gate[n] * acc[m, n] * w_scale[n] * a_scale[m] )\n",
+                 "// column and added in place to the bf16 residual stream, rounding to bf16 where ComfyUI\n"
+                 "// does (the linear's output, the gated product, the sum):\n"
+                 "//   x[m, n] = bf16( x[m, n] + bf16( gate[n] * bf16( acc[m, n] * w_scale[n] * a_scale[m] ) ) )\n",
         "swiglu": "// Krea 2's gate|up int4 GEMM on the 256x128 tile with the SwiGLU product in the\n"
                   "// epilogue: weight rows are interleaved in 16-row groups [gate o..o+15 | up o..o+15], so\n"
                   "// every wave holds the gate and up fragments of the same 16 outputs side by side and writes\n"
@@ -210,7 +211,7 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%m_size: index) {{
     if mode == "plain":
         K += "  %c_view = buffer.view %c_global[%c0_offset] : buffer -> view<[%m_bounded]x[%n_size]xf16>\n"
     elif mode == "resid":
-        K += "  %c_view = buffer.view %c_global[%c0_offset] : buffer -> view<[%m_bounded]x[%n_size]xf16>\n"
+        K += "  %c_view = buffer.view %c_global[%c0_offset] : buffer -> view<[%m_bounded]x[%n_size]xbf16>\n"
         K += "  %gate_view = buffer.view %gate_global[%c0_offset] : buffer -> view<[%n_size]xf32>\n"
     else:
         K += "  %n_half = index.div %n_size, %c2 : index\n  %c_view = buffer.view %c_global[%c0_offset] : buffer -> view<[%m_bounded]x[%n_half]xf16>\n"
@@ -370,14 +371,21 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%m_size: index) {{
             K += """        %narrow = vector.fptrunc %scaled : vector<4xf32> to vector<4xf16>
 """
         else:
-            K += """        %gated = vector.mulf %scaled, %gate_values : vector<4xf32>
-        %prior_half = vector.load %c_view[%bounded, %out_col] : view<[%m_bounded]x[%n_size]xf16> -> vector<4xf16>
-        %prior = vector.extf %prior_half : vector<4xf16> to vector<4xf32>
+            K += """        // ComfyUI's bf16 rounding points: the linear's output, the gated
+        // product, and the residual sum.
+        %lin_bf = vector.fptrunc %scaled : vector<4xf32> to vector<4xbf16>
+        %lin = vector.extf %lin_bf : vector<4xbf16> to vector<4xf32>
+        %gated0 = vector.mulf %lin, %gate_values : vector<4xf32>
+        %gated_bf = vector.fptrunc %gated0 : vector<4xf32> to vector<4xbf16>
+        %gated = vector.extf %gated_bf : vector<4xbf16> to vector<4xf32>
+        %prior_bf = vector.load %c_view[%bounded, %out_col] : view<[%m_bounded]x[%n_size]xbf16> -> vector<4xbf16>
+        %prior = vector.extf %prior_bf : vector<4xbf16> to vector<4xf32>
         %summed = vector.addf %prior, %gated : vector<4xf32>
-        %narrow = vector.fptrunc %summed : vector<4xf32> to vector<4xf16>
+        %narrow = vector.fptrunc %summed : vector<4xf32> to vector<4xbf16>
 """
-        K += """        vector.store %narrow, %c_view[%bounded, %out_col] : vector<4xf16>, view<[%m_bounded]x[%n_size]xf16>
-      }
+        K += ("""        vector.store %narrow, %c_view[%bounded, %out_col] : vector<4xbf16>, view<[%m_bounded]x[%n_size]xbf16>
+""" if mode == "resid" else """        vector.store %narrow, %c_view[%bounded, %out_col] : vector<4xf16>, view<[%m_bounded]x[%n_size]xf16>
+""") + """      }
     }
     kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
   }
