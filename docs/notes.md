@@ -932,6 +932,34 @@ generates and matches the oracle to cosine 0.99999996; it is **not measured** --
 was running another job's video render at 100% for the whole window, and the baseline
 itself swung between 25 and 41 ms, so no A/B from that period means anything.
 
+Measured since (best of five rotated rounds, `tools/ab_attention.py`, on a box whose
+neighbour was rendering -- so read the ordering, not the absolute times):
+
+| variant | time | of baseline |
+| --- | ---: | ---: |
+| shipped (16-key tiles, HOIST=4, Q in LDS) | 24.36 ms | 1.000x |
+| `ATTN_QTILES=2` (8 waves, two query tiles) | 23.91 ms | 1.019x |
+| `ATTN_QTILES=2 ATTN_TILE=32` | 27.23 ms | 0.895x |
+| `ATTN_HOIST=8 ATTN_QLDS=0` (all Q in registers) | 32.36 ms | 0.753x |
+| `ATTN_TILE=32` | 34.56 ms | 0.705x |
+| `ATTN_TILE=32 ATTN_HOIST=8` | 40.72 ms | 0.598x |
+
+So the two obvious ideas are falsified: 32-key tiles, which won for H3, lose 30% here, and
+hoisting every Q fragment into registers loses 25% -- both buy amortization with register
+pressure this kernel cannot afford. Two query tiles per workgroup is worth about 2%, which
+is inside the noise of that box and not worth its 8-wave complexity on this evidence.
+The shipped configuration is a local optimum of the knobs that exist.
+
+What that leaves is the inner loop itself. Per 16-key tile a wave issues 16 WMMA against
+roughly 32 LDS reads (eight 32-byte K fragments and eight V fragments), some 40 vector f32
+operations, 8 cross-lane shuffles for the row max, two vector transcendentals, and a
+512-byte LDS round trip to turn the f32 score fragment into an f16 lhs. At 31% of the f16
+WMMA peak with the working set in cache, the kernel is issue-bound, not fetch-bound, and
+the next honest step is to count instructions in the loop rather than to guess at tiles.
+The score-to-lhs round trip is the obvious target -- it is a 16x16 transpose across lanes,
+which is why it goes through LDS -- but its barrier is subgroup-scope and its scratch is
+per-wave, so it may be cheaper than it looks.
+
 Two things worth knowing before the next attempt. minimax-h3-loom's fastest attention
 (~37 TFLOP/s-equivalent) is an *int8-QK* kernel with 64-key tiles and lookahead, not an
 fp16 one; its fp16 GQA kernel is this one, from the same generator, so there is nothing to
