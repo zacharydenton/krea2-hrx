@@ -11,6 +11,14 @@ Every kernel with a tensor in it is Loom; the host is plain C++ on HRX's public 
 the loop. The int4 (W4A4) kernel family is in the tree and measured (2x the int8 rate on
 this part), but no checkpoint feeds it: the runtime does not quantize weights itself.
 
+![A cloaked figure at the edge of an obsidian canyon, colossal statues buried in the far
+cliffs, god rays through a lightning storm](docs/images/canyon.png)
+
+*Krea 2 Turbo, 1024x1024, eight steps, seed 7, straight out of `build/krea2`:* `a lone
+figure in a red cloak standing at the edge of a vast obsidian canyon, colossal ancient
+statues half-buried in the far cliffs, storm light breaking through thunderclouds,
+volumetric god rays, cinematic wide shot, epic scale, photorealistic, fine detail`
+
 A sibling of [minimax-h3-loom](https://github.com/zacharydenton/minimax-h3-loom),
 [dinov3-loom](https://github.com/zacharydenton/dinov3-loom) and
 [scrfd-loom](https://github.com/zacharydenton/scrfd-loom).
