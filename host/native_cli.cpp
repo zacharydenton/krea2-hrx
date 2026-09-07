@@ -22,7 +22,7 @@ int main(int argc, char **argv) {
     }
     if (!args.count("--model") || !args.count("--prompt") || !args.count("--out"))
       throw std::runtime_error(
-          "usage: krea2-generate --model diffusion_models/krea2_turbo_int8_convrot.safetensors "
+          "usage: krea2 --model diffusion_models/krea2_turbo_int8_convrot.safetensors "
           "--prompt TEXT --out IMAGE.ppm [--text-encoder FILE] [--vae FILE] "
           "[--checkpoint turbo|raw] [--compiler PATH] [--width 1024] [--height 1024] "
           "[--steps N] [--seed 0] [--negative TEXT] [--guidance G]\n"

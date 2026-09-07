@@ -4,7 +4,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/build_common.sh
 link_shared build/libkrea2.so "${COMMON[@]}"
 link_pipeline build/libkrea2_pipeline.so
-for pair in 'host/native_cli.cpp krea2-generate' \
+for pair in 'host/native_cli.cpp krea2' \
     'tests/native_components.cpp krea2-native-components' \
     'tests/scheduler_runner.cpp krea2-scheduler-test' \
     'tests/sage_runner.cpp sage-runner'; do

@@ -30,7 +30,7 @@ work.
 
 ## What you get
 
-- **`build/krea2-generate`**: a standalone CLI. Point it at ComfyUI's checkpoint, prompt
+- **`build/krea2`**: a standalone CLI. Point it at ComfyUI's checkpoint, prompt
   in, RGB out (PPM), no Python; `--negative` and `--guidance` for Raw, with the
   checkpoint's defaults when omitted.
 - **`libkrea2_pipeline.so`** with [host/krea2_pipeline.h](host/krea2_pipeline.h): the
@@ -49,7 +49,7 @@ Measured 2026-09-07 on one Radeon 8060S with nothing else on the GPU, alternatin
 two backends: ComfyUI at `250b2e95` in the `amd-strix-halo-comfyui` toolbox (PyTorch
 2.14 ROCm 7.15, the published `krea2_turbo_int8_convrot` checkpoint at bf16 compute,
 PyTorch attention, Comfy Kitchen GEMMs, DynamicVRAM) through its own loader, sampler and
-VAE APIs, against `build/krea2-generate`'s C API. 1024x1024, eight Euler steps, CFG 1,
+VAE APIs, against `build/krea2`'s C API. 1024x1024, eight Euler steps, CFG 1,
 seed 0, `a red fox in the snow`. Every run of each backend produced the same RGB hash.
 
 | | ComfyUI INT8 ConvRot | this runtime (W8A8) |
@@ -151,7 +151,7 @@ and Pillow. Inference never needs it.
 ```sh
 source scripts/env.sh
 scripts/build_native.sh
-env -u LD_LIBRARY_PATH build/krea2-generate \
+env -u LD_LIBRARY_PATH build/krea2 \
   --model ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors \
   --prompt "a red fox in the snow" --width 1024 --height 1024 --seed 0 --out build/fox.ppm
 ```
