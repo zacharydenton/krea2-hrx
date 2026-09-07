@@ -19,8 +19,9 @@ kernel.def target(@krea2_attention_sage_i8_fast_prefetch_gfx11) export("krea2_at
   %c16 = index.constant 16 : index
   %c128 = index.constant 128 : index
   %tokens0 = config.get @krea2.attention_sage_i8_fast_prefetch.tokens : index
-  %rounded = index.add %tokens0, %c15 : index
-  %tiles = index.div %rounded, %c16 : index
+  %group = index.constant 16 : index
+  %rounded_group = index.add %tokens0, %c15 : index
+  %tiles = index.div %rounded_group, %group : index
   kernel.launch.config workgroups(%tiles, %kv_head_count, %c1) workgroup_size(%c128, %c1, %c1) : index
 } launch(%token_count: index, %q: buffer, %k: buffer, %v: buffer, %qs: buffer, %ks: buffer, %correction: buffer, %out: buffer) {
   %q_stride0 = config.get @krea2.attention_sage_i8_fast_prefetch.q_stride : index
@@ -96,6 +97,7 @@ kernel.def target(@krea2_attention_sage_i8_fast_prefetch_gfx11) export("krea2_at
   %workitem = kernel.workitem.id<x> : index
   %wave0 = kernel.subgroup.id : index
   %wave = index.assume %wave0 [range(%wave0, 0, 3)] : index
+
   %lane = kernel.subgroup.lane.id : index
   %lane_column = index.rem %lane, %c16 : index
   %lane_group = index.div %lane, %c16 : index
@@ -176,7 +178,8 @@ kernel.def target(@krea2_attention_sage_i8_fast_prefetch_gfx11) export("krea2_at
   %vchan0 = index.add %kv_base0, %workitem : index
   %vchan = index.assume %vchan0 [lt(%vchan0, %kv_stride0)] : index
   %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
-  %key_tile_count = index.add %tiles_per_image, %c0 : index
+  %key_rounded = index.add %tokens0, %c15 : index
+  %key_tile_count = index.div %key_rounded, %c16 : index
 
   %qc0 = index.constant 0 : index
   %qw0 = index.constant 0 : index

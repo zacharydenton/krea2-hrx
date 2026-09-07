@@ -1,8 +1,8 @@
-// The 28 Krea 2 transformer blocks as a resident Loom session: per block ten
+// The 28 Krea 2 transformer blocks as a resident Loom session: per block ten or eleven
 // launches (prepare -> fused qkv|gate GEMM -> QK-norm+RoPE (+ contiguous q/k/v)
 // -> attention -> gated prepare -> wo GEMM with gated residual -> prepare ->
 // fused gate|up GEMM -> SwiGLU prepare -> down GEMM with gated residual), W4A4
-// ConvRot throughout.
+// ConvRot throughout. Long fp16 attention sequences add a V transpose.
 //
 // Build: ./scripts/build_host.sh
 
@@ -271,19 +271,28 @@ public:
       capacity_ = std::max<size_t>(
           (tokens + 16 + 31) / 32 * 32,
           (tokens + 63) / 64 * 64); // tokens+16 headroom, whole 64-key blocks
-      // "4 tokens gemm_rows m_group capacity attention_waves pitch(6144)
-      // pitch(16384) attention_bits gemm_bits": every shape field must match
+      // "version tokens gemm_rows m_group capacity attention_waves pitch(6144)
+      // pitch(16384) attention_bits gemm_bits [fp16_query_tiles]": fields match
       // what this host derives for gemm_bits (the weights' width, 4 or 8);
       // attention_bits (4, 8 or 16) is the builder's choice. Version 4 uses
       // bf16 residual buffers; version 3 kernels expect incompatible fp16.
+      // Version 5 adds the fp16 query tile count and optional V transpose.
       std::ifstream metadata(kernels_dir + "/launch.txt");
       unsigned version = 0, compiled_tokens = 0, pitch_hidden = 0,
                pitch_inter = 0;
       size_t compiled_capacity = 0;
-      if (!(metadata >> version >> compiled_tokens >> gemm_rows_ >> m_group_ >>
-            compiled_capacity >> attention_waves_ >> pitch_hidden >>
-            pitch_inter >> attention_bits_ >> gemm_bits_) ||
-          version != 4 || compiled_tokens != unsigned(tokens) ||
+      bool parsed = bool(metadata >> version >> compiled_tokens >> gemm_rows_ >>
+                         m_group_ >> compiled_capacity >> attention_waves_ >>
+                         pitch_hidden >> pitch_inter >> attention_bits_ >> gemm_bits_);
+      if (version == 5)
+        parsed = parsed && bool(metadata >> fp16_query_tiles_);
+      if (fp16_query_tiles_ == 2)
+        capacity_ = (tokens + 79) / 64 * 64;
+      if (!parsed ||
+          (version != 4 && version != 5) ||
+          fp16_query_tiles_ != (version == 5 && attention_bits_ == 16
+                                  ? unsigned(krea2_shape::fp16_query_tiles(tokens)) : 1u) ||
+          compiled_tokens != unsigned(tokens) ||
           (attention_bits_ != 4 && attention_bits_ != 8 &&
            attention_bits_ != 16) ||
           (gemm_bits_ != 4 && gemm_bits_ != 8) ||
@@ -355,12 +364,16 @@ public:
       load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
       // 4 / 8: smoothed int4 / int8 QK with the Sage preparation; 16: f16 QK
       // and PV straight from the RoPE outputs (ComfyUI's SDPA class).
-      std::string attention = attention_bits_ == 16 ? "krea2_attention_gqa_lds_f16_wmma"
-                              : attention_bits_ == 4 ? "krea2_attention_sage_i4_fast"
-                                                     : "krea2_attention_sage_i8_fast";
+      std::string attention = attention_bits_ == 16
+          ? (fp16_query_tiles_ == 2 ? "krea2_attention_query32"
+                                   : "krea2_attention_gqa_lds_f16_wmma")
+          : (attention_bits_ == 4 ? "krea2_attention_sage_i4_fast"
+                                  : "krea2_attention_sage_i8_fast");
       if (attention_bits_ != 16 && attention_waves_ != 8)
         attention += "_prefetch";
       load(k_attention_, "attention", attention.c_str());
+      if (fp16_query_tiles_ == 2)
+        load(k_attention_transpose_, "attention_transpose", "krea2_sage_transpose");
       if (attention_bits_ != 16)
         sage_ = std::make_unique<SagePreparation>(tokens, int(capacity_), 48,
                                                   12, int(attention_bits_));
@@ -374,6 +387,10 @@ public:
       q_ = gpu::allocate(T * HIDDEN * 2);
       k_ = gpu::allocate(size_t(KV_HEADS * HEAD_DIM) * T * 2);
       v_ = gpu::allocate(size_t(KV_HEADS * HEAD_DIM) * T * 2);
+      if (fp16_query_tiles_ == 2) {
+        v_transposed_ = gpu::allocate(size_t(KV_HEADS * HEAD_DIM) * T * 2);
+        gpu::zero(v_transposed_, size_t(KV_HEADS * HEAD_DIM) * T * 2);
+      }
       gpu::zero(v_, size_t(KV_HEADS * HEAD_DIM) * T * 2);
       gpu::zero(q_, T * HIDDEN * 2);
       gpu::zero(k_, size_t(KV_HEADS * HEAD_DIM) * T * 2);
@@ -394,8 +411,8 @@ public:
 
 private:
   void release() noexcept {
-    for (void *p :
-         {x_, a_q_, a_s_, fused_, q_, k_, v_, attn_, gu_, mods_, cos_, sin_})
+    for (void *p : {x_, a_q_, a_s_, fused_, q_, k_, v_, v_transposed_, attn_,
+                    gu_, mods_, cos_, sin_})
       if (p)
         (void)gpu::release(p);
   }
@@ -532,14 +549,23 @@ private:
       launch(k_rope_, "qk norm + rope", T, 1, THREADS, a);
     }
     if (attention_bits_ == 16) {
+      if (fp16_query_tiles_ == 2) {
+        KernArgs transpose;
+        transpose.scalar_i32(T);
+        transpose.pointer(v_);
+        transpose.pointer(v_transposed_);
+        launch(k_attention_transpose_, "f16 V transpose", unsigned((T + 31) / 32),
+               KV_HEADS * HEAD_DIM / 32, 256, transpose);
+      }
       KernArgs a;
       a.scalar_i32(T);
       a.pointer(q_);
       a.pointer(k_);
-      a.pointer(v_);
+      a.pointer(fp16_query_tiles_ == 2 ? v_transposed_ : v_);
       a.pointer(attn_);
-      launch(k_attention_, "f16 attention", unsigned((T + 15) / 16), KV_HEADS,
-             128, a);
+      const unsigned rows = 16 * fp16_query_tiles_;
+      launch(k_attention_, "f16 attention", unsigned((T + rows - 1) / rows),
+             KV_HEADS, 128 * fp16_query_tiles_, a);
     } else {
       auto start = std::chrono::steady_clock::now();
       if (profile) {
@@ -606,16 +632,17 @@ private:
   int tokens_, layers_;
   size_t capacity_ = 0;
   unsigned gemm_rows_ = 0, m_group_ = 0, attention_waves_ = 4,
-           attention_bits_ = 4, gemm_bits_ = 4;
+           attention_bits_ = 4, gemm_bits_ = 4, fp16_query_tiles_ = 1;
   std::mutex mutex_;
   std::vector<Block> blocks_;
   std::unique_ptr<SagePreparation> sage_;
   std::shared_ptr<krea2_weights> weights_;
   void *x_ = nullptr, *a_q_ = nullptr, *a_s_ = nullptr, *fused_ = nullptr,
-       *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *attn_ = nullptr,
-       *gu_ = nullptr, *mods_ = nullptr, *cos_ = nullptr, *sin_ = nullptr;
+       *q_ = nullptr, *k_ = nullptr, *v_ = nullptr, *v_transposed_ = nullptr,
+       *attn_ = nullptr, *gu_ = nullptr, *mods_ = nullptr, *cos_ = nullptr,
+       *sin_ = nullptr;
   Kernel k_prep_norm_, k_prep_gated_, k_prep_swiglu_, k_gemm_qkvg_, k_gemm_gu_,
-      k_gemm_wo_, k_gemm_down_, k_rope_, k_attention_;
+      k_gemm_wo_, k_gemm_down_, k_rope_, k_attention_, k_attention_transpose_;
 };
 
 void write_error(char *error, size_t capacity, const char *message) noexcept {

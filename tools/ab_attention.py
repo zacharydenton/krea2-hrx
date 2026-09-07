@@ -72,7 +72,7 @@ def main() -> int:
             for stem, qtiles in order:
                 hs, sym = built[stem]
                 (out,), t = launch(hs, sym, ((tokens + 16 * qtiles - 1) // (16 * qtiles), KV, 1), (128 * qtiles, 1, 1),
-                                   [("i32", tokens), ("i32", KV), ("in_f16", pad(q)), ("in_f16", pad(k)),
+                                   [("i32", tokens), ("i32", 0), ("in_f16", pad(q)), ("in_f16", pad(k)),
                                     ("in_f16", pad(v)), ("out_f16", ((tokens, HEADS * D), np.float16))], tmp, repeat=3)
                 if r == 0:
                     ok &= report(f"  {stem} correctness", out, want, atol=2e-2, rtol=2e-2)

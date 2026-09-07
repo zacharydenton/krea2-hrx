@@ -45,6 +45,8 @@ std::string prepare_kernels(const std::string &cache_parent,
   const int attention_bits = qk && *qk ? std::atoi(qk) : 16;
   if (attention_bits != 4 && attention_bits != 8 && attention_bits != 16)
     throw std::invalid_argument("KREA2_ATTN_QK must be 4, 8 or 16");
+  const int query_tiles =
+      attention_bits == 16 ? krea2_shape::fp16_query_tiles(tokens) : 1;
   namespace fs = std::filesystem;
   fs::path parent = cache_parent;
   auto source_text = [&](const std::string &name) {
@@ -54,6 +56,8 @@ std::string prepare_kernels(const std::string &cache_parent,
     return it->second;
   };
   int capacity = std::max((tokens + 47) / 32 * 32, (tokens + 63) / 64 * 64);
+  if (query_tiles == 2)
+    capacity = (tokens + 79) / 64 * 64;
   // The GEMM tile, raster group and operand pitches come from gemm_shape.h,
   // which scripts/build_kernels.py mirrors; the session checks every field.
   const int rows = krea2_shape::gemm_rows(tokens, bits);
@@ -64,13 +68,13 @@ std::string prepare_kernels(const std::string &cache_parent,
                         std::to_string(krea2_shape::gemm_pitch(16384, bits)),
                     ib = "i" + std::to_string(bits);
   auto group = std::to_string(m_group);
-  std::string metadata = "4 " + std::to_string(tokens) + " " +
+  std::string metadata = "5 " + std::to_string(tokens) + " " +
                          std::to_string(rows) + " " + group + " " +
                          std::to_string(capacity) + " " +
                          std::to_string(attention_waves) + " " +
                          pitch_hidden + " " + pitch_inter + " " +
                          std::to_string(attention_bits) + " " +
-                         std::to_string(bits) + "\n";
+                         std::to_string(bits) + " " + std::to_string(query_tiles) + "\n";
   struct Job {
     std::string source, symbol, stem;
     std::map<std::string, std::string> cfg;
@@ -116,7 +120,8 @@ std::string prepare_kernels(const std::string &cache_parent,
        {"k_offset", "6144"},
        {"eps", "1e-5"}});
   add(attention_bits == 16
-          ? std::string("attention_gqa_lds_f16_wmma")
+          ? std::string(query_tiles == 2 ? "attention_query32"
+                                        : "attention_gqa_lds_f16_wmma")
           : std::string(attention_bits == 4 ? "attention_sage_i4_fast"
                                             : "attention_sage_i8_fast") +
                 (attention_waves == 8 ? "" : "_prefetch"),
@@ -127,10 +132,13 @@ std::string prepare_kernels(const std::string &cache_parent,
        {"token_capacity", std::to_string(capacity)},
        {"scale", "0.08838834764831845"},
        {"out_stride", "6144"}});
+  if (query_tiles == 2)
+    add("sage_transpose", "attention_transpose",
+        {{"width", "1536"}, {"row_capacity", std::to_string(capacity)}});
   // Bundles are deployable without the build-machine compiler. Source/config
   // fingerprints select immutable artifacts; compiler provenance is recorded.
   std::string signature =
-      "native-kernels-v4:gfx1151:sage-prep-v3:64:vt\n" + metadata;
+      "native-kernels-v5:gfx1151:sage-prep-v3:64:vt\n" + metadata;
   for (const auto &j : jobs) {
     signature += source_text(j.source);
     signature += j.source + j.symbol + j.stem;

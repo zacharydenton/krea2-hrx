@@ -240,7 +240,7 @@ reuses a fingerprinted kernel bundle with `scripts/build_kernels.py`.
 
 ## How it works
 
-**Blocks.** Ten launches per block: prepare (RMSNorm, modulation, group-256 Hadamard
+**Blocks.** Ten launches per block (eleven for long fp16 attention sequences): prepare (RMSNorm, modulation, group-256 Hadamard
 rotation, per-token int8 quantization) -> fused qkv|gate GEMM -> QK norm and RoPE ->
 attention -> gated prepare -> out GEMM with the gated residual -> prepare -> fused
 gate|up GEMM with the SwiGLU product in its epilogue -> prepare -> down GEMM with the
@@ -260,6 +260,11 @@ float64 oracle and the int4 tiles against each other. The prepare kernels
 
 **Attention.** The default is the fp16 WMMA kernel, fp16 QK and PV with fp32 online
 softmax, which is what ComfyUI's bf16 SDPA call is closest to on this part.
+From 2,048 tokens, `attention_query32` shares 32-key tiles across two query tiles
+and uses a separately transposed V buffer. It measures 1.76–1.78× faster at
+4,115 tokens including transposition; shorter sequences retain the original
+kernel. Both paths are Loom and use the existing compiler. Numerical differences
+and paired measurements are recorded in [docs/attention-2x.md](docs/attention-2x.md).
 `KREA2_ATTN_QK=4` or `8` selects the SageAttention-style kernels instead at kernel-build
 time: Q centered per 64-token tile and K over the sequence, both int4 (or int8) on the
 WMMA with an fp32 correction GEMM for the means, fp16 PV, fp32 online softmax. Below

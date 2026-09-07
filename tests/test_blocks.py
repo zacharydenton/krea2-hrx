@@ -6,8 +6,10 @@ test of an individual kernel's accuracy.
 
     python3 tests/test_blocks.py [--layers N]"""
 import argparse
+import multiprocessing
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import torch
@@ -17,6 +19,70 @@ sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "reference"))
 import krea2_ref as R
 from krea2_loom import Krea2Blocks
 from loom_ref import LoomBlocksRef
+
+
+def native_worker(connection, tokens, layers, checkpoint):
+    # Torch's ROCm provider and HRX's provider cannot reliably initialize in
+    # the same process. Keep the real native session in a spawned process;
+    # only CPU tensors cross the pipe, as in the standalone kernel tests.
+    session = None
+    try:
+        session = Krea2Blocks(tokens, layers=layers, weights=checkpoint)
+        connection.send((True, None))
+        while True:
+            request = connection.recv()
+            if request is None:
+                break
+            method, args, kwargs = request
+            result = getattr(session, method)(*args, **kwargs)
+            connection.send((True, result))
+    except Exception:
+        connection.send((False, traceback.format_exc()))
+    finally:
+        if session is not None:
+            session.close()
+        connection.close()
+
+
+class NativeBlocksProcess:
+    def __init__(self, tokens, layers, weights):
+        context = multiprocessing.get_context("spawn")
+        self.connection, child = context.Pipe()
+        self.process = context.Process(target=native_worker,
+                                       args=(child, tokens, layers, weights))
+        self.process.start()
+        child.close()
+        try:
+            self.receive()
+        except Exception:
+            self.close()
+            raise
+
+    def receive(self):
+        ok, result = self.connection.recv()
+        if not ok:
+            raise RuntimeError(result)
+        return result
+
+    def forward(self, *args, **kwargs):
+        self.connection.send(("forward", args, kwargs))
+        return self.receive()
+
+    def profile(self, enabled):
+        self.connection.send(("profile", (enabled,), {}))
+        return self.receive()
+
+    def close(self):
+        try:
+            if self.process.is_alive():
+                self.connection.send(None)
+        except (BrokenPipeError, EOFError):
+            pass
+        self.process.join(10)
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join()
+        self.connection.close()
 
 
 def cosine(a, b):
@@ -50,7 +116,7 @@ def main() -> int:
     gc, gs, gm = cos.cuda(), sin.cuda(), mods.cuda()
     native_state, bf_state = x.bfloat16(), x[None].cuda().bfloat16()
     composed, bf_outputs = {}, {}
-    loom = Krea2Blocks(tokens, layers=max(depths), weights=checkpoint)
+    loom = NativeBlocksProcess(tokens, layers=max(depths), weights=checkpoint)
     try:
         with torch.no_grad():
             for i in range(max(depths)):

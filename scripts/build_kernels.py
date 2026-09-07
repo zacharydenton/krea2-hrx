@@ -74,6 +74,11 @@ def gemm_m_group(tokens, rows=128):
     return min((4, 3, 2), key=lambda g: ((tiles + g - 1) // g * g, -g))
 
 
+def fp16_query_tiles(tokens):
+    """Two query tiles share each 32-key tile above the measured crossover."""
+    return 2 if tokens >= 2048 else 1
+
+
 def build(tokens: int, bits: int = 4) -> Path:
     """Return a complete, immutable kernel bundle matching the current sources and configuration.
     bits: the GEMM operand width the weights were exported for (build/weights/config.json)."""
@@ -85,12 +90,15 @@ def build(tokens: int, bits: int = 4) -> Path:
     attention_bits = int(os.environ.get("KREA2_ATTN_QK") or 16)   # 16: f16 QK and PV (ComfyUI's SDPA class); 4 / 8: the smoothed int4 / int8 QK kernels
     if attention_bits not in (4, 8, 16):
         raise ValueError("KREA2_ATTN_QK must be 4, 8 or 16")
-    source = "attention_gqa_lds_f16_wmma" if attention_bits == 16 else f"attention_sage_i{attention_bits}_fast" + ("" if waves == 8 else "_prefetch")
+    query_tiles = fp16_query_tiles(tokens) if attention_bits == 16 else 1
+    source = ("attention_query32" if query_tiles == 2 else "attention_gqa_lds_f16_wmma") if attention_bits == 16 else f"attention_sage_i{attention_bits}_fast" + ("" if waves == 8 else "_prefetch")
     rows = gemm_rows(tokens, bits)
     m_group = gemm_m_group(tokens, rows)
     pitch_hidden, pitch_inter = gemm_pitch(HIDDEN, bits), gemm_pitch(INTER, bits)
     ib = f"i{bits}"
     capacity = max((tokens + 16 + 31) // 32 * 32, (tokens + 63) // 64 * 64)   # tokens+16 headroom, whole 64-key blocks, a multiple of 32
+    if query_tiles == 2:
+        capacity = (tokens + 16 + 63) // 64 * 64
     def gemm(kind, stem, k, n):
         source = f"gemm_{ib}{kind}" + ("_256" if rows == 256 else "")
         ns = f"krea2.{source}"
@@ -113,6 +121,10 @@ def build(tokens: int, bits: int = 4) -> Path:
           dict(q_stride=HIDDEN, kv_stride=KV * D, tokens=tokens,
                token_capacity=capacity, scale=D ** -0.5, out_stride=HIDDEN).items()}),
     ]
+    if query_tiles == 2:
+        jobs.append(("sage_transpose", "krea2_sage_transpose", "attention_transpose",
+                     {"krea2.sage_transpose.width": KV * D,
+                      "krea2.sage_transpose.row_capacity": capacity}))
     loom = compiler()
     stat = loom.stat()
     signature = dict(jobs=jobs, compiler=[str(loom), stat.st_size, stat.st_mtime_ns],
@@ -123,7 +135,7 @@ def build(tokens: int, bits: int = 4) -> Path:
     parent = ROOT / "build/kernels" / f"T{tokens}"
     parent.mkdir(parents=True, exist_ok=True)
     out = parent / fingerprint
-    launch = f"4 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter} {attention_bits} {bits}\n"
+    launch = f"5 {tokens} {rows} {m_group} {capacity} {waves} {pitch_hidden} {pitch_inter} {attention_bits} {bits} {query_tiles}\n"
     # Serialize publication, including across Python processes. A failed compilation
     # never exposes a partial bundle or overwrites kernels used by a live session.
     with (parent / ".lock").open("a") as lock:

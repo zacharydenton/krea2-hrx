@@ -25,13 +25,15 @@ step "generated kernels match their generators" bash -c '
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#; s#OUT = Path(__file__).resolve().parent.parent / \"kernels\"#OUT = Path(\"$tmpdir\") / \"kernels\"#" "$OLDPWD/tools/gen_attention_lds.py" > tools/gen_attention_lds.py &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_native_ops.py" > tools/gen_native_ops.py &&
   python3 tools/gen_native_ops.py && cmp -s host/native_sources.h "$OLDPWD/host/native_sources.h" && diff -r kernels/native "$OLDPWD/kernels/native" &&
+  cp "$OLDPWD/tools/gen_attention_query.py" tools/gen_attention_query.py && cp "$OLDPWD/tools/gen_attention_query32.py" tools/gen_attention_query32.py && python3 tools/gen_attention_query32.py >/dev/null &&
   cp "$OLDPWD/tools/gen_sage_attention.py" tools/gen_sage_attention.py && cp "$OLDPWD/tools/gen_gemm.py" tools/gen_gemm.py &&
   python3 tools/gen_prepare.py >/dev/null && python3 tools/gen_attention_lds.py >/dev/null && python3 tools/gen_sage_attention.py >/dev/null && python3 tools/gen_gemm.py >/dev/null &&
-  for f in attention_gqa_lds_f16_wmma prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 prepare_norm_i8 prepare_gated_i8 prepare_plain_i8 attention_sage_i4_fast attention_sage_i4_fast_prefetch attention_sage_i8_fast attention_sage_i8_fast_prefetch gemm_i4_256 gemm_i4_resid_256 gemm_i4_swiglu_256 gemm_i8_256 gemm_i8_resid_256 gemm_i8_swiglu_256; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
+  for f in attention_query32 attention_gqa_lds_f16_wmma prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 prepare_norm_i8 prepare_gated_i8 prepare_plain_i8 attention_sage_i4_fast attention_sage_i4_fast_prefetch attention_sage_i8_fast attention_sage_i8_fast_prefetch gemm_i4_256 gemm_i4_resid_256 gemm_i4_swiglu_256 gemm_i8_256 gemm_i8_resid_256 gemm_i8_swiglu_256; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
 step "build host"                 ./scripts/build_host.sh
 step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
 step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py
+step "CPU fp16 attention lane model and benchmark oracle" env OPENBLAS_NUM_THREADS=2 python3 tests/test_attention_query_cpu.py
 step "CPU checkpoint loading regressions" bash -c '${CXX:-c++} -std=c++17 -O2 -Wall -Werror tests/test_checkpoint.cpp -o "$tmpdir/test-checkpoint" && "$tmpdir/test-checkpoint" "$tmpdir"'
 step "repeat-image failure capture" python3 tests/test_bench_native.py
 step "softmax shared-memory reuse regression" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_softmax_repeat.cpp -Lbuild -lkrea2 -Wl,-rpath,"$PWD/build" -o "$tmpdir/test-softmax-repeat" && "$tmpdir/test-softmax-repeat"'

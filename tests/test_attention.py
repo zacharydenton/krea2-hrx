@@ -30,18 +30,23 @@ def run(tmp: Path, tokens: int, heads=HEADS, kv=KV) -> bool:
     hs = tmp / f"attn_{tokens}.hsaco"
     cfg = {f"{NS}.q_stride": heads * D, f"{NS}.kv_stride": kv * D, f"{NS}.tokens": tokens,
            f"{NS}.token_capacity": capacity, f"{NS}.scale": 1.0 / math.sqrt(D), f"{NS}.out_stride": heads * D}
-    if "lds" not in STEM:
+    if "lds" not in STEM and STEM != "attention_query32":
         cfg[f"{NS}.kv_groups"] = groups
     compile_kernel((ROOT / "kernels" / f"{STEM}.loom") if (ROOT / "kernels" / f"{STEM}.loom").exists() else ROOT / "experiments" / f"{STEM}.loom", SYM, cfg, hs)
     tiles = (tokens + 15) // 16
-    if "lds" in STEM:                        # a workgroup of the four query heads per key-value head
+    if STEM == "attention_query32":
+        vt = np.ascontiguousarray(pad(v).T)
+        (out,), t = launch(hs, SYM, ((tokens + 31) // 32, kv, 1), (256, 1, 1),
+                           [("i32", tokens), ("i32", 0), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", vt),
+                            ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
+    elif "lds" in STEM:                        # a workgroup of the four query heads per key-value head
         (out,), t = launch(hs, SYM, (tiles, kv, 1), (128, 1, 1),
-                           [("i32", tokens), ("i32", kv), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", pad(v)),
+                           [("i32", tokens), ("i32", 0), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", pad(v)),
                             ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
     else:
         vt = np.ascontiguousarray(pad(v).T)  # [kv_stride][capacity], zero past the sequence
         (out,), t = launch(hs, SYM, (tiles, heads, 1), (32, 1, 1),
-                           [("i32", tokens), ("i32", heads), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", vt),
+                           [("i32", tokens), ("i32", 0), ("in_f16", pad(q)), ("in_f16", pad(k)), ("in_f16", vt),
                             ("out_f16", ((tokens, heads * D), np.float16))], tmp, repeat=5)
     us = t["per_launch_us"]
     flops = 4.0 * tokens * tokens * D * heads
@@ -55,11 +60,16 @@ def main() -> int:
     with workdir() as tmp:
         for tokens in (100, 4608):
             ok &= run(Path(tmp), tokens)
+        STEM = "attention_query32"
+        NS, SYM = "krea2." + STEM, "krea2_" + STEM
+        for tokens in (17, 32, 65, 2047, 2048, 4115):
+            ok &= run(Path(tmp), tokens)
         # Exercise the optional 32-key generator without rewriting shipped kernels.
         project = ROOT
         generated = Path(tmp) / "generated"
         (generated / "tools").mkdir(parents=True)
         (generated / "kernels").mkdir()
+        (generated / "experiments").mkdir()
         generator = generated / "tools/gen_attention_lds.py"
         generator.write_text((project / "tools/gen_attention_lds.py").read_text())
         STEM = "attention_test_lds32"

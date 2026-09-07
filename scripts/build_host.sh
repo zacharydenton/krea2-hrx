@@ -13,6 +13,8 @@ mv -f build/libnative_ops_test.so.tmp build/libnative_ops_test.so
 mv -f build/test-hrx-runtime.tmp build/test-hrx-runtime
 "$CXX" "${CXXFLAGS[@]}" tests/gemm_bench.cpp -Lbuild -lkrea2 -Wl,-rpath,'$ORIGIN' -o build/gemm-bench.tmp
 mv -f build/gemm-bench.tmp build/gemm-bench
+"$CXX" "${CXXFLAGS[@]}" tests/attention_bench.cpp -Lbuild -lkrea2 -Wl,-rpath,'$ORIGIN' -o build/attention-bench.tmp
+mv -f build/attention-bench.tmp build/attention-bench
 "$CXX" "${CXXFLAGS[@]}" tests/i4_bench.cpp -Lbuild -lkrea2 -Wl,-rpath,'$ORIGIN' -o build/i4-bench.tmp
 mv -f build/i4-bench.tmp build/i4-bench
 printf 'built HRX block library, Loom runner and Sage runner\n'
