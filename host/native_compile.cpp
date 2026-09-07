@@ -1,4 +1,5 @@
 #include "native_compile.h"
+#include "block_sources.h"
 #include "compiler_spawn.h"
 #include "gemm_shape.h"
 #include "sha256.h"
@@ -21,7 +22,17 @@ static std::string contents(const std::filesystem::path &path) {
     throw std::runtime_error("cannot read " + path.string());
   return std::string((std::istreambuf_iterator<char>(input)), {});
 }
-std::string prepare_kernels(const std::string &bundle,
+std::string user_cache_directory() {
+  const char *cache = std::getenv("XDG_CACHE_HOME"), *home = std::getenv("HOME");
+  std::filesystem::path root = cache  ? cache
+                               : home ? std::string(home) + "/.cache"
+                                      : "/tmp";
+  root /= "krea2-loom";
+  std::filesystem::create_directories(root);
+  return root.string();
+}
+std::string prepare_kernels(const std::string &cache_parent,
+                            const std::string &sources_dir,
                             const std::string &compiler, int tokens,
                             int bits) {
   if (tokens < 16 || tokens > 16896)
@@ -35,7 +46,19 @@ std::string prepare_kernels(const std::string &bundle,
   if (attention_bits != 4 && attention_bits != 8)
     throw std::invalid_argument("KREA2_ATTN_QK must be 4 or 8");
   namespace fs = std::filesystem;
-  fs::path parent = fs::path(bundle) / "kernels";
+  fs::path parent = cache_parent;
+  auto source_text = [&](const std::string &name) {
+    if (sources_dir.empty()) {
+      auto it = block_sources().find(name);
+      if (it == block_sources().end())
+        throw std::runtime_error("no embedded kernel source: " + name);
+      return it->second;
+    }
+    std::ifstream source(fs::path(sources_dir) / (name + ".loom"));
+    if (!source)
+      throw std::runtime_error("missing kernel source: " + name);
+    return std::string(std::istreambuf_iterator<char>(source), {});
+  };
   int capacity = std::max((tokens + 47) / 32 * 32, (tokens + 63) / 64 * 64);
   // The GEMM tile, raster group and operand pitches come from gemm_shape.h,
   // which scripts/build_kernels.py mirrors; the session checks every field.
@@ -113,10 +136,7 @@ std::string prepare_kernels(const std::string &bundle,
   std::string signature =
       "native-kernels-v4:gfx1151:sage-prep-v3:64:vt\n" + metadata;
   for (const auto &j : jobs) {
-    std::ifstream source(fs::path(bundle) / "sources" / (j.source + ".loom"));
-    if (!source)
-      throw std::runtime_error("missing kernel source: " + j.source);
-    signature.append(std::istreambuf_iterator<char>(source), {});
+    signature += source_text(j.source);
     signature += j.source + j.symbol + j.stem;
     for (const auto &[k, v] : j.cfg)
       signature += k + "=" + v + "\n";
@@ -162,9 +182,14 @@ std::string prepare_kernels(const std::string &bundle,
     }
   } cleanup{staging};
   for (const auto &j : jobs) {
+    fs::path source_path = sources_dir.empty()
+                               ? staging / (j.source + ".loom")
+                               : fs::path(sources_dir) / (j.source + ".loom");
+    if (sources_dir.empty())
+      std::ofstream(source_path) << source_text(j.source);
     std::vector<std::string> args = {
         compiler,
-        (fs::path(bundle) / "sources" / (j.source + ".loom")).string(),
+        source_path.string(),
         "--backend=amdgpu-hal",
         "--target=gfx1151",
         "--root=@" + j.symbol,
@@ -173,6 +198,8 @@ std::string prepare_kernels(const std::string &bundle,
       args.push_back("--config=krea2." + j.source + "." + k + "=" + v);
     run_compiler(args, staging / (j.stem + ".log"), j.source);
     fs::remove(staging / (j.stem + ".log"));
+    if (sources_dir.empty())
+      fs::remove(source_path);
   }
   std::ofstream(staging / "launch.txt") << metadata;
   std::ofstream(staging / "signature", std::ios::binary) << signature;

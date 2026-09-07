@@ -27,6 +27,7 @@
 #include "gemm_shape.h"
 #include "krea2.h"
 #include "krea2_device.h"
+#include "safetensors.h"
 #include "native_kernels.h"
 #include "sage.h"
 #include <memory>
@@ -38,15 +39,25 @@ constexpr int QKVG = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN; // 15360
 constexpr int GATE_OFFSET = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 constexpr int THREADS = 256;
 
-// A tensor's bytes in weights.bin and its home on the device. GEMM weights
-// ("<name>.q": int4 nibbles [N][K/2] as torch.uint8, or int8 rows [N][K] as
-// torch.int8) are re-pitched on upload to their padded row pitch; everything
-// else keeps its file layout.
+// A tensor's home on the device, and where its bytes come from: a span of
+// weights.bin (the exported manifest layout), or, for a ComfyUI checkpoint
+// read directly, a run of row segments from the safetensors mapping (the fused
+// qkv|gate and interleaved gate|up operands are assembled here) or a small
+// host-built array (their per-row scales). GEMM weights ("<name>.q": int4
+// nibbles [N][K/2] as torch.uint8, or int8 rows [N][K] as torch.int8) are
+// re-pitched on upload to their padded row pitch; everything else keeps its
+// layout.
+struct Segment {
+  const char *source;
+  size_t rows;
+};
 struct Span {
-  size_t offset, bytes;
+  size_t offset = 0, bytes = 0;
   size_t device_offset = 0, device_bytes = 0;
   size_t rows = 0, row_bytes = 0, device_row_bytes = 0; // .q tensors only
   int bits = 0;                                          // .q tensors only
+  std::vector<Segment> segments; // checkpoint rows, in order (else offset)
+  std::vector<char> host;        // host-built bytes (else offset/segments)
 };
 
 std::map<std::string, Span> read_manifest(const std::string &path) {
@@ -61,7 +72,9 @@ std::map<std::string, Span> read_manifest(const std::string &path) {
     size_t offset, bytes;
     if (!(ls >> name >> offset >> bytes >> dtype >> shape))
       continue;
-    Span span{offset, bytes};
+    Span span;
+    span.offset = offset;
+    span.bytes = bytes;
     size_t rows = 0, columns = 0;
     char x = 0;
     std::istringstream ss(shape);
@@ -82,48 +95,176 @@ std::map<std::string, Span> read_manifest(const std::string &path) {
   return spans;
 }
 
+// ComfyUI's checkpoint as it is: per block the int8 ConvRot rows of wq, wk,
+// wv and the attention gate become one qkv|gate operand, the MLP gate and up
+// rows are interleaved in 16-row groups for the SwiGLU epilogue, wo and down
+// stay as they are, the f32 per-row scales follow the same arrangement, and
+// the RMSNorm scales are the checkpoint's f32 tensors.
+std::map<std::string, Span>
+checkpoint_spans(const krea_native::SafeTensors &file, int &bits) {
+  using krea_native::SafeTensors;
+  std::map<std::string, Span> spans;
+  auto rows_of = [&](const SafeTensors::Entry &e) { return size_t(e.shape.at(0)); };
+  auto row_bytes_of = [&](const SafeTensors::Entry &e) {
+    return e.bytes / size_t(e.shape.at(0));
+  };
+  auto codes = [&](const std::string &name) -> const SafeTensors::Entry & {
+    const auto &e = file.at(name + ".weight");
+    if (e.dtype != "I8" || e.shape.size() != 2)
+      throw std::runtime_error(name + ".weight is " + e.dtype +
+                               ", not int8 ConvRot rows (" + file.path + ")");
+    return e;
+  };
+  auto scales = [&](const std::string &name) -> const SafeTensors::Entry & {
+    const auto &e = file.at(name + ".weight_scale");
+    if (e.dtype != "F32")
+      throw std::runtime_error(name + ".weight_scale is not float32");
+    return e;
+  };
+  auto operand = [&](const std::string &out, const std::vector<std::string> &parts,
+                     size_t group) {
+    // group 0: concatenate the parts' rows; group g: interleave them g rows at a time
+    Span q, s;
+    q.bits = 8;
+    std::vector<const SafeTensors::Entry *> entries;
+    for (const auto &part : parts) {
+      entries.push_back(&codes(part));
+      if (entries.back()->shape.at(1) != entries.front()->shape.at(1))
+        throw std::runtime_error("mismatched K in " + out);
+      q.rows += rows_of(*entries.back());
+    }
+    q.row_bytes = row_bytes_of(*entries.front());
+    q.bytes = q.rows * q.row_bytes;
+    q.device_row_bytes =
+        size_t(krea2_shape::gemm_pitch(int(q.row_bytes), 8)); // int8: K bytes
+    q.device_bytes = q.rows * q.device_row_bytes;
+    s.host.resize(q.rows * 4);
+    s.bytes = s.device_bytes = s.host.size();
+    if (group == 0) {
+      size_t row = 0;
+      for (size_t i = 0; i < entries.size(); ++i) {
+        q.segments.push_back({file.data(*entries[i]), rows_of(*entries[i])});
+        const auto &sc = scales(parts[i]);
+        if (sc.bytes != rows_of(*entries[i]) * 4)
+          throw std::runtime_error("scale count in " + parts[i]);
+        std::memcpy(s.host.data() + row * 4, file.data(sc), sc.bytes);
+        row += rows_of(*entries[i]);
+      }
+    } else {
+      if (entries.size() != 2 || rows_of(*entries[0]) != rows_of(*entries[1]) ||
+          rows_of(*entries[0]) % group)
+        throw std::runtime_error("interleave shape in " + out);
+      const auto &s0 = scales(parts[0]), &s1 = scales(parts[1]);
+      size_t row = 0;
+      for (size_t r = 0; r < rows_of(*entries[0]); r += group)
+        for (int side = 0; side < 2; ++side) {
+          const auto &e = *entries[side];
+          q.segments.push_back({file.data(e) + r * q.row_bytes, group});
+          std::memcpy(s.host.data() + row * 4,
+                      file.data(side ? s1 : s0) + r * 4, group * 4);
+          row += group;
+        }
+    }
+    spans[out + ".q"] = std::move(q);
+    spans[out + ".s"] = std::move(s);
+  };
+  auto vector = [&](const std::string &out, const std::string &name) {
+    const auto &e = file.at(name);
+    if (e.dtype != "F32")
+      throw std::runtime_error(name + " is " + e.dtype + ", not float32");
+    Span v;
+    v.bytes = v.device_bytes = e.bytes;
+    v.segments.push_back({file.data(e), 1});
+    v.row_bytes = e.bytes; // one row of the whole tensor
+    spans[out] = std::move(v);
+  };
+  int layers = 0;
+  while (file.has("blocks." + std::to_string(layers) + ".attn.wq.weight"))
+    ++layers;
+  if (!layers)
+    throw std::runtime_error("no transformer blocks in " + file.path);
+  for (int i = 0; i < layers; ++i) {
+    std::string p = "blocks." + std::to_string(i);
+    operand(p + ".qkvg", {p + ".attn.wq", p + ".attn.wk", p + ".attn.wv", p + ".attn.gate"}, 0);
+    operand(p + ".wo", {p + ".attn.wo"}, 0);
+    operand(p + ".gu", {p + ".mlp.gate", p + ".mlp.up"}, 16);
+    operand(p + ".down", {p + ".mlp.down"}, 0);
+    vector(p + ".prenorm", p + ".prenorm.scale");
+    vector(p + ".postnorm", p + ".postnorm.scale");
+    vector(p + ".qnorm", p + ".attn.qknorm.qnorm.scale");
+    vector(p + ".knorm", p + ".attn.qknorm.knorm.scale");
+  }
+  bits = 8;
+  return spans;
+}
+
+bool is_safetensors(const std::string &path) {
+  return path.size() > 12 &&
+         path.compare(path.size() - 12, 12, ".safetensors") == 0;
+}
+
 } // namespace
 
 struct krea2_weights {
   std::map<std::string, Span> spans;
   std::shared_ptr<void> storage;
   int bits = 4;
+  // directory: an exported weights directory (manifest.txt + weights.bin), or
+  // a ComfyUI int8 ConvRot checkpoint (.safetensors) read as it is.
   explicit krea2_weights(const std::string &directory) {
-    spans = read_manifest(directory + "/manifest.txt");
-    bits = 0;
-    for (const auto &[name, span] : spans)
-      if (span.bits) {
-        if (bits && bits != span.bits)
-          throw std::runtime_error("mixed GEMM operand widths in " +
-                                   directory);
-        bits = span.bits;
+    std::unique_ptr<krea_native::SafeTensors> checkpoint;
+    const char *mapped = nullptr;
+    size_t bytes = 0;
+    int fd = -1;
+    if (is_safetensors(directory)) {
+      checkpoint = std::make_unique<krea_native::SafeTensors>(directory);
+      spans = checkpoint_spans(*checkpoint, bits);
+    } else {
+      spans = read_manifest(directory + "/manifest.txt");
+      bits = 0;
+      for (const auto &[name, span] : spans)
+        if (span.bits) {
+          if (bits && bits != span.bits)
+            throw std::runtime_error("mixed GEMM operand widths in " +
+                                     directory);
+          bits = span.bits;
+        }
+      if (!bits)
+        bits = 4;
+      const auto path = directory + "/weights.bin";
+      fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+      if (fd < 0)
+        throw std::runtime_error("cannot read " + path);
+      struct stat info;
+      if (fstat(fd, &info) || info.st_size <= 0) {
+        close(fd);
+        throw std::runtime_error("invalid weight file: " + path);
       }
-    if (!bits)
-      bits = 4;
-    const auto path = directory + "/weights.bin";
-    int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
-      throw std::runtime_error("cannot read " + path);
-    struct File {
-      int fd;
-      ~File() { close(fd); }
-    } file{fd};
-    struct stat info;
-    if (fstat(fd, &info) || info.st_size <= 0)
-      throw std::runtime_error("invalid weight file: " + path);
-    size_t bytes = size_t(info.st_size);
-    for (const auto &[name, span] : spans)
-      if (span.offset > bytes || span.bytes > bytes - span.offset)
-        throw std::runtime_error("manifest span '" + name + "' runs past " +
-                                 path);
-    void *mapped = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mapped == MAP_FAILED)
-      throw std::runtime_error("cannot map " + path);
+      bytes = size_t(info.st_size);
+      for (const auto &[name, span] : spans)
+        if (span.offset > bytes || span.bytes > bytes - span.offset) {
+          close(fd);
+          throw std::runtime_error("manifest span '" + name + "' runs past " +
+                                   path);
+        }
+      void *m = mmap(nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+      if (m == MAP_FAILED) {
+        close(fd);
+        throw std::runtime_error("cannot map " + path);
+      }
+      mapped = static_cast<const char *>(m);
+    }
     struct Mapping {
-      void *p;
+      const char *p;
       size_t bytes;
-      ~Mapping() { munmap(p, bytes); }
-    } mapping{mapped, bytes};
+      int fd;
+      ~Mapping() {
+        if (p)
+          munmap(const_cast<char *>(p), bytes);
+        if (fd >= 0)
+          close(fd);
+      }
+    } mapping{mapped, bytes, fd};
     // Device layout: each tensor at a 256-byte boundary, GEMM weights with
     // their padded row pitch.
     size_t total = 0;
@@ -134,28 +275,56 @@ struct krea2_weights {
     void *device = gpu::allocate(total);
     storage =
         std::shared_ptr<void>(device, [](void *p) { (void)gpu::release(p); });
-    const size_t chunk_rows_bytes = size_t(16) << 20;
+    const size_t chunk_bytes = size_t(16) << 20;
     std::vector<char> staging;
     for (const auto &[name, span] : spans) {
       char *dst = (char *)device + span.device_offset;
-      const char *src = (const char *)mapped + span.offset;
-      if (!span.rows || span.device_row_bytes == span.row_bytes) {
-        gpu::copy(dst, src, span.bytes);
+      if (!span.host.empty()) {
+        gpu::copy(dst, span.host.data(), span.host.size());
         continue;
       }
-      // Re-pitch through host staging chunks; the pad bytes stay zero (the
-      // kernels never read them, tests/test_gemm_i4.py GEMM_KPAD).
-      size_t rows_per_chunk =
-          std::max<size_t>(1, chunk_rows_bytes / span.device_row_bytes);
-      staging.assign(rows_per_chunk * span.device_row_bytes, 0);
-      for (size_t first = 0; first < span.rows; first += rows_per_chunk) {
-        size_t count = std::min(rows_per_chunk, span.rows - first);
-        for (size_t r = 0; r < count; ++r)
-          std::memcpy(staging.data() + r * span.device_row_bytes,
-                      src + (first + r) * span.row_bytes, span.row_bytes);
-        gpu::copy(dst + first * span.device_row_bytes, staging.data(),
-                  count * span.device_row_bytes);
+      if (span.segments.empty()) { // a manifest span
+        const char *src = mapped + span.offset;
+        if (!span.rows || span.device_row_bytes == span.row_bytes) {
+          gpu::copy(dst, src, span.bytes);
+          continue;
+        }
+        // Re-pitch through host staging chunks; the pad bytes stay zero (the
+        // kernels never read them, tests/test_gemm_i4.py GEMM_KPAD).
+        size_t rows_per_chunk =
+            std::max<size_t>(1, chunk_bytes / span.device_row_bytes);
+        staging.assign(rows_per_chunk * span.device_row_bytes, 0);
+        for (size_t first = 0; first < span.rows; first += rows_per_chunk) {
+          size_t count = std::min(rows_per_chunk, span.rows - first);
+          for (size_t r = 0; r < count; ++r)
+            std::memcpy(staging.data() + r * span.device_row_bytes,
+                        src + (first + r) * span.row_bytes, span.row_bytes);
+          gpu::copy(dst + first * span.device_row_bytes, staging.data(),
+                    count * span.device_row_bytes);
+        }
+        continue;
       }
+      // Checkpoint rows: assemble the operand's rows in order, at the device
+      // pitch, a staging chunk at a time.
+      const size_t pitch = span.rows ? span.device_row_bytes : span.row_bytes;
+      const size_t width = span.row_bytes;
+      size_t rows_per_chunk = std::max<size_t>(1, chunk_bytes / pitch);
+      staging.assign(rows_per_chunk * pitch, 0);
+      size_t staged = 0, written = 0;
+      auto flush = [&] {
+        gpu::copy(dst + written * pitch, staging.data(), staged * pitch);
+        written += staged;
+        staged = 0;
+      };
+      for (const auto &segment : span.segments)
+        for (size_t r = 0; r < segment.rows; ++r) {
+          std::memcpy(staging.data() + staged * pitch,
+                      segment.source + r * width, width);
+          if (++staged == rows_per_chunk)
+            flush();
+        }
+      if (staged)
+        flush();
     }
   }
 };

@@ -44,7 +44,7 @@ def main():
             raise RuntimeError(error.value.decode())
 
     start = time.perf_counter()
-    bundle = Path(os.environ.get('KREA2_BUNDLE') or ROOT / 'build/native-deploy')  # build/native-int8 for W8A8
+    bundle = Path(os.environ.get('KREA2_BUNDLE') or ROOT / 'build/native-deploy')  # build/native-turbo-int8 for W8A8, build/native-raw-int8 for Raw
     call(lib.krea2_pipeline_create, str(bundle).encode(), None, C.byref(session))
     loaded = time.perf_counter()
     try:

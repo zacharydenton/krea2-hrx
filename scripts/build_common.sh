@@ -56,7 +56,8 @@ link_shared() {
 link_pipeline() {
   local output="$1" name
   local objects=()
-  for name in native_ops native_models native_tokenizer native_compile native_pipeline; do
+  python3 tools/gen_block_sources.py
+  for name in native_ops native_models native_tokenizer native_compile native_pipeline embedded; do
     compile "$name"
     objects+=("build/obj/$name.o")
   done

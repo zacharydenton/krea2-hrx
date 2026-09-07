@@ -680,3 +680,32 @@ against W4A4's 16.6 s and ComfyUI's 36.1 s on the same rows. Record:
 `docs/benchmarks/w8a8-2026-09-07.txt`. The int8 GEMMs sit at 65-72% of the 54 TOPS
 `iu8` peak; H3's tuning of the same kernel family (unconditional loads, pitch, row groups)
 is already in, so the next lever there is the WMMA chain itself.
+
+## Krea 2 Raw, guidance, and the checkpoint's float32 norms (2026-09-07)
+
+**Raw.** The undistilled checkpoint (`krea/Krea-2-Raw`; ComfyUI's `krea2_raw_int8_convrot`
+and `krea2_raw_bf16` in `Comfy-Org/Krea-2`) shares Turbo's architecture and key names, so
+the block export and every kernel apply unchanged; its int8 rows are rotated by the same
+Hadamard (cosine 0.99996 against our rotation of the bf16 rows). What differs is the
+sampler: diffusers' exponential shift with `mu` from the image token count (Flux's
+`calculate_shift` with base 256 tokens at 0.5 and 6400 at 1.15: 0.906 at 1024^2) instead
+of Turbo's fixed 1.15, 52 steps, and classifier-free guidance in Krea's convention,
+`cond + g * (cond - uncond)` with `g = 3.5`, the unconditional branch from the negative
+prompt (empty by default). The native pipeline reads the checkpoint from the bundle's
+`native.json` (`krea2-turbo` / `krea2-raw`), `krea2_generate_guided` runs two forwards per
+step and combines them with a `guidance` kernel that keeps diffusers' bf16 rounding per
+operation (checked exactly in `tests/test_native_ops.py`), and the CLI takes `--negative`
+and `--guidance` with the checkpoint's defaults. `tools/pipeline.py --model raw` and
+`tests/test_blocks.py --checkpoint/--int8` drive the same through diffusers and the
+reference. On the Turbo fixture's inputs, Raw W8A8 blocks match the W8A8 reference at
+0.99999 per block, compose exactly, and sit at update cosine 0.99855 vs Raw bf16 over 28
+blocks (Turbo W8A8: 0.99209; Raw's activations are tamer).
+
+**The checkpoint's dtypes are kept.** ComfyUI's checkpoints hold every RMSNorm scale in
+float32 (the 22 outer ones in the text fusion and final layer, four per block) and the
+block export always preserved them, but `tools/export_native.py` cast the outer ones to
+bf16 for the native bundle. It now keeps float32 tensors as float32 (`dtype` in
+`weights.json`), the loader exposes them as such, and the norm kernels take float32 scales
+everywhere (bf16-stored scales, the text encoder's and VAE's, are upcast losslessly once
+at load). Nothing else in the checkpoints is float32; the text encoder and VAE files are
+entirely bf16. The bundle is otherwise unchanged; the whole-image hash moves with it.

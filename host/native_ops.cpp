@@ -45,12 +45,12 @@ Tensor Ops::linear(const Tensor &x, const Weight &w, const B *bias) {
          y.ptr, x.rows, n, k, 1, 1, bias);
   return y;
 }
-Tensor Ops::norm(const Tensor &x, const Tensor &w, int mode, float eps) {
-  if (w.size() != size_t(x.cols) || mode < 0 || mode > 2)
+Tensor Ops::norm(const Tensor &x, const Weight &w, int mode, float eps) {
+  if (w.count() != size_t(x.cols) || mode < 0 || mode > 2)
     throw std::invalid_argument("norm dimensions");
   Tensor y(x.rows, x.cols);
   gpu::Args args;
-  args.i32(x.rows).f32(eps).ptr(x.ptr).ptr(w.ptr).ptr(y.ptr);
+  args.i32(x.rows).f32(eps).ptr(x.ptr).ptr(w.as_f32()).ptr(y.ptr);
   native_launch("norm_" + std::to_string(mode),
                 {{"xsize", x.size()}, {"cols", size_t(x.cols)}}, args, x.rows);
   return y;
@@ -175,5 +175,12 @@ void Ops::euler_step(Tensor &sample, const Tensor &velocity, float delta) {
   gpu::Args args;
   args.i32(sample.size()).f32(delta).ptr(sample.ptr).ptr(velocity.ptr);
   native_launch("euler", {}, args, (sample.size() + 255) / 256);
+}
+void Ops::guidance(Tensor &cond, const Tensor &uncond, float scale) {
+  if (cond.rows != uncond.rows || cond.cols != uncond.cols)
+    throw std::invalid_argument("guidance tensor dimensions");
+  gpu::Args args;
+  args.i32(cond.size()).f32(scale).ptr(cond.ptr).ptr(uncond.ptr);
+  native_launch("guidance", {}, args, (cond.size() + 255) / 256);
 }
 } // namespace krea_native

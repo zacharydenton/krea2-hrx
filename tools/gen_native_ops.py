@@ -259,6 +259,25 @@ point(
 )
 
 
+def guidance(k):
+    # Krea's classifier-free guidance, in place on the conditional velocity with
+    # diffusers' bf16 rounding at each of its three tensor operations:
+    #   cond = cond + scale * (cond - uncond)
+    cond = k.load("cond", k.i)
+    difference = k.rnd(k.math("subf", cond, k.load("uncond", k.i)))
+    scaled = k.rnd(k.math("mulf", "%scale", difference))
+    k.store("cond", k.i, k.math("addf", cond, scaled))
+
+
+point(
+    "guidance",
+    [("cond", "bf16", "%count_b"), ("uncond", "bf16", "%count_b")],
+    [],
+    guidance,
+    scalars=[("scale", "f32")],
+)
+
+
 # Copy/index transforms. Their actual input/output extents are supplied as configs.
 def columns(k):
     j = k.add(
@@ -410,7 +429,7 @@ point(
 def norm(mode):
     k = Kernel(
         "norm_" + str(mode),
-        [("x", "bf16", "%xsize"), ("w", "bf16", "%cols"), ("y", "bf16", "%xsize")],
+        [("x", "bf16", "%xsize"), ("w", "f32", "%cols"), ("y", "bf16", "%xsize")],
         ["xsize", "cols"],
         scalars=[("eps", "f32")],
     )

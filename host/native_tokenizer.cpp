@@ -75,8 +75,14 @@ Tokenizer::Tokenizer(const std::string &path) : impl(std::make_unique<Impl>()) {
   std::ifstream f(path);
   if (!f)
     throw std::runtime_error("cannot read tokenizer: " + path);
-  json j;
-  f >> j;
+  load(std::string(std::istreambuf_iterator<char>(f), {}));
+}
+Tokenizer::Tokenizer(const char *text, size_t size)
+    : impl(std::make_unique<Impl>()) {
+  load(std::string(text, size));
+}
+void Tokenizer::load(const std::string &text) {
+  json j = json::parse(text);
   if (j["normalizer"]["type"] != "NFC" || j["model"]["type"] != "BPE")
     throw std::runtime_error("unsupported tokenizer format");
   for (auto &[token, id] : j["model"]["vocab"].items())

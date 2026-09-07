@@ -8,9 +8,10 @@
 int main(int argc, char **argv) {
   try {
     std::map<std::string, std::string> args;
-    const std::set<std::string> options = {"--bundle",   "--prompt", "--out",
-                                           "--compiler", "--width",  "--height",
-                                           "--steps",    "--seed"};
+    const std::set<std::string> options = {
+        "--bundle",   "--model",    "--text-encoder", "--vae",   "--prompt",
+        "--out",      "--compiler", "--width",        "--height", "--steps",
+        "--seed",     "--negative", "--guidance",     "--checkpoint"};
     for (int i = 1; i < argc; i += 2) {
       if (i + 1 == argc)
         throw std::runtime_error("every option needs a value");
@@ -19,12 +20,17 @@ int main(int argc, char **argv) {
                                  std::string(argv[i]));
       args[argv[i]] = argv[i + 1];
     }
-    if (!args.count("--bundle") || !args.count("--prompt") ||
-        !args.count("--out"))
+    if (args.count("--bundle") + args.count("--model") != 1 ||
+        !args.count("--prompt") || !args.count("--out"))
       throw std::runtime_error(
-          "usage: krea2-generate --bundle DIR --prompt TEXT --out IMAGE.ppm "
-          "[--compiler PATH] [--width 1024] [--height 1024] [--steps 8] "
-          "[--seed 0]");
+          "usage: krea2-generate --model diffusion_models/krea2_turbo_int8_convrot.safetensors "
+          "--prompt TEXT --out IMAGE.ppm [--text-encoder FILE] [--vae FILE] "
+          "[--checkpoint turbo|raw] [--compiler PATH] [--width 1024] [--height 1024] "
+          "[--steps N] [--seed 0] [--negative TEXT] [--guidance G]\n"
+          "--model is ComfyUI's checkpoint (text encoder and VAE found beside it in "
+          "ComfyUI's models layout); --bundle DIR takes an exported bundle instead.\n"
+          "steps and guidance default to the checkpoint: Turbo 8 and 0 (no guidance), "
+          "Raw 52 and 3.5");
     auto integer = [&](const char *key, int fallback) {
       if (!args.count(key))
         return fallback;
@@ -35,10 +41,18 @@ int main(int argc, char **argv) {
       return value;
     };
     int w = integer("--width", 1024), h = integer("--height", 1024),
-        steps = integer("--steps", 8);
+        steps = integer("--steps", -1);
     if (w < 64 || h < 64 || w > 2048 || h > 2048 || w % 16 || h % 16 ||
-        steps < 1 || steps > 100)
+        steps == 0 || steps > 100)
       throw std::runtime_error("invalid image dimensions");
+    float guidance = -1;
+    if (args.count("--guidance")) {
+      size_t consumed = 0;
+      guidance = std::stof(args["--guidance"], &consumed);
+      if (consumed != args["--guidance"].size() || guidance < 0 ||
+          guidance > 100)
+        throw std::runtime_error("guidance must be in 0..100");
+    }
     uint64_t seed = 0;
     if (args.count("--seed")) {
       const auto &s = args["--seed"];
@@ -49,10 +63,26 @@ int main(int argc, char **argv) {
     krea2_pipeline *p = nullptr;
     char error[4096];
     auto start = std::chrono::steady_clock::now();
-    if (krea2_pipeline_create(
-            args["--bundle"].c_str(),
-            args.count("--compiler") ? args["--compiler"].c_str() : nullptr, &p,
-            error, sizeof(error)))
+    const char *compiler =
+        args.count("--compiler") ? args["--compiler"].c_str() : nullptr;
+    int failed;
+    if (args.count("--model")) {
+      int distilled = -1;
+      if (args.count("--checkpoint")) {
+        if (args["--checkpoint"] != "turbo" && args["--checkpoint"] != "raw")
+          throw std::runtime_error("--checkpoint must be turbo or raw");
+        distilled = args["--checkpoint"] == "turbo";
+      }
+      failed = krea2_pipeline_create_files(
+          args["--model"].c_str(),
+          args.count("--text-encoder") ? args["--text-encoder"].c_str() : nullptr,
+          args.count("--vae") ? args["--vae"].c_str() : nullptr, distilled,
+          compiler, &p, error, sizeof(error));
+    } else {
+      failed = krea2_pipeline_create(args["--bundle"].c_str(), compiler, &p,
+                                     error, sizeof(error));
+    }
+    if (failed)
       throw std::runtime_error(error);
     struct Cleanup {
       krea2_pipeline *p;
@@ -60,8 +90,11 @@ int main(int argc, char **argv) {
     } cleanup{p};
     std::cerr << "native model loaded\n";
     std::vector<uint8_t> rgb(size_t(w) * h * 3);
-    if (krea2_generate(p, args["--prompt"].c_str(), w, h, steps, seed, nullptr,
-                       0, rgb.data(), rgb.size(), error, sizeof(error)))
+    if (krea2_generate_guided(
+            p, args["--prompt"].c_str(),
+            args.count("--negative") ? args["--negative"].c_str() : nullptr,
+            guidance, w, h, steps, seed, nullptr, 0, rgb.data(), rgb.size(),
+            error, sizeof(error)))
       throw std::runtime_error(error);
     std::ofstream out(args["--out"], std::ios::binary);
     out << "P6\n" << w << " " << h << "\n255\n";

@@ -1,6 +1,6 @@
 # krea2-loom
 
-Krea 2 Turbo, prompt to image, as a native GPU pipeline in **Loom**, AMD's kernel
+Krea 2 (Turbo and Raw), prompt to image, as a native GPU pipeline in **Loom**, AMD's kernel
 language from [ROCm/hrx-system](https://github.com/ROCm/hrx-system), for the Radeon
 8060S (gfx1151, the Strix Halo APU). The transformer runs in **ConvRot** integer
 arithmetic on the part's WMMA: **W8A8** (ComfyUI's int8 checkpoint rows, int8 activations,
@@ -16,16 +16,22 @@ A sibling of [minimax-h3-loom](https://github.com/zacharydenton/minimax-h3-loom)
 
 ## The model
 
-Krea 2 Turbo is a 28-block single-stream transformer (hidden 6144, 48 query heads and 12
-key/value heads of 128, SwiGLU 16384, AdaLN modulation per block from the timestep
-embedding) over one packed sequence of text and image tokens, distilled to eight
-denoising steps without classifier-free guidance. Qwen3-VL-4B is the text encoder and
-the Qwen-Image VAE the image tokenizer. At 1024x1024 the sequence is 4096 image tokens
-plus the prompt.
+Krea 2 is a 12.9B single-stream transformer of 28 blocks (hidden 6144, 48 query heads
+and 12 key/value heads of 128, SwiGLU 16384, AdaLN modulation per block from the
+timestep embedding) over one packed sequence of text and image tokens. Qwen3-VL-4B is
+the text encoder and the Qwen-Image VAE the image tokenizer; at 1024x1024 the sequence
+is 4096 image tokens plus the prompt. Two checkpoints share the architecture and this
+runtime serves both: **Turbo**, distilled to eight steps with a fixed timestep shift and
+no guidance, and **Raw**, the undistilled base with a resolution-dependent shift,
+classifier-free guidance (Krea's convention, `cond + g * (cond - uncond)`, 3.5 by
+default) and an optional negative prompt, sampled at 52 steps by default. Raw costs
+two transformer forwards per step, so an image is about thirteen times Turbo's block
+work.
 
 ## What you get
 
-- **`build/krea2-generate`**: a standalone CLI. Prompt in, RGB out (PPM), no Python.
+- **`build/krea2-generate`**: a standalone CLI. Prompt in, RGB out (PPM), no Python;
+  `--negative` and `--guidance` for Raw, with the checkpoint's defaults when omitted.
 - **`libkrea2_pipeline.so`** with [host/krea2_pipeline.h](host/krea2_pipeline.h): the
   same pipeline behind a C ABI for any language with FFI (tokenizer, text encoder,
   transformer, VAE and the one-call `krea2_generate`).
@@ -163,10 +169,18 @@ you use are cached, inference needs no compiler and the bundle can be read-only.
 Dimensions are multiples of 16 from 64 to 2048 (16 to 16,896 total tokens).
 `KREA2_NATIVE_PROFILE=1` prints stage timings to stderr.
 
+**Raw.** The same commands with the Raw files: export the blocks from ComfyUI's
+`krea2_raw_int8_convrot.safetensors` (`--bits 8`), assemble the bundle with
+`--model raw --checkpoint <the Raw bf16 checkpoint>` (the outer transformer weights),
+and generate; the bundle records the checkpoint, so `krea2-generate` defaults to 52 steps
+at guidance 3.5 and the Raw timestep shift. `--negative "..."` sets the negative prompt.
+
 **From C.** [examples/generate.c](examples/generate.c) is the whole API in one file:
 create a session from a bundle, `krea2_generate` into a caller-owned RGB8 buffer,
-destroy the session. Calls on one session are serialized; errors return a status and a
-message. It builds as `build/krea2-c-example`:
+destroy the session; `krea2_generate_guided` adds the negative prompt and guidance
+scale (pass -1 and 0 for the checkpoint's defaults) and `krea2_pipeline_distilled`
+reports which checkpoint a bundle holds. Calls on one session are serialized; errors
+return a status and a message. It builds as `build/krea2-c-example`:
 
 ```sh
 env -u LD_LIBRARY_PATH build/krea2-c-example build/native "a red fox" build/c-fox.ppm
@@ -178,8 +192,10 @@ not reproduce Torch's RNG; pass identical packed initial latents through the C A
 comparing backends.
 
 **From Python.** `tools/pipeline.py --backend loom` runs the same Loom blocks inside the
-diffusers pipeline (`--backend torch` and `--quant w4a4` remain for comparison, and
-`--latents-out` saves latents for `tools/decode_latents.py`'s PSNR). `Krea2Blocks` in
+diffusers pipeline (`--backend torch` and `--quant w4a4` remain for comparison,
+`--model raw` with `--guidance` and `--negative` selects the Raw checkpoint and its
+schedule, and `--latents-out` saves latents for `tools/decode_latents.py`'s PSNR).
+`Krea2Blocks` in
 `krea2_loom.py` is the block session behind one ctypes call per forward; it builds or
 reuses a fingerprinted kernel bundle with `scripts/build_kernels.py`.
 
@@ -210,6 +226,12 @@ scales are head-major so a key tile is one contiguous block. `KREA2_ATTN_QK=8` a
 kernel-build time selects the int8-QK twin of the same kernel (about twice the attention
 time, a quality fallback); the bundle's launch metadata records the choice.
 [docs/native-attention.md](docs/native-attention.md) has the arithmetic and measurements.
+
+**Sampler.** Flow-matching Euler over diffusers' shifted sigmas, `linspace(1, 1/steps)`
+under an exponential shift of `mu` (Turbo 1.15 fixed; Raw from the image token count,
+0.906 at 1024x1024), with the bf16 delta and product rounding of the CUDA pipeline
+reproduced (`kernels/native/euler.loom`, checked exactly over 5,050 steps). Guidance is
+its own kernel with diffusers' per-operation bf16 rounding (`kernels/native/guidance.loom`).
 
 **Runtime.** Every launch goes through HRX's public C API. The session keeps the residual
 stream and its workspace on the GPU and converts bf16/fp16 there; block weights are one

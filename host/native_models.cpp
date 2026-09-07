@@ -1,4 +1,5 @@
 #include "native_models.h"
+#include "embedded.h"
 namespace krea_native {
 static Tensor columns(const Tensor &x, int start, int n) {
   Tensor y(x.rows, n);
@@ -39,13 +40,13 @@ Tensor Models::encode(const std::vector<int32_t> &ids) {
   for (int i = 0; i < 35; ++i) {
     std::string layer = "layers." + std::to_string(i),
                 att = layer + ".self_attn";
-    auto norm = ops.norm(x, text[layer + ".input_layernorm.weight"].t, 1, 1e-6);
+    auto norm = ops.norm(x, text[layer + ".input_layernorm.weight"], 1, 1e-6);
     auto q = lin(norm, text, att + ".q_proj"),
          k = lin(norm, text, att + ".k_proj"),
          v = lin(norm, text, att + ".v_proj");
-    q = ops.norm(q.view(s * 32, 128), text[att + ".q_norm.weight"].t, 1, 1e-6)
+    q = ops.norm(q.view(s * 32, 128), text[att + ".q_norm.weight"], 1, 1e-6)
             .view(s, 4096);
-    k = ops.norm(k.view(s * 8, 128), text[att + ".k_norm.weight"].t, 1, 1e-6)
+    k = ops.norm(k.view(s * 8, 128), text[att + ".k_norm.weight"], 1, 1e-6)
             .view(s, 1024);
     q = ops.rope(q, s, 32, 5000000);
     k = ops.rope(k, s, 8, 5000000);
@@ -53,7 +54,7 @@ Tensor Models::encode(const std::vector<int32_t> &ids) {
                    lin(ops.attention(q, k, v, 1, s, 32, 8, 128, true), text,
                        att + ".o_proj"),
                    0);
-    norm = ops.norm(x, text[layer + ".post_attention_layernorm.weight"].t, 1,
+    norm = ops.norm(x, text[layer + ".post_attention_layernorm.weight"], 1,
                     1e-6);
     auto g = ops.unary(lin(norm, text, layer + ".mlp.gate_proj"), 0),
          u = lin(norm, text, layer + ".mlp.up_proj");
@@ -73,21 +74,21 @@ Tensor Models::encode(const std::vector<int32_t> &ids) {
 }
 Tensor Models::fusion_block(const Tensor &x, const std::string &p, int batch,
                             int tokens) {
-  auto n = ops.norm(x, transformer[p + ".prenorm.scale"].t);
+  auto n = ops.norm(x, transformer[p + ".prenorm.scale"]);
   auto q = lin(n, transformer, p + ".attn.wq"),
        k = lin(n, transformer, p + ".attn.wk"),
        v = lin(n, transformer, p + ".attn.wv");
   q = ops.norm(q.view(q.rows * 20, 128),
-               transformer[p + ".attn.qknorm.qnorm.scale"].t)
+               transformer[p + ".attn.qknorm.qnorm.scale"])
           .view(x.rows, 2560);
   k = ops.norm(k.view(k.rows * 20, 128),
-               transformer[p + ".attn.qknorm.knorm.scale"].t)
+               transformer[p + ".attn.qknorm.knorm.scale"])
           .view(x.rows, 2560);
   auto attended = ops.attention(q, k, v, batch, tokens, 20, 20, 128);
   attended = ops.binary(attended,
                         ops.unary(lin(n, transformer, p + ".attn.gate"), 2), 1);
   auto y = ops.binary(x, lin(attended, transformer, p + ".attn.wo"), 0);
-  n = ops.norm(y, transformer[p + ".postnorm.scale"].t);
+  n = ops.norm(y, transformer[p + ".postnorm.scale"]);
   auto g = ops.unary(lin(n, transformer, p + ".mlp.gate"), 0),
        u = lin(n, transformer, p + ".mlp.up");
   return ops.binary(y, lin(ops.binary(g, u, 1), transformer, p + ".mlp.down"),
@@ -114,7 +115,7 @@ Tensor Models::text_fusion(const Tensor &taps) {
   for (int i = 0; i < 2; ++i)
     x = fusion_block(x, "txtfusion.refiner_blocks." + std::to_string(i), 1,
                      tokens);
-  x = ops.norm(x, transformer["txtmlp.0.scale"].t);
+  x = ops.norm(x, transformer["txtmlp.0.scale"]);
   return lin(ops.unary(lin(x, transformer, "txtmlp.1"), 1), transformer,
              "txtmlp.3");
 }
@@ -131,10 +132,104 @@ std::pair<Tensor, Tensor> Models::time(float t) {
       transformer, "tmlp.2");
   return {e, lin(ops.unary(e, 1), transformer, "tproj.1")};
 }
+namespace {
+bool starts_with(const std::string &s, const char *p) { return s.rfind(p, 0) == 0; }
+bool ends_with(const std::string &s, const std::string &t) {
+  return s.size() >= t.size() && s.compare(s.size() - t.size(), t.size(), t) == 0;
+}
+// The transformer checkpoint: everything but the blocks' quantised linears
+// (those are the block session's), plus each block's modulation table.
+std::string transformer_name(const std::string &k) {
+  if (starts_with(k, "blocks.") && !ends_with(k, ".mod.lin"))
+    return "";
+  return k;
+}
+// ComfyUI's Qwen3-VL text encoder: the language model's layers under "model.",
+// without the vision tower or the LM head.
+std::string text_name(const std::string &k) {
+  if (starts_with(k, "model.visual.") || starts_with(k, "lm_head") ||
+      starts_with(k, "visual."))
+    return "";
+  if (starts_with(k, "model.language_model."))
+    return k.substr(21);
+  if (starts_with(k, "model."))
+    return k.substr(6);
+  return k;
+}
+// ComfyUI's (Wan-style) VAE names onto diffusers' AutoencoderKLQwenImage
+// names, decoder only: the flat upsamples list is four blocks of three
+// residual blocks and an upsampler, middle is resnet / attention / resnet,
+// head is norm_out / conv_out, conv1 is conv_in and the top-level conv2 is
+// post_quant_conv. Temporal convolutions are not used for a single image.
+std::string vae_name(const std::string &k) {
+  if (starts_with(k, "encoder.") || starts_with(k, "conv1."))
+    return "";
+  if (starts_with(k, "conv2."))
+    return "post_quant_conv." + k.substr(6);
+  if (!starts_with(k, "decoder."))
+    return "";
+  std::string rest = k.substr(8), base;
+  auto index_after = [&](const char *prefix, int &index, std::string &tail) {
+    std::string p = prefix;
+    if (!starts_with(rest, p.c_str()))
+      return false;
+    size_t dot = rest.find('.', p.size());
+    index = std::stoi(rest.substr(p.size(), dot - p.size()));
+    tail = rest.substr(dot + 1);
+    return true;
+  };
+  int index = 0;
+  std::string tail;
+  if (index_after("upsamples.", index, tail)) {
+    int block = index / 4, position = index % 4;
+    base = position == 3
+               ? "up_blocks." + std::to_string(block) + ".upsamplers.0"
+               : "up_blocks." + std::to_string(block) + ".resnets." +
+                     std::to_string(position);
+  } else if (index_after("middle.", index, tail)) {
+    base = index == 0   ? "mid_block.resnets.0"
+           : index == 1 ? "mid_block.attentions.0"
+                        : "mid_block.resnets.1";
+  } else if (starts_with(rest, "head.0.")) {
+    base = "norm_out";
+    tail = rest.substr(7);
+  } else if (starts_with(rest, "head.2.")) {
+    base = "conv_out";
+    tail = rest.substr(7);
+  } else if (starts_with(rest, "conv1.")) {
+    base = "conv_in";
+    tail = rest.substr(6);
+  } else {
+    throw std::runtime_error("unexpected VAE tensor " + k);
+  }
+  if (tail.find("time_conv") != std::string::npos)
+    return "";
+  for (auto [from, to] : {std::pair{"residual.0.", "norm1."},
+                          std::pair{"residual.2.", "conv1."},
+                          std::pair{"residual.3.", "norm2."},
+                          std::pair{"residual.6.", "conv2."},
+                          std::pair{"shortcut.", "conv_shortcut."}})
+    if (starts_with(tail, from))
+      tail = to + tail.substr(std::string(from).size());
+  return "decoder." + base + "." + tail;
+}
+} // namespace
+Models::Models(const std::string &checkpoint, const std::string &text_encoder,
+               const std::string &vae_file)
+    : text(SafeTensors(text_encoder), text_name),
+      transformer(SafeTensors(checkpoint), transformer_name),
+      vae(SafeTensors(vae_file), vae_name),
+      tokenizer(embedded_tokenizer_json(), embedded_tokenizer_size()),
+      block_tables(28 * 6, 6144) {
+  tables();
+}
 Models::Models(const std::string &root)
     : text(root + "/text"), transformer(root + "/transformer"),
       vae(root + "/vae"), tokenizer(root + "/tokenizer.json"),
       block_tables(28 * 6, 6144) {
+  tables();
+}
+void Models::tables() {
   for (int i = 0; i < 28; ++i) {
     const auto &table =
         transformer["blocks." + std::to_string(i) + ".mod.lin"].t;
@@ -172,7 +267,7 @@ Tensor Models::final(const Tensor &x, const Tensor &e) {
   gpu::Args add;
   add.i32(6144).ptr(scale.ptr).ptr(factor.ptr);
   native_launch("unary_one", {}, add, 24);
-  auto norm = ops.norm(x, transformer["last.norm.scale"].t);
+  auto norm = ops.norm(x, transformer["last.norm.scale"]);
   return lin(ops.binary(ops.binary(norm, factor, 1), shift, 0), transformer,
              "last.linear");
 }
@@ -181,9 +276,9 @@ Tensor Models::residual(const Tensor &x, const std::string &p, int h, int w) {
   if (vae.has(p + ".conv_shortcut.weight"))
     skip = ops.conv(x, h, w, vae[p + ".conv_shortcut.weight"],
                     vae[p + ".conv_shortcut.bias"].t.ptr);
-  auto y = ops.unary(ops.norm(x, vae[p + ".norm1.gamma"].t, 2), 0);
+  auto y = ops.unary(ops.norm(x, vae[p + ".norm1.gamma"], 2), 0);
   y = ops.conv(y, h, w, vae[p + ".conv1.weight"], vae[p + ".conv1.bias"].t.ptr);
-  y = ops.unary(ops.norm(y, vae[p + ".norm2.gamma"].t, 2), 0);
+  y = ops.unary(ops.norm(y, vae[p + ".norm2.gamma"], 2), 0);
   return ops.binary(
       ops.conv(y, h, w, vae[p + ".conv2.weight"], vae[p + ".conv2.bias"].t.ptr),
       skip, 0);
@@ -196,7 +291,7 @@ Tensor Models::decode_tile(const Tensor &input, int h, int w) {
   x = conv(x, "decoder.conv_in");
   x = residual(x, "decoder.mid_block.resnets.0", h, w);
   auto norm =
-      ops.norm(x, vae["decoder.mid_block.attentions.0.norm.gamma"].t, 2);
+      ops.norm(x, vae["decoder.mid_block.attentions.0.norm.gamma"], 2);
   auto qkv = conv(norm, "decoder.mid_block.attentions.0.to_qkv");
   int d = x.cols;
   auto att = ops.attention(columns(qkv, 0, d), columns(qkv, d, d),
@@ -214,7 +309,7 @@ Tensor Models::decode_tile(const Tensor &input, int h, int w) {
       x = conv(x, p + ".upsamplers.0.resample.1");
     }
   }
-  return conv(ops.unary(ops.norm(x, vae["decoder.norm_out.gamma"].t, 2), 0),
+  return conv(ops.unary(ops.norm(x, vae["decoder.norm_out.gamma"], 2), 0),
               "decoder.conv_out");
 }
 std::vector<uint8_t> Models::decode(const Tensor &packed, int height,

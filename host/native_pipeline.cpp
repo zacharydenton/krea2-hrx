@@ -5,14 +5,25 @@
 #include "native_models.h"
 #include "native_profile.h"
 #include "native_schedule.h"
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <random>
 
 using namespace krea_native;
+// Where a pipeline's pieces come from: an exported bundle directory, or
+// ComfyUI's files as they are.
+struct Sources {
+  std::string blocks;      // the block weights: a checkpoint file or bundle/blocks
+  std::string kernel_cache; // compiled block kernels go here
+  std::string kernel_sources; // .loom sources, or empty for the embedded ones
+  bool distilled = true;
+};
 struct krea2_pipeline {
-  std::string bundle, compiler;
+  Sources sources;
+  std::string compiler;
   Models models;
   std::mutex mutex;
   std::shared_ptr<BufferPool> pool = std::make_shared<BufferPool>();
@@ -21,8 +32,14 @@ struct krea2_pipeline {
   std::shared_ptr<krea2_weights> block_weights;
   krea2_session *blocks = nullptr;
   int block_tokens = 0;
-  krea2_pipeline(std::string b, std::string c)
-      : bundle(std::move(b)), compiler(std::move(c)), models(bundle) {}
+  bool distilled = true; // Turbo: fixed shift, no guidance; Raw: dynamic shift
+  krea2_pipeline(const std::string &bundle, std::string c, bool d)
+      : sources{bundle + "/blocks", bundle + "/kernels", bundle + "/sources", d},
+        compiler(std::move(c)), models(bundle), distilled(d) {}
+  krea2_pipeline(const std::string &checkpoint, const std::string &text,
+                 const std::string &vae, std::string c, bool d)
+      : sources{checkpoint, user_cache_directory() + "/blocks-gfx1151-v1", "", d},
+        compiler(std::move(c)), models(checkpoint, text, vae), distilled(d) {}
   ~krea2_pipeline() { krea2_destroy(blocks); }
   Tensor forward(const Tensor &latents, const Tensor &text, float t, int width,
                  int height) {
@@ -41,9 +58,10 @@ struct krea2_pipeline {
       blocks = nullptr;
       block_tokens = 0;
       if (!block_weights)
-        block_weights = krea2_load_weights(bundle + "/blocks");
-      auto kernels = prepare_kernels(bundle, compiler, tokens,
-                                     krea2_weights_bits(*block_weights));
+        block_weights = krea2_load_weights(sources.blocks);
+      auto kernels =
+          prepare_kernels(sources.kernel_cache, sources.kernel_sources,
+                          compiler, tokens, krea2_weights_bits(*block_weights));
       blocks = krea2_create_shared(block_weights, kernels, tokens, 28);
       block_tokens = tokens;
     }
@@ -138,8 +156,72 @@ template <class F> int guard(krea2_pipeline *p, char *e, size_t n, F f) {
 extern "C" uint32_t krea2_pipeline_abi_version() {
   return KREA2_PIPELINE_ABI_VERSION;
 }
+namespace {
+bool is_safetensors(const std::string &path) {
+  return path.size() > 12 &&
+         path.compare(path.size() - 12, 12, ".safetensors") == 0;
+}
+std::string lower(std::string s) {
+  for (auto &ch : s)
+    ch = char(std::tolower((unsigned char)ch));
+  return s;
+}
+} // namespace
+extern "C" int krea2_pipeline_create_files(const char *model,
+                                           const char *text_encoder,
+                                           const char *vae, int distilled,
+                                           const char *c, krea2_pipeline **out,
+                                           char *e, size_t n) {
+  if (e && n)
+    e[0] = 0;
+  if (out)
+    *out = nullptr;
+  try {
+    namespace fs = std::filesystem;
+    if (!out || !model)
+      throw std::invalid_argument("model and output pointer are required");
+    fs::path checkpoint = fs::absolute(model);
+    if (!fs::is_regular_file(checkpoint))
+      throw std::invalid_argument("cannot read " + checkpoint.string());
+    // ComfyUI's layout: <models>/diffusion_models/<model>.safetensors beside
+    // <models>/text_encoders/qwen3vl_4b_*.safetensors and <models>/vae/qwen_image_vae.safetensors
+    fs::path root = checkpoint.parent_path().parent_path();
+    std::string te = text_encoder ? text_encoder : "";
+    if (te.empty())
+      for (const char *name : {"qwen3vl_4b_bf16.safetensors", "qwen3vl_4b_fp8_scaled.safetensors"})
+        if (fs::is_regular_file(root / "text_encoders" / name)) {
+          te = (root / "text_encoders" / name).string();
+          break;
+        }
+    std::string v = vae ? vae : "";
+    if (v.empty() && fs::is_regular_file(root / "vae" / "qwen_image_vae.safetensors"))
+      v = (root / "vae" / "qwen_image_vae.safetensors").string();
+    if (te.empty() || v.empty())
+      throw std::invalid_argument(
+          "text encoder and VAE not found beside " + checkpoint.string() +
+          " (expected <models>/text_encoders/qwen3vl_4b_{bf16,fp8_scaled}.safetensors and "
+          "<models>/vae/qwen_image_vae.safetensors; pass them explicitly)");
+    if (distilled < 0)
+      distilled = lower(checkpoint.filename().string()).find("raw") == std::string::npos;
+    const char *env = getenv("LOOM_COMPILE");
+    native_compiler(c ? c : env ? env : "loom-compile");
+    *out = new krea2_pipeline(checkpoint.string(), te, v,
+                              c ? c : env ? env : "loom-compile", distilled != 0);
+    return 0;
+  } catch (const std::exception &ex) {
+    if (e && n)
+      snprintf(e, n, "%s", ex.what());
+    return 1;
+  } catch (...) {
+    if (e && n)
+      snprintf(e, n, "native initialization failed");
+    return 1;
+  }
+}
 extern "C" int krea2_pipeline_create(const char *b, const char *c,
                                      krea2_pipeline **out, char *e, size_t n) {
+  if (b && is_safetensors(b))
+    return krea2_pipeline_create_files(b, nullptr, nullptr, -1, c, out, e, n);
   if (e && n)
     e[0] = 0;
   if (out)
@@ -153,11 +235,14 @@ extern "C" int krea2_pipeline_create(const char *b, const char *c,
                                "/native.json");
     json j;
     f >> j;
-    if (j.at("version") != 1 || j.at("model") != "krea2-turbo")
+    const std::string model = j.at("model");
+    if (j.at("version") != 1 ||
+        (model != "krea2-turbo" && model != "krea2-raw"))
       throw std::invalid_argument("unsupported native bundle");
     const char *env = getenv("LOOM_COMPILE");
     native_compiler(c ? c : env ? env : "loom-compile");
-    *out = new krea2_pipeline(b, c ? c : env ? env : "loom-compile");
+    *out = new krea2_pipeline(b, c ? c : env ? env : "loom-compile",
+                              model == "krea2-turbo");
     return 0;
   } catch (const std::exception &ex) {
     if (e && n)
@@ -224,14 +309,24 @@ extern "C" int krea2_decode(krea2_pipeline *p, const float *latents,
     std::copy(result.begin(), result.end(), rgb);
   });
 }
-extern "C" int krea2_generate(krea2_pipeline *p, const char *prompt, int w,
-                              int h, int steps, uint64_t seed,
-                              const float *initial, size_t count, uint8_t *rgb,
-                              size_t cap, char *e, size_t n) {
+extern "C" int krea2_pipeline_distilled(const krea2_pipeline *p) {
+  return p && p->distilled ? 1 : 0;
+}
+namespace {
+int generate(krea2_pipeline *p, const char *prompt, const char *negative,
+             float guidance, int w, int h, int steps, uint64_t seed,
+             const float *initial, size_t count, uint8_t *rgb, size_t cap,
+             char *e, size_t n) {
   return guard(p, e, n, [&] {
     dimensions(w, h);
-    if (!prompt || steps < 1 || steps > 100 || !rgb || cap < size_t(w) * h * 3)
+    if (guidance < 0)
+      guidance = p->distilled ? 0.f : 3.5f;
+    if (steps <= 0)
+      steps = p->distilled ? 8 : 52;
+    if (!prompt || steps < 1 || steps > 100 || !rgb ||
+        cap < size_t(w) * h * 3 || !std::isfinite(guidance) || guidance > 100)
       throw std::invalid_argument("invalid generation arguments");
+    const bool guided = guidance > 0;
     size_t elements = size_t(w / 16) * (h / 16) * 64;
     std::vector<float> random;
     if (!initial) {
@@ -254,11 +349,20 @@ extern "C" int krea2_generate(krea2_pipeline *p, const char *prompt, int w,
     auto latents = upload_float(initial, count, w / 16 * (h / 16), 64);
     auto text = p->models.text_fusion(
         p->models.encode(p->models.tokenizer.prompt(prompt)));
+    Tensor uncond;
+    if (guided)
+      uncond = p->models.text_fusion(p->models.encode(
+          p->models.tokenizer.prompt(negative ? negative : "")));
     timing.mark("encode and text fusion");
+    const float mu = p->distilled ? 1.15f : dynamic_mu(w / 16 * (h / 16));
     for (int step = 0; step < steps; ++step) {
-      float sigma = scheduler_sigma(step, steps),
-            next = scheduler_sigma(step + 1, steps);
+      float sigma = scheduler_sigma(step, steps, mu),
+            next = scheduler_sigma(step + 1, steps, mu);
       auto velocity = p->forward(latents, text, sigma, w, h);
+      if (guided) {
+        auto unguided = p->forward(latents, uncond, sigma, w, h);
+        p->models.ops.guidance(velocity, unguided, guidance);
+      }
       p->models.ops.euler_step(latents, velocity, next - sigma);
     }
     timing.mark("denoise");
@@ -266,4 +370,26 @@ extern "C" int krea2_generate(krea2_pipeline *p, const char *prompt, int w,
     timing.mark("VAE decode");
     std::copy(result.begin(), result.end(), rgb);
   });
+}
+} // namespace
+extern "C" int krea2_generate(krea2_pipeline *p, const char *prompt, int w,
+                              int h, int steps, uint64_t seed,
+                              const float *initial, size_t count, uint8_t *rgb,
+                              size_t cap, char *e, size_t n) {
+  if (steps < 1 || steps > 100) {
+    if (e && n)
+      snprintf(e, n, "invalid generation arguments");
+    return 1;
+  }
+  return generate(p, prompt, nullptr, 0.f, w, h, steps, seed, initial, count,
+                  rgb, cap, e, n);
+}
+extern "C" int krea2_generate_guided(krea2_pipeline *p, const char *prompt,
+                                     const char *negative, float guidance,
+                                     int w, int h, int steps, uint64_t seed,
+                                     const float *initial, size_t count,
+                                     uint8_t *rgb, size_t cap, char *e,
+                                     size_t n) {
+  return generate(p, prompt, negative, guidance, w, h, steps, seed, initial,
+                  count, rgb, cap, e, n);
 }

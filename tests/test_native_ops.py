@@ -179,7 +179,7 @@ def main():
             "norm_" + str(mode),
             dict(xsize=x.size, cols=513),
             7,
-            [x, w],
+            [x, ww.astype(np.float32)],
             x.shape,
             scalar=1e-6,
             grid=(7, 1),
@@ -240,6 +240,31 @@ def main():
                 got[:, np.triu_indices(65, 1)[0], np.triu_indices(65, 1)[1]]
             )
     print("PASS batched softmax and exact causal masking", flush=True)
+    # The scheduler ops: Euler's bf16 delta/product rounding and Krea's guidance
+    # combine (cond + g * (cond - uncond), rounded per operation as diffusers does).
+    n = 1000
+    sample, velocity, uncond = (bf(rng.standard_normal(n) * s) for s in (1.0, 0.5, 0.5))
+    def launch(name, scalar, first, second):
+        pointers = [alloc(first), alloc(second)]
+        pack = struct.pack("i", n) + struct.pack("f", scalar)
+        pack += bytes((-len(pack)) % 8) + struct.pack("QQ", *pointers)
+        b = C.create_string_buffer(pack)
+        try:
+            assert not lib.test_run(name.encode(), b"{}", b, len(pack), (n + 255) // 256, 1, 256), name
+            out = np.zeros(n, dtype=np.uint16)
+            lib.test_copy(out.ctypes.data, pointers[0], out.nbytes)
+            return out
+        finally:
+            for p in pointers:
+                lib.test_free(p)
+    dt = -0.1234
+    expected = bf(f32(sample) + f32(bf(f32(bf([dt])) * f32(velocity))))
+    assert np.array_equal(launch("euler", dt, sample, velocity), expected), "euler"
+    scale = 3.5
+    difference = f32(bf(f32(velocity) - f32(uncond)))
+    expected = bf(f32(velocity) + f32(bf(scale * difference)))
+    assert np.array_equal(launch("guidance", scale, velocity, uncond), expected), "guidance"
+    print("PASS Euler step and guidance combine with bf16 rounding", flush=True)
 
 
 if __name__ == "__main__":

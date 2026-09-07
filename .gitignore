@@ -8,3 +8,4 @@ __pycache__/
 
 # Historical workflow marker names
 /build_*.done
+/host/block_sources.h

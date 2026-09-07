@@ -7,6 +7,11 @@ struct Models {
   Weights text, transformer, vae;
   Tokenizer tokenizer;
   explicit Models(const std::string &root);
+  // ComfyUI's files as they are: the diffusion model checkpoint (its
+  // non-block tensors and modulation tables), the text encoder (bf16 or
+  // fp8_scaled) and the VAE; the tokenizer is embedded.
+  Models(const std::string &checkpoint, const std::string &text_encoder,
+         const std::string &vae_file);
   static constexpr size_t modulation_elements = 28 * 6 * 6144;
   Tensor lin(const Tensor &x, const Weights &w, const std::string &p) {
     return ops.linear(x, w[p + ".weight"],
@@ -25,6 +30,7 @@ struct Models {
 
 private:
   Tensor block_tables;
+  void tables();
   Tensor fusion_block(const Tensor &x, const std::string &p, int batch,
                       int tokens);
   Tensor residual(const Tensor &x, const std::string &p, int h, int w);

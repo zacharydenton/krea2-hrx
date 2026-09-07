@@ -160,7 +160,8 @@ def cast_transformer_bf16(transformer):
     return transformer
 
 
-def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch", weights: str | None = None):
+def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch", weights: str | None = None,
+          checkpoint: Path = TURBO, distilled: bool = True):
     from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from transformers import AutoTokenizer, Qwen3VLModel
@@ -169,7 +170,7 @@ def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch
     # module is built on the meta device so no f32 copy of 12.9B parameters is ever
     # materialised: that combination was 78 GB of host RAM and an OOM kill.
     from safetensors.torch import load_file
-    comfy = load_file(str(TURBO), device=device)
+    comfy = load_file(str(checkpoint), device=device)
     with torch.device("meta"):
         transformer = Krea2Transformer2DModel()
     missing, unexpected = transformer.load_state_dict(diffusers_state(comfy), strict=False, assign=True)
@@ -185,7 +186,7 @@ def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch
     vae.enable_tiling()
     scheduler = FlowMatchEulerDiscreteScheduler(**SCHEDULER)
     pipe = Krea2Pipeline(scheduler=scheduler, vae=vae, text_encoder=text_encoder, tokenizer=tokenizer,
-                         transformer=transformer, is_distilled=True)
+                         transformer=transformer, is_distilled=distilled)
     print(f"pipeline built in {time.time() - t0:.0f} s (quant={quant})")
     return pipe
 
@@ -199,19 +200,29 @@ def main() -> None:
     ap.add_argument("--quant", default="none", choices=["none", "w4a4"])
     ap.add_argument("--backend", default="torch", choices=["torch", "loom"], help="run the 28 blocks in Loom (int4) instead of torch")
     ap.add_argument("--weights", default=None, help="exported block weights for --backend loom (build/weights_int8 for W8A8)")
+    ap.add_argument("--model", choices=("turbo", "raw"), default="turbo", help="raw: the undistilled checkpoint (dynamic shift, guidance 3.5, 52 steps by default)")
+    ap.add_argument("--checkpoint", default=None, help="bf16 ComfyUI-format checkpoint (default ~/krea2-models/krea2_<model>_bf16.safetensors)")
+    ap.add_argument("--guidance", type=float, default=None, help="Krea's guidance scale, cond + g*(cond - uncond); default 0 for turbo, 3.5 for raw")
+    ap.add_argument("--negative", default=None, help="negative prompt (raw); empty by default")
     ap.add_argument("--out", default="build/out.png")
     ap.add_argument("--fixture", default=None)
     ap.add_argument("--latents-out", default=None, help="save the final packed latents for PSNR comparisons")
     ap.add_argument("--images", type=int, default=1, help="generate this many images in one process (the first pays the session build)")
     a = ap.parse_args()
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend, weights=a.weights)
+    raw = a.model == "raw"
+    checkpoint = Path(a.checkpoint) if a.checkpoint else (TURBO.parent / "krea2_raw_bf16.safetensors" if raw else TURBO)
+    if raw and "--steps" not in sys.argv:
+        a.steps = 52
+    guidance = a.guidance if a.guidance is not None else (3.5 if raw else 0.0)
+    pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend, weights=a.weights,
+                 checkpoint=checkpoint, distilled=not raw)
     per_image = []
     for image_index in range(a.images):
         gen = torch.Generator("cuda").manual_seed(a.seed)
         t0 = time.time()
-        result = pipe(a.prompt, height=a.size, width=a.size, num_inference_steps=a.steps, guidance_scale=0.0,
-                      generator=gen, output_type="latent" if a.latents_out else "pil")
+        result = pipe(a.prompt, negative_prompt=a.negative, height=a.size, width=a.size, num_inference_steps=a.steps,
+                      guidance_scale=guidance, generator=gen, output_type="latent" if a.latents_out else "pil")
         torch.cuda.synchronize()
         per_image.append(time.time() - t0)
     dt = per_image[-1]

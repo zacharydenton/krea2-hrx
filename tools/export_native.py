@@ -26,11 +26,15 @@ def export(sources, destination, select, transform=lambda name, value: value):
                     name = select(key)
                     if name is None:
                         continue
-                    tensor = transform(name, source.get_tensor(key)).to(torch.bfloat16).contiguous()
-                    data = tensor.view(torch.uint16).numpy().tobytes()
+                    tensor = transform(name, source.get_tensor(key))
+                    # The checkpoints' dtypes are kept: bf16 stays bf16 and the float32 tensors
+                    # (the transformer's RMSNorm scales) stay float32, as ComfyUI and diffusers keep them.
+                    f32 = tensor.dtype == torch.float32
+                    tensor = (tensor.float() if f32 else tensor.to(torch.bfloat16)).contiguous()
+                    data = (tensor.view(torch.uint32) if f32 else tensor.view(torch.uint16)).numpy().tobytes()
                     if name in index:
                         raise ValueError(f"duplicate tensor: {name}")
-                    index[name] = dict(offset=offset, shape=list(tensor.shape), bytes=len(data))
+                    index[name] = dict(offset=offset, shape=list(tensor.shape), bytes=len(data), dtype="f32" if f32 else "bf16")
                     output.write(data)
                     offset += len(data)
     (destination / "weights.json").write_text(json.dumps(index, sort_keys=True))
@@ -43,11 +47,14 @@ def main():
     ap.add_argument("--blocks", type=Path, default=ROOT / "build/weights")
     ap.add_argument("--out", type=Path, default=ROOT / "build/native")
     ap.add_argument("--link-blocks", action="store_true", help="use development symlinks instead of copying block weights")
+    ap.add_argument("--model", choices=("turbo", "raw"), default="turbo", help="which checkpoint the blocks came from: sets the bundle's schedule and guidance defaults")
+    ap.add_argument("--checkpoint", type=Path, default=None, help="the bf16 ComfyUI-format checkpoint for the non-block transformer weights (default <models>/krea2_<model>_bf16.safetensors)")
     args = ap.parse_args()
     destination = args.out.resolve()
     if destination.exists():
         ap.error(f"output already exists: {destination}; select a new --out directory")
-    required = [args.models / "krea2_turbo_bf16.safetensors", args.models / "qwen3-vl-4b/tokenizer.json",
+    args.checkpoint = args.checkpoint or args.models / f"krea2_{args.model}_bf16.safetensors"
+    required = [args.checkpoint, args.models / "qwen3-vl-4b/tokenizer.json",
                 args.blocks / "weights.bin", args.blocks / "manifest.txt"]
     for pattern in ("qwen3-vl-4b/*.safetensors", "qwen-image/vae/*.safetensors"):
         if not list(args.models.glob(pattern)):
@@ -66,7 +73,7 @@ def main():
 
 
 def export_bundle(args):
-    export([args.models / "krea2_turbo_bf16.safetensors"], args.out / "transformer",
+    export([args.checkpoint], args.out / "transformer",
            lambda k: k if not k.startswith("blocks.") or k.endswith(".mod.lin") else None)
     export(sorted((args.models / "qwen3-vl-4b").glob("*.safetensors")), args.out / "text",
            lambda k: k.removeprefix("model.language_model.") if k.startswith("model.language_model.") else None)
@@ -87,7 +94,7 @@ def export_bundle(args):
             target.symlink_to(os.path.relpath((args.blocks / name).resolve(), args.final_out / "blocks"))
         else:
             shutil.copyfile(args.blocks / name, target)
-    (args.out / "native.json").write_text(json.dumps(dict(version=1, model="krea2-turbo", max_text_tokens=512)))
+    (args.out / "native.json").write_text(json.dumps(dict(version=1, model=f"krea2-{args.model}", max_text_tokens=512)))
 
 
 if __name__ == "__main__":

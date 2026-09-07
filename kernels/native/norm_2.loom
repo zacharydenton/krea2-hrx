@@ -41,7 +41,7 @@ kernel.def target(@krea2_norm_2_target) export("krea2_norm_2") @krea2_norm_2(%co
   %x_global = buffer.assume.memory_space<global> %x : buffer
   %x_view = buffer.view %x_global[%zero_offset] : buffer -> view<[%xsize]xbf16>
   %w_global = buffer.assume.memory_space<global> %w : buffer
-  %w_view = buffer.view %w_global[%zero_offset] : buffer -> view<[%cols]xbf16>
+  %w_view = buffer.view %w_global[%zero_offset] : buffer -> view<[%cols]xf32>
   %y_global = buffer.assume.memory_space<global> %y : buffer
   %y_view = buffer.view %y_global[%zero_offset] : buffer -> view<[%xsize]xbf16>
   %v4 = index.mul %group, %cols : index
@@ -148,19 +148,18 @@ kernel.def target(@krea2_norm_2_target) export("krea2_norm_2") @krea2_norm_2(%co
     %v80 = scalar.extf %v79 : bf16 to f32
     %v81 = scalar.mulf %v80, %v75 : f32
     %v82 = index.assume %v76 [range(%v76, 0, 1073741824), lt(%v76, %cols)] : index
-    %v83 = view.load %w_view[%v82] : view<[%cols]xbf16> -> bf16
-    %v84 = scalar.extf %v83 : bf16 to f32
-    %v85 = scalar.fptrunc %v81 : f32 to bf16
-    %v86 = scalar.extf %v85 : bf16 to f32
-    %v87 = scalar.sqrtf %v70 : f32
-    %v88 = scalar.mulf %v86, %v87 : f32
-    %v89 = scalar.fptrunc %v88 : f32 to bf16
-    %v90 = scalar.extf %v89 : bf16 to f32
-    %v91 = scalar.mulf %v90, %v84 : f32
-    %v92 = index.add %v4, %v76 : index
-    %v93 = scalar.fptrunc %v91 : f32 to bf16
-    %v94 = index.assume %v92 [range(%v92, 0, 1073741824), lt(%v92, %xsize)] : index
-    view.store %v93, %y_view[%v94] : bf16, view<[%xsize]xbf16>
+    %v83 = view.load %w_view[%v82] : view<[%cols]xf32> -> f32
+    %v84 = scalar.fptrunc %v81 : f32 to bf16
+    %v85 = scalar.extf %v84 : bf16 to f32
+    %v86 = scalar.sqrtf %v70 : f32
+    %v87 = scalar.mulf %v85, %v86 : f32
+    %v88 = scalar.fptrunc %v87 : f32 to bf16
+    %v89 = scalar.extf %v88 : bf16 to f32
+    %v90 = scalar.mulf %v89, %v83 : f32
+    %v91 = index.add %v4, %v76 : index
+    %v92 = scalar.fptrunc %v90 : f32 to bf16
+    %v93 = index.assume %v91 [range(%v91, 0, 1073741824), lt(%v91, %xsize)] : index
+    view.store %v92, %y_view[%v93] : bf16, view<[%xsize]xbf16>
   }
   kernel.return
 }
