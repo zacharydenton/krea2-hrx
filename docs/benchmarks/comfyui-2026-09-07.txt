@@ -1,0 +1,15 @@
+# ComfyUI INT8 ConvRot, toolbox amd-strix-halo-comfyui, 2026-09-07, idle box (first series, 3 runs; second series, 2 runs)
+{"load_seconds": 2.0730164939304814, "torch": "2.14.0a0+rocm7.15.0a20260721", "model": "krea2_turbo_int8_convrot.safetensors", "model_dtype": "torch.bfloat16", "size": 1024, "steps": 8, "cfg": 1, "sampler": "euler", "scheduler": "simple", "disable_mmap": true, "dynamic_vram": true}
+{"run": 0, "text_seconds": 9.763642839970998, "denoise_seconds": 46.344595630071126, "vae_seconds": 1.2132489259820431, "seconds": 57.32148739602417, "cached_prompt_seconds": 47.55784455605317, "rgb_sha256": "fe1c97923ab0c0715f4517798f347385061830f09a224627044e32c66ba997bb", "peak_gpu_allocated_gib": 4.1215620040893555}
+{"run": 1, "text_seconds": 0.4799845019588247, "denoise_seconds": 34.403114406974055, "vae_seconds": 0.6616637300467119, "seconds": 35.54476263897959, "cached_prompt_seconds": 35.06477813702077, "rgb_sha256": "fe1c97923ab0c0715f4517798f347385061830f09a224627044e32c66ba997bb", "peak_gpu_allocated_gib": 4.1215620040893555}
+{"run": 2, "text_seconds": 0.3081019490491599, "denoise_seconds": 35.11315630201716, "vae_seconds": 0.6615849989466369, "seconds": 36.08284325001296, "cached_prompt_seconds": 35.7747413009638, "rgb_sha256": "fe1c97923ab0c0715f4517798f347385061830f09a224627044e32c66ba997bb", "peak_gpu_allocated_gib": 4.1215620040893555}
+{"run": 0, "text_seconds": 7.317298765992746, "denoise_seconds": 75.61146806902252, "vae_seconds": 1.2730829599313438, "seconds": 84.20184979494661, "cached_prompt_seconds": 76.88455102895387, "rgb_sha256": "fe1c97923ab0c0715f4517798f347385061830f09a224627044e32c66ba997bb", "peak_gpu_allocated_gib": 4.1215620040893555}
+{"run": 1, "text_seconds": 0.5565821849741042, "denoise_seconds": 35.69701192493085, "vae_seconds": 0.6639816910028458, "seconds": 36.9175758009078, "cached_prompt_seconds": 36.360993615933694, "rgb_sha256": "fe1c97923ab0c0715f4517798f347385061830f09a224627044e32c66ba997bb", "peak_gpu_allocated_gib": 4.1215620040893555}
+# native Loom INT4, build/native-deploy at 5eeb51e (first series, 3 runs; second series, 2 runs)
+{"load_seconds": 7.87493655399885}
+{"run": 0, "seconds": 26.48872580297757, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+{"run": 1, "seconds": 17.975654419977218, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+{"run": 2, "seconds": 17.12804856605362, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+{"load_seconds": 9.259162230999209}
+{"run": 0, "seconds": 20.37207944493275, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+{"run": 1, "seconds": 16.61574614304118, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}

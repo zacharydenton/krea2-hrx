@@ -642,3 +642,13 @@ sources, `tools/bench_native.py --runs 2`, alternating order, two rounds, idle b
 the warm 1024^2 eight-step image went from 18.19 / 18.15 s to 16.63 / 16.62 s (1.09x),
 first runs 19.02 / 19.00 -> 17.46 / 17.45 s, every run the same RGB hash
 `65507120ec…`. Record: `docs/benchmarks/image-h3-levers-2026-09-06.txt`.
+
+## Against ComfyUI, idle box (2026-09-07)
+
+Fresh alternated measurement (`docs/comfyui-performance.md`): ComfyUI INT8 ConvRot 36.1 s
+warm median (denoising 34.4-35.7 s, VAE 0.66 s) against 17.1 s here (best 16.6 s), 2.1x per
+image and 2.7x on the transformer. The earlier 105 s ComfyUI figure was taken with a video
+job on the GPU and should not be quoted. The tiled VAE decode (3.2 s against ComfyUI's
+0.66 s untiled bf16) is now the largest single gap. Production kernel rates at 4115 tokens:
+qkv 78 TOPS, gate/up 78, down 81 (padded pitch), wo 71; attention 14.0 ms = 30 TFLOP/s
+(21 including preprocessing).

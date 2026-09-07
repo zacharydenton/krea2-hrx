@@ -1,4 +1,38 @@
-# Local ComfyUI comparison, 2026-09-05
+# Local ComfyUI comparison
+
+## 2026-09-07, idle box
+
+Same settings as below (1024x1024, eight Euler steps, CFG 1, seed 0, `a red fox in the
+snow`), nothing else on the GPU, the two backends alternated: ComfyUI three images, native
+three, ComfyUI two, native two. ComfyUI ran through `toolbox run -c amd-strix-halo-comfyui`
+(the container's runtime had to be restarted first). Native is `build/native-deploy` at
+commit `5eeb51e` (padded down pitch, 256x128 tiles, head-major attention operands).
+
+| Backend | first image | warm images | warm median |
+| --- | ---: | ---: | ---: |
+| ComfyUI INT8 ConvRot | 57.32 s (84.20 s in the second series, after DynamicVRAM eviction) | 35.54, 36.08, 36.92 s | 36.1 s |
+| Native Loom INT4 | 26.49 s (20.37 s in the second series) | 17.98, 17.13, 16.62 s | 17.1 s |
+
+ComfyUI warm stages: text 0.31-0.56 s, denoising 34.40-35.70 s, VAE 0.66 s. Native warm
+stages (from `KREA2_NATIVE_PROFILE=1`): text encoding and fusion 0.17 s, eight forwards
+about 13 s, tiled VAE decode 3.2 s. The transformer is 2.7x faster here; the VAE decode is
+5x slower than ComfyUI's untiled bf16 decoder and is now the largest gap to close. Every
+run of each backend repeated its RGB hash (`fe1c9792…` ComfyUI, `65507120…` native).
+Raw lines: `docs/benchmarks/comfyui-2026-09-07.txt`; logs under
+`build/comfy-comparison-2026-09-07/`.
+
+Reproduction:
+
+```sh
+toolbox run -c amd-strix-halo-comfyui bash -c 'cd ~/code/ComfyUI && \
+  PYTHONPATH=/home/zach/code/krea2-loom/build/comfy-bench-deps \
+  /opt/venv/bin/python /home/zach/code/krea2-loom/tools/bench_comfyui.py --runs 3'
+source scripts/env.sh
+env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE .venv/bin/python tools/bench_native.py \
+  --bundle build/native-deploy --runs 3
+```
+
+## 2026-09-05, contended box
 
 The installed ComfyUI INT8 setup averaged **105.74 s/image**, versus **31.88 s**
 for the current native Loom runtime: **3.32× throughput** on the two measured
