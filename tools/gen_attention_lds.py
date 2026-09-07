@@ -10,9 +10,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 import os
+QTILES = int(os.environ.get("ATTN_QTILES", "1"))       # 16-query tiles per workgroup (1, 2 or 4)
 TILE = int(os.environ.get("ATTN_TILE", "16"))          # keys per staged tile (16 or 32)
 STEM = os.environ.get("ATTN_STEM", "attention_gqa_lds_f16_wmma")
+assert QTILES in (1, 2, 4)
 assert TILE in (16, 32)
+WAVES = 4 * QTILES        # four query heads share one key-value head; one query tile per group of four
+THREADS = 32 * WAVES
+# The tile is staged by the first 128 threads whatever the workgroup size, as in H3's kernel:
+# more query tiles per workgroup are there to reuse the tile, not to stage it faster.
+ONE_PASS = False
 OUT = ROOT / "kernels" / f"{STEM}.loom"
 NS, SYM = "krea2." + STEM, "krea2_" + STEM
 ROW = 136   # LDS row length in halves for a 128-channel tile (272-byte rows)
@@ -54,10 +61,11 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %c15 = index.constant 15 : index
   %c16 = index.constant 16 : index
   %c128 = index.constant 128 : index
-  %tokens0 = config.get @{NS}.tokens : index
-  %rounded = index.add %tokens0, %c15 : index
-  %tiles = index.div %rounded, %c16 : index
-  kernel.launch.config workgroups(%tiles, %kv_head_count, %c1) workgroup_size(%c128, %c1, %c1) : index
+{"" if QTILES == 1 else "  %group_last = index.constant " + str(16 * QTILES - 1) + " : index" + chr(10) + "  %c" + str(THREADS) + " = index.constant " + str(THREADS) + " : index" + chr(10)}  %tokens0 = config.get @{NS}.tokens : index
+  %group = index.constant {16 * QTILES} : index
+  %rounded_group = index.add %tokens0, {"%c15" if QTILES == 1 else "%group_last"} : index
+  %tiles = index.div %rounded_group, %group : index
+  kernel.launch.config workgroups(%tiles, %kv_head_count, %c1) workgroup_size(%c{THREADS}, %c1, %c1) : index
 }} launch(%token_count: index, %q: buffer, %k: buffer, %v: buffer, %out: buffer) {{
   %q_stride0 = config.get @{NS}.q_stride : index
   %kv_stride0 = config.get @{NS}.kv_stride : index
@@ -84,14 +92,14 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %c112 = index.constant 112 : index
   %c128 = index.constant 128 : index
   %c{ROW} = index.constant {ROW} : index
-{"  %c31 = index.constant 31 : index" + chr(10) if TILE == 32 else ""}  %c0_offset = index.constant 0 : offset
+{"  %c31 = index.constant 31 : index" + chr(10) if TILE == 32 else ""}{"" if QTILES == 1 else "  %group = index.constant " + str(16 * QTILES) + " : index" + chr(10) + "  %group_last = index.constant " + str(16 * QTILES - 1) + " : index" + chr(10)}  %c0_offset = index.constant 0 : offset
   %k_tile_offset = index.constant 0 : offset
   %v_tile_offset = index.constant {TILE * ROW * 2} : offset
   %scratch_offset = index.constant {TILE * ROW * 2 + 128 * VROW * 2} : offset
   // the result stage aliases the K/V tiles: it is used only after the loop's final barrier
   %result_offset = index.constant 0 : offset
-  %q_tile_offset = index.constant {TILE * ROW * 2 + 128 * VROW * 2 + 4 * SCRATCH} : offset
-  %lds_bytes = index.constant {TILE * ROW * 2 + 128 * VROW * 2 + 4 * SCRATCH + 4 * 16 * QROW * 2} : offset
+  %q_tile_offset = index.constant {TILE * ROW * 2 + 128 * VROW * 2 + WAVES * SCRATCH} : offset
+  %lds_bytes = index.constant {TILE * ROW * 2 + 128 * VROW * 2 + WAVES * SCRATCH + WAVES * 16 * QROW * 2} : offset
   %m = index.constant 16 : index
   %n = index.constant 16 : index
   %k_frag = index.constant 16 : index
@@ -129,7 +137,8 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %kv_head = index.rem %kv_head_raw, %kv_head_limit : index
   %workitem = kernel.workitem.id<x> : index
   %wave0 = kernel.subgroup.id : index
-  %wave = index.assume %wave0 [range(%wave0, 0, 3)] : index
+  %wave = index.assume %wave0 [range(%wave0, 0, {WAVES - 1})] : index
+{"" if QTILES == 1 else "  %wave_head = index.rem %wave, %c4 : index" + chr(10) + "  %wave_tile = index.div %wave, %c4 : index" + chr(10)}
   %lane = kernel.subgroup.lane.id : index
   %lane_column = index.rem %lane, %c16 : index
   %lane_group = index.div %lane, %c16 : index
@@ -137,14 +146,14 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   // this wave's query head, and its channels in q and out
   %head_limit = index.div %out_stride0, %c128 : index
   %head0 = index.mul %kv_head, %c4 : index
-  %head1 = index.add %head0, %wave : index
+  %head1 = index.add %head0, {"%wave" if QTILES == 1 else "%wave_head"} : index
   %head = index.rem %head1, %head_limit : index
   %head_base0 = index.mul %head, %c128 : index
   %kv_base0 = index.mul %kv_head, %c128 : index
-  %rounded = index.add %tokens0, %c15 : index
-  %tiles_per_image = index.div %rounded, %c16 : index
+  %rounded = index.add %tokens0, {"%c15" if QTILES == 1 else "%group_last"} : index
+  %tiles_per_image = index.div %rounded, {"%c16" if QTILES == 1 else "%group"} : index
   %tile_in_image = index.rem %tile_id, %tiles_per_image : index
-  %query_origin0 = index.mul %tile_in_image, %c16 : index
+{"  %query_origin0 = index.mul %tile_in_image, %c16 : index" if QTILES == 1 else "  %group_origin = index.mul %tile_in_image, %group : index" + chr(10) + "  %wave_offset = index.mul %wave_tile, %c16 : index" + chr(10) + "  %query_origin0 = index.add %group_origin, %wave_offset : index"}
   %tile_origin_limit = index.sub %padded_tokens, %c{TILE} : index
 
   %q_global = buffer.assume.memory_space<global> %q : buffer
@@ -183,9 +192,10 @@ kernel.def target(@{SYM}_gfx11) export("{SYM}") @{SYM}(%token_count: index, %kv_
   %st_chunk_v = index.mul %st_chunk_v0, %c16 : index
   %st_col_v0 = index.add %kv_base0, %st_chunk_v : index
   %st_col_v = index.assume %st_col_v0 [le(%st_col_v0, %kv_col_limit), mul(%st_col_v0, 16)] : index
-  %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
-{"  %key_tile_count = index.add %tiles_per_image, %c0 : index" if TILE == 16 else "  %key_rounded = index.add %tokens0, %c31 : index" + chr(10) + "  %key_tile_count = index.div %key_rounded, %c32 : index"}
-{"  %st_key_hi = index.add %st_key, %c16 : index" + chr(10) + "  %st_key_v_hi = index.add %st_key_v, %c16 : index" + chr(10) + "  %lane_column_hi = index.add %lane_column, %c16 : index" + chr(10) if TILE == 32 else ""}
+{"  %st_active = index.cmp ult, %workitem, %c128 : index" + chr(10) if QTILES > 1 else ""}  %init = vector.fragment<init> %zero_acc shape [%m, %n] : vector<8xf32>
+  %key_rounded = index.add %tokens0, %c{TILE - 1} : index
+  %key_tile_count = index.div %key_rounded, %c{TILE} : index
+{("  %st_key_hi = index.add %st_key, %c16 : index" + chr(10) + "  %st_key_v_hi = index.add %st_key_v, %c16 : index" + chr(10) if not ONE_PASS else "") + "  %lane_column_hi = index.add %lane_column, %c16 : index" + chr(10) if TILE == 32 else ""}
 """
 if QROW:
     K += f"""  %wave_q_bytes = index.constant {16 * QROW * 2} : offset
@@ -221,13 +231,13 @@ K += f"""  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, 
     // stage K and V tiles (rows past the sequence are zero headroom)
     %st_row0 = index.add %key_origin0, %st_key : index
     %st_row = index.assume %st_row0 [lt(%st_row0, %padded_tokens)] : index
-    %k_chunk = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+{"    scf.if %st_active {" + chr(10) if QTILES > 1 else ""}    %k_chunk = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     %st_row_v0 = index.add %key_origin0, %st_key_v : index
     %st_row_v = index.assume %st_row_v0 [lt(%st_row_v0, %padded_tokens)] : index
     %v_chunk = vector.load %v_view[%st_row_v, %st_col_v] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
     vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<{TILE}x{ROW}xf16>
 """
-if TILE == 32:
+if TILE == 32 and not ONE_PASS:
     K += f"""    %st_row_hi0 = index.add %st_row0, %c16 : index
     %st_row_hi = index.assume %st_row_hi0 [lt(%st_row_hi0, %padded_tokens)] : index
     %k_chunk_hi = vector.load %k_view[%st_row_hi, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
@@ -288,7 +298,7 @@ K += f"""    %ve0 = vector.extract %v_chunk[0] : vector<16xf16> -> f16
     %ve15 = vector.extract %v_chunk[15] : vector<16xf16> -> f16
     %vr15 = index.add %st_chunk_v, %cj15 : index
     view.store %ve15, %v_tile[%vr15, %st_key_v] : f16, view<128x{VROW}xf16>
-    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+{"    }" + chr(10) if QTILES > 1 else ""}    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
 """
 K += f"""
     %local_key = index.add %key_origin0, %lane_column : index

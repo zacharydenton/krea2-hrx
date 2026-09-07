@@ -903,6 +903,7 @@ photograph` (19 text tokens):
 | transformer | latent PSNR | image PSNR |
 | --- | ---: | ---: |
 | W8A8, fp16 attention (the default) | 24.57 dB | 33.67 dB |
+| W8A8, int8-QK attention (`KREA2_ATTN_QK=8`) | 22.55 dB | 31.78 dB |
 | W8A8, int4-QK attention (`KREA2_ATTN_QK=4`) | 21.62 dB | 31.57 dB |
 
 So the fp16 attention default is worth 3.0 dB in the latents and 2.1 dB in the picture
@@ -912,3 +913,30 @@ images (`build/quality/bf16.png`, `build/quality/w8a8.png`) are hard to tell apa
 Older figures used a different arrangement and older kernels: 26.8 dB image / 17.9 dB
 latent for Turbo, 28.12 / 18.29 for Raw. The Raw row has not been repeated -- the harness
 does not do guidance yet -- so the README still carries the old one, marked.
+
+
+## Attention: what is left to win (2026-09-07)
+
+The int8-QK twin was worth measuring on the metric above before spending anything on
+speed: it lands at 22.55 dB, a decibel over int4 and two under fp16. The smoothing and
+per-token quantization cost the picture, not the code width, so there is no cheap
+half-way house -- a faster attention has to be a faster *fp16* attention.
+
+Where the fp16 kernel stands: one workgroup of four waves per (16 query rows, key-value
+head), so the whole K/V of a head is streamed once per 16 queries. At 4115 tokens that is
+3096 workgroups x 2.1 MB = 6.5 GB of reads for a call measured at 25.2 ms on an idle box,
+i.e. about 258 GB/s -- the board's DRAM bandwidth. `tools/gen_attention_lds.py` therefore
+grew `ATTN_QTILES`: 2 or 4 query tiles per workgroup (8 or 16 waves) sharing one staged
+tile, with the first 128 threads still doing the staging, as H3's kernel does. It
+generates and matches the oracle to cosine 0.99999996; it is **not measured** -- the box
+was running another job's video render at 100% for the whole window, and the baseline
+itself swung between 25 and 41 ms, so no A/B from that period means anything.
+
+Two things worth knowing before the next attempt. minimax-h3-loom's fastest attention
+(~37 TFLOP/s-equivalent) is an *int8-QK* kernel with 64-key tiles and lookahead, not an
+fp16 one; its fp16 GQA kernel is this one, from the same generator, so there is nothing to
+port on that side. And the 6.5 GB figure assumes no reuse across workgroups, while all of
+K and V for the layer is 25 MB and the part has a 32 MB last-level cache -- if the cache is
+already absorbing the re-reads, more query tiles per workgroup will buy nothing, which is
+exactly what the (unusable) numbers hinted at. Measure that first on an idle box: the
+baseline against `ATTN_QTILES=2`, alternating, before touching the kernel further.

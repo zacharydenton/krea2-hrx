@@ -120,7 +120,11 @@ its own merits rather than on agreement with ComfyUI:
 | attention | latent PSNR | image PSNR |
 | --- | ---: | ---: |
 | fp16 (the default) | 24.6 dB | 33.7 dB |
+| int8-QK (`KREA2_ATTN_QK=8`) | 22.6 dB | 31.8 dB |
 | int4-QK (`KREA2_ATTN_QK=4`) | 21.6 dB | 31.6 dB |
+
+The two smoothed kernels sit together, a decibel apart at most: what costs the picture is
+SageAttention's smoothing and per-token quantization, not the code width.
 
 Where a W4A4 forward goes (`tests/test_blocks.py --profile`; in W8A8 the four GEMMs are 80%
 of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
