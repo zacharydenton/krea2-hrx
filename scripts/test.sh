@@ -31,6 +31,7 @@ step "generated kernels match their generators" bash -c '
 step "build host"                 ./scripts/build_host.sh
 step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
+step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py
 step "CPU checkpoint loading regressions" bash -c '${CXX:-c++} -std=c++17 -O2 -Wall -Werror tests/test_checkpoint.cpp -o "$tmpdir/test-checkpoint" && "$tmpdir/test-checkpoint" "$tmpdir"'
 step "repeat-image failure capture" python3 tests/test_bench_native.py
 step "softmax shared-memory reuse regression" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_softmax_repeat.cpp -Lbuild -lkrea2 -Wl,-rpath,"$PWD/build" -o "$tmpdir/test-softmax-repeat" && "$tmpdir/test-softmax-repeat"'

@@ -108,13 +108,19 @@ Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
 | one forward of the 28 blocks (4115 tokens) | 3.3 s | 3.3 s, two per step |
 | VAE decode (tiled) | 3.2 s | 3.2 s |
 | text encoding and fusion | 0.2 s | 0.2 s (prompt and negative) |
-| image PSNR vs the bf16 pipeline (seed 0) | 26.8 dB (latent 17.9) | 28.1 dB (latent 18.3) |
+| image PSNR vs the bf16 transformer (seed 0) | 33.7 dB (latent 24.6) | 28.1 dB (latent 18.3), older kernels |
 | 28-block update cosine vs bf16 on the fixture | 0.99910 | 0.9986 |
 
-The PSNR row predates the bf16 residual stream and the fp16 attention default and has not
-been re-measured: the bf16 checkpoint it compares against is no longer on this box, and
-both changes move the kernels toward it. The agreement with ComfyUI above is the current
-evidence.
+The Turbo row is `tools/quality_vs_bf16.py`: the same noise, the same text states, the same
+schedule and the same VAE, with the whole transformer -- embeddings, 28 blocks, final layer
+-- either Torch bf16 from the release checkpoint or the Loom W8A8 kernels through the C ABI.
+The two pictures are hard to tell apart. It is also what settles the attention default on
+its own merits rather than on agreement with ComfyUI:
+
+| attention | latent PSNR | image PSNR |
+| --- | ---: | ---: |
+| fp16 (the default) | 24.6 dB | 33.7 dB |
+| int4-QK (`KREA2_ATTN_QK=4`) | 21.6 dB | 31.6 dB |
 
 Where a W4A4 forward goes (`tests/test_blocks.py --profile`; in W8A8 the four GEMMs are 80%
 of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
@@ -146,8 +152,8 @@ Kernel rates at 4115 tokens on an idle box (`tools/bench_i4_gemm.py`,
 At 8192 tokens the GEMMs reach 84-87 TOPS and attention 27 TFLOP/s; at 16384 tokens
 attention 30 TFLOP/s.
 
-Quality against the bf16 diffusers pipeline on the same initial noise (seed 0), on the
-kernels of the day: W8A8 26.8 dB image PSNR, W4A4 18.9 dB. The W4A4 picture is the same fox in the same pose and
+Quality against the bf16 transformer on the same initial noise and text states (seed 0):
+W8A8 33.7 dB image PSNR today; W4A4 measured 18.9 dB on the kernels of its day. The W4A4 picture is the same fox in the same pose and
 light with different fur and snow detail; a published int4 ConvRot checkpoint of the same
 model that keeps 96 of its 224 block linears in int8 reports a minimum image PSNR of
 17.7 dB against bf16, and this port quantizes every block GEMM to int4 with per-row

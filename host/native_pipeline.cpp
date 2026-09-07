@@ -276,7 +276,7 @@ int generate(krea2_pipeline *p, const char *prompt, const char *negative,
       uncond = p->models.text_fusion(p->models.encode(
           p->models.tokenizer.prompt(negative ? negative : "")));
     timing.mark("encode and text fusion");
-    const float mu = p->distilled ? 1.15f : dynamic_mu(w / 16 * (h / 16));
+    const double mu = p->distilled ? 1.15 : dynamic_mu(w / 16 * (h / 16));
     for (int step = 0; step < steps; ++step) {
       float sigma = scheduler_sigma(step, steps, mu),
             next = scheduler_sigma(step + 1, steps, mu);

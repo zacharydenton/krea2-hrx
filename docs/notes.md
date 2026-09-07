@@ -884,3 +884,31 @@ algorithm, a different schedule -- and what is worth keeping is precision the ha
 gives away for free. Krea 2's own reference is a bf16 pipeline, so this is a small margin
 either way; if bit-comparability with ComfyUI is ever wanted for debugging, it belongs
 behind a build switch rather than in the default kernels.
+
+
+## PSNR against the bf16 transformer (2026-09-07)
+
+The metric that judges these kernels is agreement with the model, not with ComfyUI, so
+`tools/quality_vs_bf16.py` measures it directly: one arm is Torch bf16 on the release
+checkpoint, the other the Loom W8A8 kernels through the C ABI, and everything else is
+shared -- the same noise, the same text states (the reference pipeline's, masked down to
+its valid rows), the same shifted-sigma schedule with the same bf16 Euler rounding, and the
+same tiled VAE decode. It runs in three stages, one process each, because HRX's `hsa_init`
+fails with `OUT_OF_RESOURCES` in a process where Torch already holds the GPU while another
+job is on the box; separately, each runtime is fine.
+
+1024^2, eight steps, seed 0, `a red fox sitting in fresh snow at dawn, soft light,
+photograph` (19 text tokens):
+
+| transformer | latent PSNR | image PSNR |
+| --- | ---: | ---: |
+| W8A8, fp16 attention (the default) | 24.57 dB | 33.67 dB |
+| W8A8, int4-QK attention (`KREA2_ATTN_QK=4`) | 21.62 dB | 31.57 dB |
+
+So the fp16 attention default is worth 3.0 dB in the latents and 2.1 dB in the picture
+against the model itself -- it does not rest on agreement with ComfyUI. The two decoded
+images (`build/quality/bf16.png`, `build/quality/w8a8.png`) are hard to tell apart.
+
+Older figures used a different arrangement and older kernels: 26.8 dB image / 17.9 dB
+latent for Turbo, 28.12 / 18.29 for Raw. The Raw row has not been repeated -- the harness
+does not do guidance yet -- so the README still carries the old one, marked.
