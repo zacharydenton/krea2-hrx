@@ -65,7 +65,7 @@ class CacheTests(unittest.TestCase):
                 self.assertEqual(builder.build(129), first)
                 self.assertEqual(compile_mock.call_count, 9)
                 wide = builder.build(4115, 8)
-                self.assertEqual((wide / "launch.txt").read_text(), "5 4115 256 4 4160 8 6144 16448 16 8 2\n")
+                self.assertEqual((wide / "launch.txt").read_text(), "5 4115 256 4 4160 8 6144 16448 16 8 1\n")
                 self.assertIn("gemm_i8_resid_256", (wide / "gemm_down.hsaco").read_text())
                 self.assertIn("prepare_plain_i8", (wide / "prepare_plain_i8.hsaco").read_text())
                 for tokens, waves in ((129, 8), (2047, 8), (2048, 8), (8191, 8), (8192, 4), (16896, 4)):
@@ -75,7 +75,7 @@ class CacheTests(unittest.TestCase):
                     self.assertEqual(fields[0], "5")
                     self.assertEqual(fields[5], str(waves))
                     self.assertEqual(fields[2], str(builder.gemm_rows(tokens)))
-                    query_tiles = 2 if tokens >= 2048 else 1
+                    query_tiles = 1
                     self.assertEqual(fields[6:], ["6144", "16512", "16", "4", str(query_tiles)])
                     expected = "attention_query32" if query_tiles == 2 else "attention_gqa_lds_f16_wmma"
                     self.assertIn(expected, (selected / "attention.hsaco").read_text())

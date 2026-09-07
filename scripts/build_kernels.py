@@ -75,8 +75,8 @@ def gemm_m_group(tokens, rows=128):
 
 
 def fp16_query_tiles(tokens):
-    """Two query tiles share each 32-key tile above the measured crossover."""
-    return 2 if tokens >= 2048 else 1
+    """query32 fails trajectory quality; retain the original fp16 kernel."""
+    return 1
 
 
 def build(tokens: int, bits: int = 4) -> Path:

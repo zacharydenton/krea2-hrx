@@ -11,9 +11,16 @@ while another job is on the box:
 
 --work holds the shared files (default build/quality). Run the stages in that order; the
 reference stage only has to be repeated when the prompt, seed, size or step count change.
+
+Release gate (requires an archived accepted run and a fresh output directory):
+    .venv/bin/python tools/quality_vs_bf16.py regression --baseline build/quality --work build/quality-new
+CPU-only check of saved outputs:
+    .venv/bin/python tools/quality_vs_bf16.py check --baseline build/quality --work build/quality-new
+Both latent and image PSNR must lose at most 0.1 dB; block cosine is not sufficient.
 """
 import argparse
 import ctypes as C
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -116,9 +123,78 @@ def compare(a) -> None:
                    check=True)
 
 
+def quality_check(a) -> None:
+    """CPU-only release gate on complete, decoded sampler trajectories."""
+    import torch
+    from PIL import Image
+
+    if a.baseline is None:
+        raise ValueError("--baseline must name an archived, accepted quality run")
+    if a.baseline.resolve() == a.work.resolve():
+        raise ValueError("baseline and candidate must be separate runs")
+    if job(a.work) != job(a.baseline):
+        raise ValueError("baseline and candidate job settings differ")
+    if not math.isfinite(a.max_drop_db) or a.max_drop_db < 0:
+        raise ValueError("--max-drop-db must be finite and nonnegative")
+    shared = ("noise.npy", "text.npy", "bf16.pt", "bf16.png")
+    def digest(path):
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    for name in shared:
+        if digest(a.work / name) != digest(a.baseline / name):
+            raise ValueError(f"baseline and candidate must share identical {name}")
+
+    def measure(work):
+        ref = torch.load(work / "bf16.pt", map_location="cpu", weights_only=True).double().numpy()
+        got = torch.load(work / "w8a8.pt", map_location="cpu", weights_only=True).double().numpy()
+        with Image.open(work / "bf16.png") as im:
+            ref_rgb = np.asarray(im.convert("RGB"), dtype=np.float64)
+        with Image.open(work / "w8a8.png") as im:
+            got_rgb = np.asarray(im.convert("RGB"), dtype=np.float64)
+        if ref.shape != got.shape or ref_rgb.shape != got_rgb.shape:
+            raise ValueError("reference and output shapes differ")
+        if not all(np.isfinite(x).all() for x in (ref, got)) or not np.mean(ref ** 2) > 0:
+            raise ValueError("invalid or nonfinite latents")
+        return dict(
+            latent_psnr_db=10 * math.log10(np.mean(ref ** 2) / max(np.mean((ref - got) ** 2), 1e-30)),
+            image_psnr_db=10 * math.log10(255 ** 2 / max(np.mean((ref_rgb - got_rgb) ** 2), 1e-30)))
+
+    baseline, candidate = measure(a.baseline), measure(a.work)
+    losses = {key: baseline[key] - candidate[key] for key in baseline}
+    passed = all(loss <= a.max_drop_db for loss in losses.values())
+    report = dict(passed=passed, max_drop_db=a.max_drop_db, job=job(a.work),
+                  baseline=baseline, candidate=candidate, loss_db=losses,
+                  artifacts={label: {name: digest(work / name) for name in
+                                     (*shared, "w8a8.pt", "w8a8.png")}
+                             for label, work in (("baseline", a.baseline), ("candidate", a.work))})
+    (a.work / "quality-check.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps({k: v for k, v in report.items() if k != "artifacts"}, indent=2), flush=True)
+    if not passed:
+        raise SystemExit("FAIL full-trajectory quality regression")
+    print("PASS full-trajectory latent and image quality", flush=True)
+
+
+def regression(a) -> None:
+    """Run the current native build on frozen reference inputs, decode, and gate."""
+    import shutil
+    import subprocess
+
+    if a.baseline is None:
+        raise ValueError("--baseline must name an archived, accepted quality run")
+    # A fresh directory prevents stale native outputs or decoded images passing.
+    a.work.mkdir(parents=True, exist_ok=False)
+    for name in ("job.json", "noise.npy", "text.npy", "bf16.pt"):
+        shutil.copyfile(a.baseline / name, a.work / name)
+    command = [sys.executable, str(Path(__file__).resolve()), "native", "--work", str(a.work)]
+    if a.weights:
+        command += ["--weights", a.weights]
+    subprocess.run(command, check=True)
+    compare(a)
+    quality_check(a)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("stage", choices=["reference", "native", "compare"])
+    ap.add_argument("stage", choices=["reference", "native", "compare", "check", "regression"])
     ap.add_argument("--work", type=Path, default=ROOT / "build/quality")
     ap.add_argument("--prompt", default="a red fox sitting in fresh snow at dawn, soft light, photograph")
     ap.add_argument("--seed", type=int, default=0)
@@ -126,8 +202,12 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=8)
     ap.add_argument("--checkpoint", default=None, help="bf16 checkpoint for the reference arm")
     ap.add_argument("--weights", default=None, help="int8 ConvRot checkpoint for the native arm")
+    ap.add_argument("--baseline", type=Path, help="archived accepted run for the trajectory quality gate")
+    ap.add_argument("--max-drop-db", type=float, default=0.1,
+                    help="maximum loss from the baseline in either latent or image PSNR (default 0.1 dB)")
     a = ap.parse_args()
-    {"reference": reference, "native": native, "compare": compare}[a.stage](a)
+    {"reference": reference, "native": native, "compare": compare,
+     "check": quality_check, "regression": regression}[a.stage](a)
 
 
 if __name__ == "__main__":

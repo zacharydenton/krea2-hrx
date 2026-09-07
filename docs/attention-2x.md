@@ -6,10 +6,63 @@ is `6405667:kernels/attention_gqa_lds_f16_wmma.loom`. Preserve fp16 QK and PV
 with fp32 softmax and accumulation. Measure both kernels in one process on the
 same resident inputs, alternating their order within each timing pair.
 
-**Shipping status: the 32-key Loom kernel is enabled from 2,048 tokens after
-acceptance of the measured 1.76–1.78x speedup at 4,115 tokens. The original 2x
-target at that shape was not reached. Shorter sequences retain the original
-kernel. Both paths use the existing Loom compiler and HRX runtime.**
+**Status: query32 has been withdrawn as the default after an end-to-end quality
+regression. Both production builders select the original fp16 kernel at every
+sequence length, and the host rejects query32 bundles. The 1.76–1.78x attention
+speedup is real but does not qualify the kernel for production. The original 2x
+target was not reached. query32 remains available through the benchmark harness.**
+
+## Quality regression and corrected release gate
+
+The controlled comparison used the same binary, noise, text states and bf16
+reference, changing only `fp16_query_tiles` to select the original kernel. At
+4,115 tokens, seed 0 and eight steps:
+
+| Attention | Latent PSNR | Image PSNR |
+| --- | ---: | ---: |
+| Original fp16 | 24.57 dB | 33.67 dB |
+| query32 | 17.81 dB | 26.28 dB |
+| int4-QK Sage | 21.62 dB | 31.57 dB |
+
+The 7.39 dB image loss contradicts the reason fp16 was selected over Sage. Block
+cosine checks did not detect it: the old and new kernels score about 0.99910 and
+0.99911 against the bf16 reference. The earlier pointwise exceptions and 2.057%
+state drift warranted end-to-end investigation before promotion. Passing those
+block checks was insufficient evidence to ship.
+
+`tools/quality_vs_bf16.py check --baseline BASELINE --work CANDIDATE` now gates
+both complete-trajectory latent and decoded-image PSNR, allowing at most 0.1 dB
+loss from an archived accepted run. It requires identical job settings, noise,
+text states, bf16 reference latents and decoded reference image, and records
+artifact hashes and both metric losses in `quality-check.json`. This CPU-only
+check rejects the saved query32 pair with losses of 6.757 and 7.386 dB.
+
+`scripts/test.sh --quick --quality` builds the native pipeline, runs all eight
+steps on frozen reference inputs in a fresh directory, decodes both trajectories
+with the same VAE, then applies this gate. Set `KREA2_QUALITY_BASELINE` to an
+archived accepted run; the default is `build/quality`. For a retained run:
+
+```sh
+scripts/build_native.sh
+OPENBLAS_NUM_THREADS=2 .venv/bin/python tools/quality_vs_bf16.py regression \
+  --baseline build/quality_qt1_check --work build/quality-restored
+```
+
+This adds a release requirement for attention changes. It catches this failure
+on one fixed prompt/seed; additional prompts and seeds are needed before claiming
+general image-quality equivalence. It does not diagnose the numerical defect in
+query32, which remains unresolved.
+
+Rollback validation: rebuilding the native pipeline and rerunning all eight steps
+plus both VAE decodes reproduces 24.566572 dB latent and 33.667317 dB image PSNR,
+exactly matching the accepted run (zero loss in both metrics). Python/native
+shader bytes and metadata agree at 16, 2,047, 2,048 and 4,115 fp16 tokens, and
+at 8,192 tokens with int4 attention. Runtime tests, constructor rejection of
+query32 bundles, and five CPU quality-gate tests pass. Reports are retained in
+`build/quality-restored/quality-check.json` and
+`build/quality_query32/quality-check.json`.
+
+## Historical speed and block validation
 
 Two 80-pair runs establish the main-shape result, including V transposition.
 Additional 10-pair runs measure 1.39x at 2,048 tokens, 1.98x at 8,192, 2.34x at
@@ -17,17 +70,18 @@ Additional 10-pair runs measure 1.39x at 2,048 tokens, 1.98x at 8,192, 2.34x at
 full-output baseline checks. These measurements apply to attention, not the
 entire model.
 
-Bundle metadata version 5 records the fp16 query tile count. Python and native
-builders include the transpose kernel and agree on workspace capacity and launch
-shape; the host still accepts version 4 bundles using their original attention
-path. The generated kernel is `kernels/attention_query32.loom`.
+Bundle metadata version 5 records the fp16 query tile count. The initial promotion
+included a transpose kernel for long sequences. After rollback, both builders
+record one query tile and omit the transpose. Version 4 remains compatible;
+version 5 bundles requesting two query tiles are rejected. The experimental
+generated kernel remains `kernels/attention_query32.loom`.
 
 Real-input comparisons below retain five pointwise exceptions among 25.3 million
 outputs in block 27 and 2.057% final-state RMS drift over the independent 28-block
-trajectory. The synthetic tolerance is not silently relaxed. Image-level
-equivalence has not been established.
+trajectory. The synthetic tolerance was not relaxed; the subsequently measured
+image regression above disqualifies this candidate despite those synthetic passes.
 
-## Release validation
+## Initial release validation (insufficient)
 
 All 28 native blocks pass the existing same-input reference checks; the lowest
 update cosine is 0.999921. Composing the individual blocks exactly reproduces
@@ -148,8 +202,8 @@ correctness first, then repeat paired timings at 4,115 tokens and check other
 sequence lengths. Include the complete cost of preprocessing in the speedup.
 Matrix orientation and softmax summation change fp32 rounding even though the
 operand precision remains fp16. The real-input and trajectory measurements below
-document the differences accepted for this release; they do not establish
-image-level equivalence.
+document differences that the initial promotion accepted prematurely. The later
+image-quality regression above overrides that decision; query32 is not qualified.
 
 ## Initial GPU results
 

@@ -77,14 +77,15 @@ int main(int argc, char **argv) {
   for (const char *metadata :
        {"5 16 256 4 64 8 6144 16448 16 8\n",
         "5 16 256 4 64 8 6144 16448 16 8 2\n",
-        "5 4115 256 4 4160 8 6144 16448 16 8 1\n",
+        "5 4115 256 4 4160 8 6144 16448 16 8 2\n",
         "3 16 256 4 64 8 6144 16448 4 8\n",
         "4 16 256 0 64 8 6144 16448 4 8\n", "2 16 1 64 8\n",
         "4 16 256 4 64 4 6144 16448 4 8\n", "4 16 256 4 64 8 6144 16384 4 8\n",
         "4 16 128 1 64 8 6144 16448 4 8\n", "4 16 256 4 64 8 6144 16448 6 8\n",
         "4 16 256 4 64 8 6144 16448 4\n"}) {
     std::ofstream(dir / "launch.txt") << metadata;
-    assert(krea2_create(checkpoint.c_str(), dir.c_str(), 16, 1, &session,
+    const int tokens = std::string(metadata).find("5 4115 ") == 0 ? 4115 : 16;
+    assert(krea2_create(checkpoint.c_str(), dir.c_str(), tokens, 1, &session,
                         error, sizeof(error)) == KREA2_INVALID_ARGUMENT);
     assert(allocations == 0 && outstanding == 0);
   }

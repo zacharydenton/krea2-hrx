@@ -1,7 +1,8 @@
 """32-key transposed-product fp16 attention; requires transposed V.
 
 Defaults: two query tiles, wide staging, native f16 probability repack,
-and PV groups of two. The default kernel ships for sequences of at least 2048 tokens.
+and PV groups of two. This benchmark experiment fails full-trajectory quality
+and is not selected by production builders.
 """
 import os
 from pathlib import Path

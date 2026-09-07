@@ -122,6 +122,15 @@ its own merits rather than on agreement with ComfyUI:
 | fp16 (the default) | 24.6 dB | 33.7 dB |
 | int8-QK (`KREA2_ATTN_QK=8`) | 22.6 dB | 31.8 dB |
 | int4-QK (`KREA2_ATTN_QK=4`) | 21.6 dB | 31.6 dB |
+| query32 (benchmark experiment, rejected as default) | 17.8 dB | 26.3 dB |
+
+The query32 speedup passed block cosine checks but lost 7.4 dB in the decoded
+eight-step image. The original fp16 kernel remains the default at all lengths.
+Attention changes must also pass the full-trajectory quality gate:
+`scripts/test.sh --quick --quality`, using an archived accepted run in
+`KREA2_QUALITY_BASELINE` (default `build/quality`). It allows at most 0.1 dB loss
+in either latent or image PSNR on identical noise, text states and bf16 reference.
+This fixture catches the observed regression; it is not broad image-quality coverage.
 
 The two smoothed kernels sit together, a decibel apart at most: what costs the picture is
 SageAttention's smoothing and per-token quantization, not the code width.
@@ -260,11 +269,11 @@ float64 oracle and the int4 tiles against each other. The prepare kernels
 
 **Attention.** The default is the fp16 WMMA kernel, fp16 QK and PV with fp32 online
 softmax, which is what ComfyUI's bf16 SDPA call is closest to on this part.
-From 2,048 tokens, `attention_query32` shares 32-key tiles across two query tiles
-and uses a separately transposed V buffer. It measures 1.76–1.78× faster at
-4,115 tokens including transposition; shorter sequences retain the original
-kernel. Both paths are Loom and use the existing compiler. Numerical differences
-and paired measurements are recorded in [docs/attention-2x.md](docs/attention-2x.md).
+The original kernel is used at every sequence length. The experimental
+`attention_query32` measures 1.76–1.78× faster at 4,115 tokens including V
+transposition, but regresses end-to-end image quality and is not selected by
+either production builder. Its measurements and rejection are recorded in
+[docs/attention-2x.md](docs/attention-2x.md).
 `KREA2_ATTN_QK=4` or `8` selects the SageAttention-style kernels instead at kernel-build
 time: Q centered per 64-token tile and K over the sequence, both int4 (or int8) on the
 WMMA with an fp32 correction GEMM for the means, fp16 PV, fp32 online softmax. Below
@@ -313,6 +322,12 @@ smoothed INT4 and INT8 oracles, plus the runtime, cache and failure-cleanup regr
 text encoder, outer transformer layers, tiled VAE and scheduler against the Python
 references. Tests that combine Torch and HRX in one process need `scripts/env.sh`'s
 library path so both load the same HSA provider.
+
+Attention changes also require `--quality`: it runs a fresh eight-step trajectory
+against the archived accepted `KREA2_QUALITY_BASELINE` (default `build/quality`)
+and rejects a loss over 0.1 dB in latent or decoded-image PSNR. Block cosine alone
+missed the query32 image regression. Use `tools/quality_vs_bf16.py regression
+--baseline BASELINE --work NEW_DIRECTORY` to retain outputs and the quality report.
 
 Performance changes are adopted by paired, interleaved A/B on an idle GPU with outputs
 compared bit for bit before and after timing: `tools/bench_i4_gemm.py` (any GEMM

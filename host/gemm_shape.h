@@ -6,8 +6,9 @@
 // bundle built by a different rule.
 namespace krea2_shape {
 
-// FP16 attention shares a 32-key tile across two query tiles for long sequences.
-inline int fp16_query_tiles(int tokens) { return tokens >= 2048 ? 2 : 1; }
+// query32 regresses eight-step image quality despite passing block cosine checks.
+// Keep the original fp16 kernel at every sequence length; query32 is benchmark-only.
+inline int fp16_query_tiles(int) { return 1; }
 
 // Operand row pitch in k elements. A row of 8192 bytes (K = 16384 int4) makes
 // the rows a GEMM step touches alias in the cache; one extra k step of padding

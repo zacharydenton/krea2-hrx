@@ -4,14 +4,16 @@
 #   scripts/test.sh          everything (needs ComfyUI's checkpoint, build/fixture_step0.pt and the models)
 #   scripts/test.sh --quick  host, API and kernel regressions
 #   scripts/test.sh --native include full native pipeline comparisons
+#   scripts/test.sh --quality include eight-step latent/image quality vs an archived baseline
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 source scripts/env.sh
-quick=0; native=0
+quick=0; native=0; quality=0
 for arg in "$@"; do
   case "$arg" in
     --quick) quick=1 ;;
     --native) native=1 ;;
+    --quality) quality=1 ;;
     *) echo "unknown test option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -32,6 +34,7 @@ step "generated kernels match their generators" bash -c '
 step "build host"                 ./scripts/build_host.sh
 step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
+step "CPU trajectory quality gate" env OPENBLAS_NUM_THREADS=2 .venv/bin/python tests/test_quality_gate.py
 step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py
 step "CPU fp16 attention lane model and benchmark oracle" env OPENBLAS_NUM_THREADS=2 python3 tests/test_attention_query_cpu.py
 step "CPU checkpoint loading regressions" bash -c '${CXX:-c++} -std=c++17 -O2 -Wall -Werror tests/test_checkpoint.cpp -o "$tmpdir/test-checkpoint" && "$tmpdir/test-checkpoint" "$tmpdir"'
@@ -54,6 +57,12 @@ if [ "$native" = 1 ]; then
     step "Unicode normalization, tokenizer and SHA-256" bash -c '.venv/bin/python tests/test_unicode.py'
     step "native scheduler and weight reuse regressions" bash -c '.venv/bin/python tests/test_native_regressions.py'
     step "native pipeline vs reference" bash -c '.venv/bin/python tests/test_native_pipeline.py'
+  fi
+fi
+if [ "$quality" = 1 ]; then
+  if step "build native pipeline for quality gate" ./scripts/build_native.sh; then
+    step "eight-step latent and image quality" .venv/bin/python tools/quality_vs_bf16.py regression \
+      --baseline "${KREA2_QUALITY_BASELINE:-build/quality}" --work "$tmpdir/quality"
   fi
 fi
 printf '\n'; [ "$status" = 0 ] && printf 'all checks passed\n' || printf 'SOME CHECKS FAILED\n'
