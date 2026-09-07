@@ -1,12 +1,14 @@
 """Regression checks for cache publication and the Python pipeline/session API."""
 import os
+import contextlib
+import io
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -16,6 +18,7 @@ sys.path.insert(0, str(ROOT))
 import krea2_loom as native_api
 from scripts import build_kernels as builder
 from tools.pipeline import ReferenceForward, cast_transformer_bf16
+from tools import pipeline
 from loom_ref import attention
 
 
@@ -140,6 +143,30 @@ class WrapperTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_block_checkpoint_matches_model_and_honors_overrides(self):
+        with patch.dict(os.environ, {"KREA2_MODEL": ""}):
+            self.assertEqual(Path(pipeline.block_checkpoint(None, False)).name,
+                             "krea2_raw_int8_convrot.safetensors")
+            self.assertEqual(Path(pipeline.block_checkpoint(None, True)).name,
+                             "krea2_turbo_int8_convrot.safetensors")
+        with patch.dict(os.environ, {"KREA2_MODEL": "/env/model.safetensors"}):
+            self.assertEqual(pipeline.block_checkpoint(None, False), "/env/model.safetensors")
+            self.assertEqual(pipeline.block_checkpoint("/explicit/model.safetensors", False),
+                             "/explicit/model.safetensors")
+
+    def test_raw_cli_preserves_explicit_step_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            for options, steps in (([], 52), (["--steps=8"], 8), (["--steps", "3"], 3)):
+                pipe = Mock()
+                pipe.return_value.images = [Mock()]
+                pipe.transformer.forward = None
+                with patch.object(sys, "argv", ["pipeline", "--model", "raw", "--out", f"{td}/out.png", *options]), \
+                     patch.object(pipeline, "build", return_value=pipe), \
+                     patch.object(torch, "Generator"), patch.object(torch.cuda, "synchronize"), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    pipeline.main()
+                self.assertEqual(pipe.call_args.kwargs["num_inference_steps"], steps)
+
     def test_batched_masks_modulation_and_session_reuse(self):
         class Ref:
             layers = 1

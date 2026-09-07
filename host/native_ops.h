@@ -228,7 +228,7 @@ struct Weights {
         it.bytes = it.count * 2;
       } else if (entry.dtype == "F8_E4M3") {
         it.scale = &file.at(key + "_scale");
-        if (it.scale->dtype != "F32" || it.scale->elements() != 1)
+        if (it.scale->dtype != "F32" || it.scale->elements() != 1 || it.scale->bytes != 4)
           throw std::runtime_error("unsupported float8 scale for " + key);
         it.bytes = it.count * 2;
       } else {

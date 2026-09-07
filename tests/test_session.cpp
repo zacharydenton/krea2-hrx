@@ -1,13 +1,21 @@
 // Observe actual HRX allocation ownership across failed native constructors.
 #include "../host/krea2.h"
 #include <cassert>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <hrx_runtime.h>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <vector>
 
 static int outstanding = 0, allocations = 0;
+// Every fixture is rejected on the CPU. Fail before opening the GPU if a
+// constructor regression ever reaches runtime initialization.
+extern "C" hrx_status_t __wrap_hrx_gpu_initialize(uint32_t) {
+  std::cerr << "unexpected GPU initialization in constructor rejection test\n";
+  std::abort();
+}
 extern "C" hrx_status_t __real_hrx_buffer_allocate(hrx_stream_t, size_t,
                                                    hrx_memory_type_t,
                                                    hrx_buffer_usage_t,
@@ -83,5 +91,37 @@ int main(int argc, char **argv) {
                       sizeof(error)) == KREA2_ERROR);
   assert(std::string(error).find(".safetensors") != std::string::npos);
   assert(allocations == 0 && outstanding == 0);
+
+  // The interleaved gate/up path must validate each scale vector before
+  // copying its 16-row groups. Tiny operands fail before any GPU allocation.
+  for (bool zero_rows : {false, true}) {
+    nlohmann::json header;
+    size_t bytes = 0;
+    for (const char *name : {"attn.wq", "attn.wk", "attn.wv", "attn.gate",
+                              "attn.wo", "mlp.gate", "mlp.up"}) {
+      const std::string prefix = std::string("blocks.0.") + name;
+      int rows = zero_rows ? 0 : 16;
+      header[prefix + ".weight"] = {{"dtype", "I8"}, {"shape", {rows, 1}},
+                                     {"data_offsets", {bytes, bytes + rows}}};
+      bytes += rows;
+      size_t scales = std::string(name) == "mlp.up" ? 15 : 16;
+      header[prefix + ".weight_scale"] = {{"dtype", "F32"}, {"shape", {scales}},
+                                           {"data_offsets", {bytes, bytes + scales * 4}}};
+      bytes += scales * 4;
+    }
+    {
+      std::ofstream f(checkpoint, std::ios::binary);
+      const auto json = header.dump();
+      uint64_t length = json.size();
+      f.write(reinterpret_cast<const char *>(&length), sizeof(length));
+      f << json;
+      const std::vector<char> zeros(bytes);
+      f.write(zeros.data(), zeros.size());
+    }
+    assert(krea2_create(checkpoint.c_str(), dir.c_str(), 16, 1, &session,
+                        error, sizeof(error)) == KREA2_ERROR);
+    assert(std::string(error).find(zero_rows ? "invalid weight shape" : "scale count in blocks.0.mlp.up") != std::string::npos);
+    assert(!session && allocations == 0 && outstanding == 0);
+  }
   std::cout << "PASS native constructor cleanup and launch metadata\n";
 }

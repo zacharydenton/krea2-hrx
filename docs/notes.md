@@ -868,3 +868,19 @@ cosine 0.99. Beyond that lies ComfyUI's attention algorithm (a different softmax
 accumulation order) and its fused rotate/quantize kernel, which is a compiled binary here;
 matching those bit for bit is not on the table. The measurements are reproducible from the
 dumps in `build/comfy_parity` without touching the GPU.
+
+**But that difference is ComfyUI's rounding error, not ours.** Against an fp64 evaluation
+of the same norm and modulation on ComfyUI's own block-0 input, our fp32 path is 6.8e-8
+away and ComfyUI's bf16 path 3.2e-3. Carried through rotation and int8: our codes are
+*identical* to quantizing the exact value, while ComfyUI's sit 0.93% off it -- next to the
+0.98% the int8 grid itself costs. Rounding to bf16 first is a double rounding, so ComfyUI's
+activations carry about 1.4x the error of ours. The same holds in attention: with the
+model's head shape, f16 q/k/v land 0.023% from an fp64 attention and bf16 q/k/v 0.167%.
+
+So the remaining gap is a choice of reference, not a defect: rounding at ComfyUI's points
+would buy final-latent cosine ~0.99 by adding its rounding error to ours. What is worth
+matching is what changes an answer -- dtypes that overflow or saturate, a different
+algorithm, a different schedule -- and what is worth keeping is precision the hardware
+gives away for free. Krea 2's own reference is a bf16 pipeline, so this is a small margin
+either way; if bit-comparability with ComfyUI is ever wanted for debugging, it belongs
+behind a build switch rather than in the default kernels.

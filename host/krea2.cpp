@@ -75,12 +75,18 @@ checkpoint_spans(const krea_native::SafeTensors &file, int &bits) {
     if (e.dtype != "I8" || e.shape.size() != 2)
       throw std::runtime_error(name + ".weight is " + e.dtype +
                                ", not int8 ConvRot rows (" + file.path + ")");
+    if (e.shape[0] <= 0 || e.shape[1] <= 0 ||
+        e.bytes % size_t(e.shape[1]) ||
+        e.bytes / size_t(e.shape[1]) != size_t(e.shape[0]))
+      throw std::runtime_error("invalid weight shape or size in " + name);
     return e;
   };
-  auto scales = [&](const std::string &name) -> const SafeTensors::Entry & {
+  auto scales = [&](const std::string &name, size_t rows) -> const SafeTensors::Entry & {
     const auto &e = file.at(name + ".weight_scale");
     if (e.dtype != "F32")
       throw std::runtime_error(name + ".weight_scale is not float32");
+    if (e.bytes / 4 != rows || e.bytes % 4)
+      throw std::runtime_error("scale count in " + name);
     return e;
   };
   auto operand = [&](const std::string &out, const std::vector<std::string> &parts,
@@ -106,9 +112,7 @@ checkpoint_spans(const krea_native::SafeTensors &file, int &bits) {
       size_t row = 0;
       for (size_t i = 0; i < entries.size(); ++i) {
         q.segments.push_back({file.data(*entries[i]), rows_of(*entries[i])});
-        const auto &sc = scales(parts[i]);
-        if (sc.bytes != rows_of(*entries[i]) * 4)
-          throw std::runtime_error("scale count in " + parts[i]);
+        const auto &sc = scales(parts[i], rows_of(*entries[i]));
         std::memcpy(s.host.data() + row * 4, file.data(sc), sc.bytes);
         row += rows_of(*entries[i]);
       }
@@ -116,7 +120,8 @@ checkpoint_spans(const krea_native::SafeTensors &file, int &bits) {
       if (entries.size() != 2 || rows_of(*entries[0]) != rows_of(*entries[1]) ||
           rows_of(*entries[0]) % group)
         throw std::runtime_error("interleave shape in " + out);
-      const auto &s0 = scales(parts[0]), &s1 = scales(parts[1]);
+      const auto &s0 = scales(parts[0], rows_of(*entries[0])),
+                 &s1 = scales(parts[1], rows_of(*entries[1]));
       size_t row = 0;
       for (size_t r = 0; r < rows_of(*entries[0]); r += group)
         for (int side = 0; side < 2; ++side) {

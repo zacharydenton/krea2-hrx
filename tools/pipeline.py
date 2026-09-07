@@ -160,12 +160,16 @@ def cast_transformer_bf16(transformer):
     return transformer
 
 
+def block_checkpoint(weights: str | None, distilled: bool) -> str:
+    model = "turbo" if distilled else "raw"
+    return weights or os.environ.get("KREA2_MODEL") or str(
+        Path.home() / f"comfy-models/diffusion_models/krea2_{model}_int8_convrot.safetensors")
+
+
 def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch", weights: str | None = None,
           checkpoint: Path = TURBO, distilled: bool = True):
-    if backend == "loom" and not weights:
-        weights = os.environ.get("KREA2_MODEL") or str(
-            Path.home() / "comfy-models/diffusion_models" /
-            ("krea2_turbo_int8_convrot.safetensors" if distilled else "krea2_raw_int8_convrot.safetensors"))
+    if backend == "loom":
+        weights = block_checkpoint(weights, distilled)
     from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from transformers import AutoTokenizer, Qwen3VLModel

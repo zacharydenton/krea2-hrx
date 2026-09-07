@@ -70,6 +70,18 @@ int main(int argc, char **argv) {
   catch (const std::exception &) {}
   assert(descriptors() == before && mappings(path) == 0);
 
+  // A scalar-shaped FP8 scale still needs four readable bytes.
+  write_file(path, R"({"linear.weight":{"dtype":"F8_E4M3","shape":[4],"data_offsets":[0,4]},"linear.weight_scale":{"dtype":"F32","shape":[],"data_offsets":[4,4]}})", {0});
+  {
+    SafeTensors file(path);
+    bool failed = false;
+    try { Weights weights(file, [](const std::string &name) { return name; }); }
+    catch (const std::runtime_error &e) {
+      failed = std::string(e.what()).find("float8 scale") != std::string::npos;
+    }
+    assert(failed);
+  }
+
   // Two convolution channels, three temporal taps, two spatial elements.
   // Both storage views must contain the last tap of each channel.
   write_file(path, R"({"conv":{"dtype":"F32","shape":[2,1,3,1,2],"data_offsets":[0,48]},"norm":{"dtype":"F32","shape":[2],"data_offsets":[48,56]}})",
@@ -90,5 +102,5 @@ int main(int argc, char **argv) {
   }
   assert(mappings(path) == 0);
   fs::remove(path);
-  std::cout << "PASS checkpoint constructor cleanup and float32 temporal weights\n";
+  std::cout << "PASS checkpoint cleanup, FP8 scale validation and float32 temporal weights\n";
 }
