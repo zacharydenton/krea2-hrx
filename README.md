@@ -80,7 +80,7 @@ Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
 
 | | Turbo (8 steps) | Raw (52 steps, guidance 3.5) |
 | --- | ---: | ---: |
-| image, prompt to RGB | 27.0 s | see `docs/notes.md` |
+| image, prompt to RGB | 27.0 s | 365 s (104 forwards) |
 | one forward of the 28 blocks (4115 tokens) | 3.3 s | 3.3 s, two per step |
 | VAE decode (tiled) | 3.2 s | 3.2 s |
 | text encoding and fusion | 0.2 s | 0.2 s (prompt and negative) |

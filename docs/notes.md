@@ -732,3 +732,10 @@ reference improved to a complete-transformer cosine of 0.99889 (0.99025 with the
 bf16-cast norms). Loading the 12 GB of int8 rows takes about 17 s (row-by-row assembly
 from the mapped file) against 13 s for the flat export. bf16 checkpoints are not
 quantised at load: the int8 ConvRot file is the weight source, as in ComfyUI.
+
+Raw, idle box, from ComfyUI's `krea2_raw_int8_convrot.safetensors` (2026-09-07): a 1024^2
+image at the defaults (52 steps, guidance 3.5, empty negative prompt) takes 365 s:
+encoding 0.3 s, denoising 360.5 s for the 104 forwards (3.47 s each, the unconditional
+branch paying the same as the conditional one), VAE decode 1.5 s. Seed-0 RGB hash
+`3da2cd0d…`. Against the bf16 Raw pipeline on the same noise the W8A8 latents sit at
+18.29 dB (image 28.12 dB), the 28-block fixture cosine at 0.99855.
