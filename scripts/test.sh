@@ -28,7 +28,7 @@ step "generated kernels match their generators" bash -c '
   cp "$OLDPWD/tools/gen_sage_attention.py" tools/gen_sage_attention.py && cp "$OLDPWD/tools/gen_gemm.py" tools/gen_gemm.py &&
   python3 tools/gen_prepare.py >/dev/null && python3 tools/gen_attention_lds.py >/dev/null && python3 tools/gen_sage_attention.py >/dev/null && python3 tools/gen_gemm.py >/dev/null &&
   "$LOOM_FORMAT" --in-place experiments/attention_gqa_lds_f16_wmma.loom >/dev/null && cmp -s experiments/attention_gqa_lds_f16_wmma.loom "$OLDPWD/experiments/attention_gqa_lds_f16_wmma.loom" &&
-  for f in prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 attention_sage_i4_fast attention_sage_i4_fast_prefetch attention_sage_i8_fast attention_sage_i8_fast_prefetch gemm_i4_256 gemm_i4_resid_256 gemm_i4_swiglu_256; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
+  for f in prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 prepare_norm_i8 prepare_gated_i8 prepare_plain_i8 attention_sage_i4_fast attention_sage_i4_fast_prefetch attention_sage_i8_fast attention_sage_i8_fast_prefetch gemm_i4_256 gemm_i4_resid_256 gemm_i4_swiglu_256 gemm_i8_256 gemm_i8_resid_256 gemm_i8_swiglu_256; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
 step "build host"                 ./scripts/build_host.sh
 step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
@@ -39,6 +39,7 @@ step "auxiliary Loom kernel regressions" bash -c 'source .venv/bin/activate && p
 step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && python3 tests/test_ref_vs_diffusers.py'
 step "prepare kernels"            bash -c 'python3 tests/test_prepare.py'
 step "INT4 GEMM epilogues, both tiles, vs float64" bash -c '.venv/bin/python tests/test_gemm_i4.py && GEMM_KPAD=128 .venv/bin/python tests/test_gemm_i4.py'
+step "INT8 GEMM epilogues vs float64"  bash -c 'GEMM_BITS=8 .venv/bin/python tests/test_gemm_i4.py && GEMM_BITS=8 GEMM_KPAD=64 .venv/bin/python tests/test_gemm_i4.py'
 step "wide INT4 down projection"  bash -c '.venv/bin/python tests/test_gemm_down.py'
 step "qk norm + rope"             bash -c 'python3 tests/test_rope_qknorm.py'
 step "FP16 attention reference"   bash -c 'python3 tests/test_attention.py'

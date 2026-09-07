@@ -71,7 +71,8 @@ class ReferenceForward:
     """Routes Krea2Transformer2DModel.forward through krea2_ref (compacting the text
     tokens by the padding mask, which is exact), optionally dumping one step's block
     inputs and outputs as the fixture for the Loom runtime."""
-    def __init__(self, ref: R.Krea2Ref, fixture: Path | None, backend: str = "torch"):
+    def __init__(self, ref: R.Krea2Ref, fixture: Path | None, backend: str = "torch", weights: str | None = None):
+        self.weights = weights
         self.ref, self.fixture, self.calls, self.backend = ref, fixture, 0, backend
         self.loom = None
         self.block_time = 0.0
@@ -126,7 +127,7 @@ class ReferenceForward:
                 if self.loom is None:
                     sys.path.insert(0, str(ROOT))
                     from krea2_loom import Krea2Blocks
-                    self.loom = Krea2Blocks(tokens=x.shape[1], layers=ref.layers)
+                    self.loom = Krea2Blocks(tokens=x.shape[1], layers=ref.layers, weights=self.weights)
                 mods = torch.stack([ref.block_modulation(i, mod)[0, 0] for i in range(ref.layers)])
                 tick("block modulation (28 mod.lin)")
                 t0 = time.time()
@@ -159,7 +160,7 @@ def cast_transformer_bf16(transformer):
     return transformer
 
 
-def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch"):
+def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch", weights: str | None = None):
     from diffusers import Krea2Pipeline, FlowMatchEulerDiscreteScheduler, AutoencoderKLQwenImage
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from transformers import AutoTokenizer, Qwen3VLModel
@@ -177,7 +178,7 @@ def build(quant: str, fixture: Path | None, device="cuda", backend: str = "torch
     transformer = cast_transformer_bf16(transformer)
     if quant != "none" or fixture is not None or backend != "torch":
         ref = R.Krea2Ref(comfy, quant=quant, device=device, dtype=torch.bfloat16)
-        transformer.forward = ReferenceForward(ref, fixture, backend)
+        transformer.forward = ReferenceForward(ref, fixture, backend, weights)
     text_encoder = Qwen3VLModel.from_pretrained(str(QWEN), torch_dtype=torch.bfloat16).to(device)
     tokenizer = AutoTokenizer.from_pretrained(str(QWEN))
     vae = AutoencoderKLQwenImage.from_pretrained(str(VAE), torch_dtype=torch.bfloat16).to(device)
@@ -197,13 +198,14 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--quant", default="none", choices=["none", "w4a4"])
     ap.add_argument("--backend", default="torch", choices=["torch", "loom"], help="run the 28 blocks in Loom (int4) instead of torch")
+    ap.add_argument("--weights", default=None, help="exported block weights for --backend loom (build/weights_int8 for W8A8)")
     ap.add_argument("--out", default="build/out.png")
     ap.add_argument("--fixture", default=None)
     ap.add_argument("--latents-out", default=None, help="save the final packed latents for PSNR comparisons")
     ap.add_argument("--images", type=int, default=1, help="generate this many images in one process (the first pays the session build)")
     a = ap.parse_args()
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-    pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend)
+    pipe = build(a.quant, Path(a.fixture) if a.fixture else None, backend=a.backend, weights=a.weights)
     per_image = []
     for image_index in range(a.images):
         gen = torch.Generator("cuda").manual_seed(a.seed)

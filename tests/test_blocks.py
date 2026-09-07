@@ -26,6 +26,8 @@ def cosine(a, b):
 
 def main() -> int:
     ap = argparse.ArgumentParser(); ap.add_argument("--layers", type=int, default=28); ap.add_argument("--fixture", default=str(ROOT / "build/fixture_step0.pt")); ap.add_argument("--profile", action="store_true"); ap.add_argument("--curve", default="", help="comma-separated depths to report, e.g. 1,2,4,8,16,28")
+    ap.add_argument("--weights", default=None, help="exported block weights for the native session (default build/weights)")
+    ap.add_argument("--int8", default=None, help="ComfyUI int8 ConvRot checkpoint: the reference runs W8A8 on its rows (pair with --weights build/weights_int8)")
     a = ap.parse_args()
     fx = torch.load(a.fixture)
     x, mods, cos, sin = fx["x"], fx["mods"], fx["cos"], fx["sin"]
@@ -36,16 +38,17 @@ def main() -> int:
     depths = [int(v) for v in a.curve.split(",") if v] or [a.layers]
     # This suite exercises blocks only; avoid loading the text encoder and
     # untested blocks, especially for a one-block regression on the shared GPU.
-    with safe_open(str(Path.home() / "krea2-models/krea2_turbo_bf16.safetensors"),
-                   framework="pt", device="cuda") as checkpoint:
-        w = {name: checkpoint.get_tensor(name) for name in checkpoint.keys()
-             if name.startswith("blocks.") and int(name.split(".")[1]) < max(depths)}
-    ref = LoomBlocksRef(w, layers=max(depths))
+    def load(path):
+        with safe_open(str(path), framework="pt", device="cuda") as checkpoint:
+            return {name: checkpoint.get_tensor(name) for name in checkpoint.keys()
+                    if name.startswith("blocks.") and int(name.split(".")[1]) < max(depths)}
+    w = load(Path.home() / "krea2-models/krea2_turbo_bf16.safetensors")
+    ref = LoomBlocksRef(load(a.int8), layers=max(depths), quant="w8a8") if a.int8 else LoomBlocksRef(w, layers=max(depths))
     bf16 = R.Krea2Ref(w, quant="none", device="cuda", dtype=torch.bfloat16, layers=max(depths))
     gc, gs, gm = cos.cuda(), sin.cuda(), mods.cuda()
     native_state, bf_state = x.half(), x[None].cuda().bfloat16()
     composed, bf_outputs = {}, {}
-    loom = Krea2Blocks(tokens, layers=max(depths))
+    loom = Krea2Blocks(tokens, layers=max(depths), weights=a.weights)
     try:
         with torch.no_grad():
             for i in range(max(depths)):

@@ -40,9 +40,10 @@ struct krea2_pipeline {
       krea2_destroy(blocks);
       blocks = nullptr;
       block_tokens = 0;
-      auto kernels = prepare_kernels(bundle, compiler, tokens);
       if (!block_weights)
         block_weights = krea2_load_weights(bundle + "/blocks");
+      auto kernels = prepare_kernels(bundle, compiler, tokens,
+                                     krea2_weights_bits(*block_weights));
       blocks = krea2_create_shared(block_weights, kernels, tokens, 28);
       block_tokens = tokens;
     }

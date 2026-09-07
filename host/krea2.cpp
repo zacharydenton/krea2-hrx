@@ -38,13 +38,15 @@ constexpr int QKVG = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN; // 15360
 constexpr int GATE_OFFSET = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 constexpr int THREADS = 256;
 
-// A tensor's bytes in weights.bin and its home on the device. Packed int4
-// GEMM weights ("<name>.q", [N][K/2] bytes) are re-pitched on upload to
-// gemm_pitch(K)/2 bytes per row; everything else keeps its file layout.
+// A tensor's bytes in weights.bin and its home on the device. GEMM weights
+// ("<name>.q": int4 nibbles [N][K/2] as torch.uint8, or int8 rows [N][K] as
+// torch.int8) are re-pitched on upload to their padded row pitch; everything
+// else keeps its file layout.
 struct Span {
   size_t offset, bytes;
   size_t device_offset = 0, device_bytes = 0;
   size_t rows = 0, row_bytes = 0, device_row_bytes = 0; // .q tensors only
+  int bits = 0;                                          // .q tensors only
 };
 
 std::map<std::string, Span> read_manifest(const std::string &path) {
@@ -66,10 +68,12 @@ std::map<std::string, Span> read_manifest(const std::string &path) {
     if (name.size() > 2 && name.compare(name.size() - 2, 2, ".q") == 0 &&
         ss >> rows >> x >> columns && x == 'x' && rows && columns &&
         rows * columns == bytes) {
-      int k = int(columns * 2); // K int4 elements per row
+      span.bits = dtype == "torch.int8" ? 8 : 4;
+      int k = int(columns * 8 / span.bits); // K elements per row
       span.rows = rows;
       span.row_bytes = columns;
-      span.device_row_bytes = size_t(krea2_shape::gemm_pitch(k)) / 2;
+      span.device_row_bytes =
+          size_t(krea2_shape::gemm_pitch(k, span.bits)) * span.bits / 8;
     }
     span.device_bytes =
         span.rows ? span.rows * span.device_row_bytes : span.bytes;
@@ -83,8 +87,19 @@ std::map<std::string, Span> read_manifest(const std::string &path) {
 struct krea2_weights {
   std::map<std::string, Span> spans;
   std::shared_ptr<void> storage;
+  int bits = 4;
   explicit krea2_weights(const std::string &directory) {
     spans = read_manifest(directory + "/manifest.txt");
+    bits = 0;
+    for (const auto &[name, span] : spans)
+      if (span.bits) {
+        if (bits && bits != span.bits)
+          throw std::runtime_error("mixed GEMM operand widths in " +
+                                   directory);
+        bits = span.bits;
+      }
+    if (!bits)
+      bits = 4;
     const auto path = directory + "/weights.bin";
     int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0)
@@ -150,6 +165,8 @@ krea2_load_weights(const std::string &directory) {
   return std::make_shared<krea2_weights>(directory);
 }
 
+int krea2_weights_bits(const krea2_weights &weights) { return weights.bits; }
+
 namespace {
 
 struct Kernel {
@@ -188,27 +205,38 @@ public:
           (tokens + 16 + 31) / 32 * 32,
           (tokens + 63) / 64 * 64); // tokens+16 headroom, whole 64-key blocks
       // "3 tokens gemm_rows m_group capacity attention_waves pitch(6144)
-      // pitch(16384) attention_bits": every shape field must match what this
-      // host derives; attention_bits (4 or 8) is the builder's choice.
+      // pitch(16384) attention_bits gemm_bits": every shape field must match
+      // what this host derives for gemm_bits (the weights' width, 4 or 8);
+      // attention_bits (4 or 8) is the builder's choice.
       std::ifstream metadata(kernels_dir + "/launch.txt");
       unsigned version = 0, compiled_tokens = 0, pitch_hidden = 0,
                pitch_inter = 0;
       size_t compiled_capacity = 0;
       if (!(metadata >> version >> compiled_tokens >> gemm_rows_ >> m_group_ >>
             compiled_capacity >> attention_waves_ >> pitch_hidden >>
-            pitch_inter >> attention_bits_) ||
+            pitch_inter >> attention_bits_ >> gemm_bits_) ||
           version != 3 || compiled_tokens != unsigned(tokens) ||
           (attention_bits_ != 4 && attention_bits_ != 8) ||
+          (gemm_bits_ != 4 && gemm_bits_ != 8) ||
           compiled_capacity != capacity_ ||
-          gemm_rows_ != unsigned(krea2_shape::gemm_rows(tokens)) ||
+          gemm_rows_ !=
+              unsigned(krea2_shape::gemm_rows(tokens, int(gemm_bits_))) ||
           m_group_ !=
               unsigned(krea2_shape::gemm_m_group(tokens, int(gemm_rows_))) ||
           attention_waves_ != (tokens < 8192 ? 8u : 4u) ||
-          pitch_hidden != unsigned(krea2_shape::gemm_pitch(HIDDEN)) ||
-          pitch_inter != unsigned(krea2_shape::gemm_pitch(INTER)))
+          pitch_hidden !=
+              unsigned(krea2_shape::gemm_pitch(HIDDEN, int(gemm_bits_))) ||
+          pitch_inter !=
+              unsigned(krea2_shape::gemm_pitch(INTER, int(gemm_bits_))))
         throw std::invalid_argument("invalid kernel launch metadata; rebuild "
                                     "with scripts/build_kernels.py");
       weights_ = weights ? std::move(weights) : krea2_load_weights(weights_dir);
+      if (unsigned(weights_->bits) != gemm_bits_)
+        throw std::invalid_argument(
+            "kernel bundle built for int" + std::to_string(gemm_bits_) +
+            " GEMM operands but the weights are int" +
+            std::to_string(weights_->bits));
+      const size_t bits = gemm_bits_;
       const auto &spans = weights_->spans;
       auto need = [&](const std::string &name, size_t bytes) {
         auto it = spans.find(name);
@@ -223,13 +251,13 @@ public:
       for (int i = 0; i < layers; ++i) {
         std::string p = "blocks." + std::to_string(i);
         Block b;
-        b.qkvg_q = need(p + ".qkvg.q", size_t(QKVG) * HIDDEN / 2);
+        b.qkvg_q = need(p + ".qkvg.q", size_t(QKVG) * HIDDEN * bits / 8);
         b.qkvg_s = need(p + ".qkvg.s", size_t(QKVG) * 4);
-        b.wo_q = need(p + ".wo.q", size_t(HIDDEN) * HIDDEN / 2);
+        b.wo_q = need(p + ".wo.q", size_t(HIDDEN) * HIDDEN * bits / 8);
         b.wo_s = need(p + ".wo.s", size_t(HIDDEN) * 4);
-        b.gu_q = need(p + ".gu.q", size_t(2 * INTER) * HIDDEN / 2);
+        b.gu_q = need(p + ".gu.q", size_t(2 * INTER) * HIDDEN * bits / 8);
         b.gu_s = need(p + ".gu.s", size_t(2 * INTER) * 4);
-        b.down_q = need(p + ".down.q", size_t(HIDDEN) * INTER / 2);
+        b.down_q = need(p + ".down.q", size_t(HIDDEN) * INTER * bits / 8);
         b.down_s = need(p + ".down.s", size_t(HIDDEN) * 4);
         b.prenorm = need(p + ".prenorm", HIDDEN * 4);
         b.postnorm = need(p + ".postnorm", HIDDEN * 4);
@@ -240,18 +268,21 @@ public:
       auto load = [&](Kernel &k, const char *stem, const char *symbol) {
         k.load(kernels_dir + "/" + stem + ".hsaco", symbol);
       };
-      load(k_prep_norm_, "prepare_norm_i4", "krea2_prepare_norm_i4");
-      load(k_prep_gated_, "prepare_gated_i4", "krea2_prepare_gated_i4");
-      load(k_prep_swiglu_, "prepare_plain_i4", "krea2_prepare_plain_i4");
-      const bool wide = gemm_rows_ == 256;
-      load(k_gemm_qkvg_, "gemm_qkvg",
-           wide ? "krea2_gemm_i4_256" : "krea2_gemm_i4");
+      const std::string ib = "i" + std::to_string(bits);
+      load(k_prep_norm_, ("prepare_norm_" + ib).c_str(),
+           ("krea2_prepare_norm_" + ib).c_str());
+      load(k_prep_gated_, ("prepare_gated_" + ib).c_str(),
+           ("krea2_prepare_gated_" + ib).c_str());
+      load(k_prep_swiglu_, ("prepare_plain_" + ib).c_str(),
+           ("krea2_prepare_plain_" + ib).c_str());
+      const std::string tile = gemm_rows_ == 256 ? "_256" : "";
+      load(k_gemm_qkvg_, "gemm_qkvg", ("krea2_gemm_" + ib + tile).c_str());
       load(k_gemm_gu_, "gemm_gu",
-           wide ? "krea2_gemm_i4_swiglu_256" : "krea2_gemm_i4_swiglu");
+           ("krea2_gemm_" + ib + "_swiglu" + tile).c_str());
       load(k_gemm_wo_, "gemm_wo",
-           wide ? "krea2_gemm_i4_resid_256" : "krea2_gemm_i4_resid");
+           ("krea2_gemm_" + ib + "_resid" + tile).c_str());
       load(k_gemm_down_, "gemm_down",
-           wide ? "krea2_gemm_i4_resid_256" : "krea2_gemm_i4_resid");
+           ("krea2_gemm_" + ib + "_resid" + tile).c_str());
       load(k_rope_, "rope_qknorm", "krea2_rope_qknorm_f16");
       std::string attention = attention_bits_ == 4
                                   ? "krea2_attention_sage_i4_fast"
@@ -264,7 +295,8 @@ public:
       const size_t T = capacity_;
       x_ = gpu::allocate(T * HIDDEN * 2);
       // the widest prepared operand: down's K = 16384 at its padded pitch
-      a_q_ = gpu::allocate(T * size_t(krea2_shape::gemm_pitch(INTER)) / 2);
+      a_q_ = gpu::allocate(
+          T * size_t(krea2_shape::gemm_pitch(INTER, int(bits))) * bits / 8);
       a_s_ = gpu::allocate(T * 4);
       fused_ = gpu::allocate(T * QKVG * 2);
       q_ = gpu::allocate(T * HIDDEN * 2);
@@ -507,7 +539,7 @@ private:
   int tokens_, layers_;
   size_t capacity_ = 0;
   unsigned gemm_rows_ = 0, m_group_ = 0, attention_waves_ = 4,
-           attention_bits_ = 4;
+           attention_bits_ = 4, gemm_bits_ = 4;
   std::mutex mutex_;
   std::vector<Block> blocks_;
   std::unique_ptr<SagePreparation> sage_;

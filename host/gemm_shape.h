@@ -11,7 +11,10 @@ namespace krea2_shape {
 // took the down projection from 61 to 77 TOPS. Rows of 3072 bytes (K = 6144)
 // showed no such effect (plain 0.99x, swiglu 0.99x, wo 1.05x raw time for 2%
 // more bytes), so they stay dense.
-inline int gemm_pitch(int k) { return k % 8192 == 0 ? k + 128 : k; }
+// bits: the operand width (4 or 8); the padding is one 64-byte k step either way.
+inline int gemm_pitch(int k, int bits = 4) {
+  return (k * bits / 8) % 8192 == 0 ? k + 512 / bits : k;
+}
 
 // m-tiles per raster group. The 256-row kernels shorten their last raster
 // group in-kernel, so they always take the full group of 4. The 128-row
@@ -45,8 +48,11 @@ inline int gemm_grid_rows(int tokens, int rows, int m_group) {
 // it is chosen when its rows are within 8% of the 128-row grid's padded rows
 // and there are at least 2048 tokens (at 1040 tokens it lost 3%: five 256-row
 // tiles against nine 128-row tiles).
+// The int8 (W8A8) family exists only on the 256-row tile.
 constexpr int WIDE_TILE_TOKENS = 2048;
-inline int gemm_rows(int tokens) {
+inline int gemm_rows(int tokens, int bits = 4) {
+  if (bits == 8)
+    return 256;
   if (tokens < WIDE_TILE_TOKENS)
     return 128;
   int wide = (tokens + 255) / 256;

@@ -652,3 +652,31 @@ job on the GPU and should not be quoted. The tiled VAE decode (3.2 s against Com
 0.66 s untiled bf16) is now the largest single gap. Production kernel rates at 4115 tokens:
 qkv 78 TOPS, gate/up 78, down 81 (padded pitch), wo 71; attention 14.0 ms = 30 TFLOP/s
 (21 including preprocessing).
+
+## W8A8: ComfyUI's int8 rows on the iu8 WMMA (2026-09-07)
+
+H3's quantisation study said the loss in these ports is the 4-bit weights, and its W8A8 path
+is the one whose clips match ComfyUI's. Krea 2 now has the same path: `tools/gen_gemm.py`
+emits the int8 family of the 256x128 tile (`gemm_i8{,_resid,_swiglu}_256.loom`: 64-wide k
+steps, `vector<4xi32>` fragments, `payload_registers=4`, 192 VGPRs), `tools/gen_prepare.py`
+writes int8 rows (127 levels, four bytes per word), and `tools/export_weights.py --bits 8`
+takes ComfyUI's `krea2_turbo_int8_convrot` rows and per-row scales verbatim: they are
+rotated by the same group-256 Hadamard the kernels use (cosine 0.99996 against our own
+rotation of the bf16 rows on block 0). The weights' manifest dtype (`torch.int8`) selects
+the family in the session and both builders; the launch metadata carries `gemm_bits`;
+the operand pitch rule pads any 8192-byte-multiple row by one 64-byte k step (int8 K =
+16384 -> 16448). The int8 family exists only on the 256-row tile.
+
+Quality: `tests/test_blocks.py --weights build/weights_int8 --int8 <ckpt>` (the reference
+runs the same int8 rows with 127-level activations) gives per-block same-input cosines of
+0.99996..0.99999, exact composition, and an update cosine vs bf16 of 0.99996 / 0.99209
+(1 / 28 blocks) against W4A4's 0.99898 / 0.96576. The seed-0 image sits 26.79 dB from the
+bf16 pipeline (latent 17.87 dB) against W4A4's 18.91 dB.
+
+Speed, idle box: 3.30 s per forward (gate|up 43.2 ms per block = 38 TOPS, down 22.2 ms =
+37 TOPS with the padded pitch, qkv 20.0 ms = 39 TOPS, wo 8.8 ms = 35 TOPS; the four GEMMs
+80% of the forward, attention unchanged at 14.4 ms), 27.0 / 27.7 s per warm 1024^2 image
+against W4A4's 16.6 s and ComfyUI's 36.1 s on the same rows. Record:
+`docs/benchmarks/w8a8-2026-09-07.txt`. The int8 GEMMs sit at 65-72% of the 54 TOPS
+`iu8` peak; H3's tuning of the same kernel family (unconditional loads, pitch, row groups)
+is already in, so the next lever there is the WMMA chain itself.

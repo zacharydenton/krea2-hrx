@@ -22,9 +22,12 @@ static std::string contents(const std::filesystem::path &path) {
   return std::string((std::istreambuf_iterator<char>(input)), {});
 }
 std::string prepare_kernels(const std::string &bundle,
-                            const std::string &compiler, int tokens) {
+                            const std::string &compiler, int tokens,
+                            int bits) {
   if (tokens < 16 || tokens > 16896)
     throw std::invalid_argument("tokens must be 16..16896");
+  if (bits != 4 && bits != 8)
+    throw std::invalid_argument("GEMM operand width must be 4 or 8");
   const int attention_waves = tokens < 8192 ? 8 : 4;
   // KREA2_ATTN_QK=8 selects the int8-QK attention twin (quality fallback).
   const char *qk = std::getenv("KREA2_ATTN_QK");
@@ -36,19 +39,21 @@ std::string prepare_kernels(const std::string &bundle,
   int capacity = std::max((tokens + 47) / 32 * 32, (tokens + 63) / 64 * 64);
   // The GEMM tile, raster group and operand pitches come from gemm_shape.h,
   // which scripts/build_kernels.py mirrors; the session checks every field.
-  const int rows = krea2_shape::gemm_rows(tokens);
+  const int rows = krea2_shape::gemm_rows(tokens, bits);
   const int m_group = krea2_shape::gemm_m_group(tokens, rows);
   const std::string pitch_hidden =
-                        std::to_string(krea2_shape::gemm_pitch(6144)),
+                        std::to_string(krea2_shape::gemm_pitch(6144, bits)),
                     pitch_inter =
-                        std::to_string(krea2_shape::gemm_pitch(16384));
+                        std::to_string(krea2_shape::gemm_pitch(16384, bits)),
+                    ib = "i" + std::to_string(bits);
   auto group = std::to_string(m_group);
   std::string metadata = "3 " + std::to_string(tokens) + " " +
                          std::to_string(rows) + " " + group + " " +
                          std::to_string(capacity) + " " +
                          std::to_string(attention_waves) + " " +
                          pitch_hidden + " " + pitch_inter + " " +
-                         std::to_string(attention_bits) + "\n";
+                         std::to_string(attention_bits) + " " +
+                         std::to_string(bits) + "\n";
   struct Job {
     std::string source, symbol, stem;
     std::map<std::string, std::string> cfg;
@@ -58,31 +63,31 @@ std::string prepare_kernels(const std::string &bundle,
                  std::map<std::string, std::string> cfg) {
     jobs.push_back({src, "krea2_" + src, stem, cfg});
   };
-  add("prepare_norm_i4", "prepare_norm_i4",
+  add("prepare_norm_" + ib, "prepare_norm_" + ib,
       {{"width", "6144"}, {"out_stride", pitch_hidden}, {"eps", "1e-5"}});
-  add("prepare_gated_i4", "prepare_gated_i4",
+  add("prepare_gated_" + ib, "prepare_gated_" + ib,
       {{"width", "6144"},
        {"out_stride", pitch_hidden},
        {"gate_stride", "15360"}});
-  add("prepare_plain_i4", "prepare_plain_i4",
+  add("prepare_plain_" + ib, "prepare_plain_" + ib,
       {{"width", "16384"}, {"out_stride", pitch_inter}});
   const std::string gemm = rows == 256 ? "_256" : "";
-  add("gemm_i4" + gemm, "gemm_qkvg",
+  add("gemm_" + ib + gemm, "gemm_qkvg",
       {{"k_size", "6144"},
        {"k_stride", pitch_hidden},
        {"n_size", "15360"},
        {"m_group", group}});
-  add("gemm_i4_swiglu" + gemm, "gemm_gu",
+  add("gemm_" + ib + "_swiglu" + gemm, "gemm_gu",
       {{"k_size", "6144"},
        {"k_stride", pitch_hidden},
        {"n_size", "32768"},
        {"m_group", group}});
-  add("gemm_i4_resid" + gemm, "gemm_wo",
+  add("gemm_" + ib + "_resid" + gemm, "gemm_wo",
       {{"k_size", "6144"},
        {"k_stride", pitch_hidden},
        {"n_size", "6144"},
        {"m_group", group}});
-  add("gemm_i4_resid" + gemm, "gemm_down",
+  add("gemm_" + ib + "_resid" + gemm, "gemm_down",
       {{"k_size", "16384"},
        {"k_stride", pitch_inter},
        {"n_size", "6144"},
@@ -106,7 +111,7 @@ std::string prepare_kernels(const std::string &bundle,
   // Bundles are deployable without the build-machine compiler. Source/config
   // fingerprints select immutable artifacts; compiler provenance is recorded.
   std::string signature =
-      "native-kernels-v3:gfx1151:sage-prep-v3:64:vt\n" + metadata;
+      "native-kernels-v4:gfx1151:sage-prep-v3:64:vt\n" + metadata;
   for (const auto &j : jobs) {
     std::ifstream source(fs::path(bundle) / "sources" / (j.source + ".loom"));
     if (!source)

@@ -2,11 +2,13 @@
 
 Krea 2 Turbo, prompt to image, as a native GPU pipeline in **Loom**, AMD's kernel
 language from [ROCm/hrx-system](https://github.com/ROCm/hrx-system), for the Radeon
-8060S (gfx1151, the Strix Halo APU). The transformer runs in **W4A4 ConvRot**: int4
-weights and int4 activations on the part's `iu4` WMMA, the one 2x path this silicon has
-(117 TOPS measured, against 54 for int8 and fp16). Every kernel with a tensor in it is
-Loom; the host is plain C++ on HRX's public C API. A 1024x1024 eight-step image takes
-about 16.6 s warm on the part, with no Python, Torch or HIP in the loop.
+8060S (gfx1151, the Strix Halo APU). The transformer runs in **ConvRot** integer
+arithmetic on the part's WMMA: **W8A8** (ComfyUI's int8 checkpoint rows, int8 activations,
+the quality path) or **W4A4** (int4 weights and activations on the `iu4` WMMA, the one 2x
+path this silicon has: 117 TOPS measured against 54 for int8 and fp16). Every kernel with
+a tensor in it is Loom; the host is plain C++ on HRX's public C API. A 1024x1024
+eight-step image takes about 27 s warm in W8A8 and 16.6 s in W4A4, with no Python,
+Torch or HIP in the loop.
 
 A sibling of [minimax-h3-loom](https://github.com/zacharydenton/minimax-h3-loom),
 [dinov3-loom](https://github.com/zacharydenton/dinov3-loom) and
@@ -41,35 +43,41 @@ PyTorch attention, Comfy Kitchen GEMMs, DynamicVRAM) through its own loader, sam
 VAE APIs, against `build/krea2-generate`'s C API. 1024x1024, eight Euler steps, CFG 1,
 seed 0, `a red fox in the snow`. Every run of each backend produced the same RGB hash.
 
-| | ComfyUI INT8 ConvRot | native Loom INT4 | ratio |
+| | ComfyUI INT8 ConvRot | native Loom W8A8 | native Loom W4A4 |
 | --- | ---: | ---: | ---: |
-| warm image, prompt to RGB (median of 3 and 3) | 36.1 s | 17.1 s | 2.1x |
-| best warm image | 35.5 s | 16.6 s | 2.1x |
-| denoising, eight steps | 34.4-35.7 s | about 13 s | 2.7x |
-| text encoding | 0.3-0.6 s | 0.2 s | |
-| VAE decode | 0.66 s | 3.2 s (tiled) | 0.2x |
-| first image of a process | 57.3 s | 26.5 s | |
+| warm image, prompt to RGB (median of 3) | 36.1 s | 27.7 s (1.3x) | 17.1 s (2.1x) |
+| best warm image | 35.5 s | 27.0 s | 16.6 s |
+| denoising, eight steps | 34.4-35.7 s | about 24 s | about 13 s |
+| text encoding | 0.3-0.6 s | 0.2 s | 0.2 s |
+| VAE decode | 0.66 s | 3.2 s (tiled) | 3.2 s (tiled) |
+| first image of a process | 57.3 s | 28.4 s | 26.5 s |
+| image PSNR against the bf16 pipeline, seed 0 | | 26.8 dB | 18.9 dB |
 
-The transformer is where this runtime wins; its tiled VAE decode is now the stage that
-loses to ComfyUI's untiled bf16 decoder. Native seed 0 and ComfyUI seed 0 do not share
-initial noise, and ComfyUI runs int8 weights at bf16 compute against int4 everything
-here, so this measures speed, not image equivalence. Conditions, raw logs and the
-reproduction commands: [docs/comfyui-performance.md](docs/comfyui-performance.md),
-`docs/benchmarks/comfyui-2026-09-07.txt`.
+W8A8 runs the same int8 ConvRot rows ComfyUI runs (its checkpoint, exported verbatim) with
+int8 per-token activations on the `iu8` WMMA, so it is the like-for-like comparison: 1.3x
+faster per image. W4A4 is the 2.1x preview path. The transformer is where this runtime
+wins; its tiled VAE decode is now the stage that loses to ComfyUI's untiled bf16
+decoder. Native seed 0 and ComfyUI seed 0 do not share initial noise, so this measures
+speed, not image equivalence. Conditions, raw logs and the reproduction commands:
+[docs/comfyui-performance.md](docs/comfyui-performance.md),
+`docs/benchmarks/comfyui-2026-09-07.txt`, `docs/benchmarks/w8a8-2026-09-07.txt`.
 
 ## Status
 
 Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
-(`tools/bench_native.py --runs 2`, second run):
+(`tools/bench_native.py`, best warm run):
 
-| | |
-| --- | ---: |
-| image, prompt to RGB | 16.6 s |
-| one forward of the 28 blocks (4115 tokens) | 2.0 s |
-| VAE decode (tiled) | 3.2 s |
-| text encoding and fusion | 0.2 s |
+| | W8A8 | W4A4 |
+| --- | ---: | ---: |
+| image, prompt to RGB | 27.0 s | 16.6 s |
+| one forward of the 28 blocks (4115 tokens) | 3.3 s | 2.0 s |
+| VAE decode (tiled) | 3.2 s | 3.2 s |
+| text encoding and fusion | 0.2 s | 0.2 s |
+| image PSNR vs the bf16 pipeline (seed 0) | 26.8 dB (latent 17.9) | 18.9 dB (latent 9.8) |
+| 28-block update cosine vs bf16 on the fixture | 0.9921 | 0.9658 |
 
-Where a forward goes (`tests/test_blocks.py --profile`):
+Where a W4A4 forward goes (`tests/test_blocks.py --profile`; in W8A8 the four GEMMs are 80%
+of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
 
 | stage | share |
 | --- | ---: |
@@ -91,21 +99,22 @@ Kernel rates at 4115 tokens on an idle box (`tools/bench_i4_gemm.py`,
 | gate/up GEMM with SwiGLU, 256x128 tile | 4115 x 32768 x 6144 | 21.3 ms | 78 TOPS |
 | down GEMM with residual, 256x128 tile, padded pitch | 4115 x 6144 x 16384 | 10.3 ms | 81 TOPS |
 | out GEMM with residual, 256x128 tile | 4115 x 6144 x 6144 | 4.4 ms | 71 TOPS |
+| the same four in int8 (W8A8), from the block profile | | 20.0 / 43.2 / 22.2 / 8.8 ms | 39 / 38 / 37 / 35 TOPS (peak 54) |
 | INT4-QK attention, 48 heads of 128 | 4115 tokens | 14.0 ms | 30 TFLOP/s (21 with preprocessing) |
 
 At 8192 tokens the GEMMs reach 84-87 TOPS and attention 27 TFLOP/s; at 16384 tokens
 attention 30 TFLOP/s.
 
-Quality against the bf16 diffusers pipeline on the same initial noise: image PSNR
-18.9 dB, latent 9.8 dB (seed 0). The pictures are the same fox in the same pose and
-light; the deviation is fur and snow detail. A published int4 ConvRot checkpoint of the
-same model that keeps 96 of its 224 block linears in int8 reports a minimum image PSNR
-of 17.7 dB against bf16; this port quantizes every block GEMM to int4 with per-row
+Quality against the bf16 diffusers pipeline on the same initial noise (seed 0): W8A8
+26.8 dB image PSNR, W4A4 18.9 dB. The W4A4 picture is the same fox in the same pose and
+light with different fur and snow detail; a published int4 ConvRot checkpoint of the same
+model that keeps 96 of its 224 block linears in int8 reports a minimum image PSNR of
+17.7 dB against bf16, and this port quantizes every block GEMM to int4 with per-row
 scales. The PSNR between two eight-step trajectories swings by several dB between
 numerically near-identical runs (the sampler amplifies rounding), so the per-block
-update cosine against the reference in `tests/test_blocks.py` (0.999 for one block,
-0.966 over 28) is the metric that tracks kernel correctness. `docs/notes.md` records
-every decision and measurement.
+update cosine against the reference in `tests/test_blocks.py` (W8A8 0.99996 for one
+block and 0.9921 over 28; W4A4 0.999 and 0.966) is the metric that tracks kernel
+correctness. `docs/notes.md` records every decision and measurement.
 
 ## Quick start
 
@@ -120,7 +129,8 @@ is the nlohmann JSON headers. No HIP, hipcc, BLAS, ICU or OpenSSL. See
 
 **Models.** The Krea 2 Turbo bf16 checkpoint, Qwen3-VL-4B and the Qwen-Image VAE from
 their Hugging Face releases, under `~/krea2-models/{krea2_turbo_bf16.safetensors,
-qwen3-vl-4b, qwen-image/vae}` (override with `--models`).
+qwen3-vl-4b, qwen-image/vae}` (override with `--models`); for W8A8, ComfyUI's
+`krea2_turbo_int8_convrot.safetensors` as well.
 
 **Python (export and tests only).** A venv at `.venv` with ROCm PyTorch, diffusers
 (a recent checkout that carries the Krea 2 transformer), safetensors, numpy and Pillow.
@@ -128,10 +138,13 @@ Inference never needs it.
 
 ```sh
 source scripts/env.sh
-# Quantize the 28 blocks to W4A4 (about 6 GB, once):
-env -u LD_LIBRARY_PATH .venv/bin/python tools/export_weights.py
-# Assemble a self-contained bundle (about 15 GB; a new directory every time):
-env -u LD_LIBRARY_PATH .venv/bin/python tools/export_native.py --out build/native
+# The block weights, once. W8A8: ComfyUI's int8 ConvRot rows verbatim (12 GB) ...
+env -u LD_LIBRARY_PATH .venv/bin/python tools/export_weights.py --bits 8 \
+  --source ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors --out build/weights_int8
+# ... or W4A4: the bf16 release rotated and quantized to int4 (6 GB), the 2x preview path
+env -u LD_LIBRARY_PATH .venv/bin/python tools/export_weights.py --out build/weights
+# Assemble a self-contained bundle (about 15-21 GB; a new directory every time):
+env -u LD_LIBRARY_PATH .venv/bin/python tools/export_native.py --blocks build/weights_int8 --out build/native
 scripts/build_native.sh
 
 env -u LD_LIBRARY_PATH build/krea2-generate \
@@ -139,6 +152,8 @@ env -u LD_LIBRARY_PATH build/krea2-generate \
   --width 1024 --height 1024 --steps 8 --seed 0 --out build/fox.ppm
 ```
 
+The bundle's block weights decide the GEMM family (the manifest's dtype: int8 rows or
+int4 nibbles); the session and both kernel builders follow it, so one library serves both.
 The first request for a new total token count compiles the block kernels with
 `loom-compile` (`--compiler` or `LOOM_COMPILE`) and caches the binaries inside the
 bundle under a fingerprint of sources, configuration and compiler; the auxiliary kernels
@@ -179,11 +194,13 @@ gated residual. Weights are int4 per output row after the same rotation, exporte
 
 **GEMMs.** `kernels/gemm_i4{,_resid,_swiglu}.loom` are the 128x128 workgroup tile
 (4x2 waves of 32x64) with grouped rasterization; `tools/gen_gemm.py` generates the
-256x128 tile (`*_256.loom`, 4x2 waves of 64x64, in-kernel raster-tail shortening) that
-the builders select from about 2k tokens. Operand rows whose byte pitch is a multiple of
-8192 alias in the cache, so the down projection's rows carry one k step of padding
-(`k_stride`); the weights are re-pitched on upload. The 128-row and 256-row kernels are
-bit-exact with each other.
+256x128 tile (`*_256.loom`, 4x2 waves of 64x64, in-kernel raster-tail shortening) in
+both widths: the int4 family that the builders select from about 2k tokens, and the int8
+family (64-wide k steps, `iu8` WMMA) that W8A8 always uses. Operand rows whose byte pitch
+is a multiple of 8192 alias in the cache, so the down projection's rows carry one 64-byte
+k step of padding (`k_stride`); the weights are re-pitched on upload. The 128-row and
+256-row int4 kernels are bit-exact with each other; every kernel is checked against a
+float64 oracle. The prepare kernels (`tools/gen_prepare.py`) write either width.
 
 **Attention.** SageAttention-style: Q centered per 64-token tile and K over the sequence,
 both int4 on the WMMA with an fp32 correction GEMM for the means, fp16 PV, fp32 online
@@ -240,8 +257,9 @@ pair with this runtime and a ComfyUI INT8 ConvRot setup for side-by-side inspect
 
 ## Weights and license
 
-The block weights are exported from the Krea 2 Turbo bf16 release; the text encoder and
-VAE weights are copied into the bundle unchanged. Each model's own license applies to
+The block weights are exported from ComfyUI's int8 ConvRot checkpoint (W8A8, verbatim
+rows) or from the Krea 2 Turbo bf16 release (W4A4); the text encoder and VAE weights are
+copied into the bundle unchanged. Each model's own license applies to
 its weights and to images made with them; check the model cards before redistributing a
 bundle. The code in this repository is covered by the `LICENSE` file.
 

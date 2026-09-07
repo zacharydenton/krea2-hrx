@@ -11,7 +11,8 @@ commit `5eeb51e` (padded down pitch, 256x128 tiles, head-major attention operand
 | Backend | first image | warm images | warm median |
 | --- | ---: | ---: | ---: |
 | ComfyUI INT8 ConvRot | 57.32 s (84.20 s in the second series, after DynamicVRAM eviction) | 35.54, 36.08, 36.92 s | 36.1 s |
-| Native Loom INT4 | 26.49 s (20.37 s in the second series) | 17.98, 17.13, 16.62 s | 17.1 s |
+| Native Loom W8A8 (the same int8 rows, later the same day) | 28.44 s | 26.96, 27.72 s | 27.7 s |
+| Native Loom W4A4 | 26.49 s (20.37 s in the second series) | 17.98, 17.13, 16.62 s | 17.1 s |
 
 ComfyUI warm stages: text 0.31-0.56 s, denoising 34.40-35.70 s, VAE 0.66 s. Native warm
 stages (from `KREA2_NATIVE_PROFILE=1`): text encoding and fusion 0.17 s, eight forwards

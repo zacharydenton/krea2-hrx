@@ -41,15 +41,16 @@ def sage_attention(q, k, v):
 
 
 class LoomBlocksRef(R.Krea2Ref):
-    def __init__(self, weights, device="cuda", layers=28):
+    def __init__(self, weights, device="cuda", layers=28, quant="w4a4"):
         # Keep checkpoint weights in their original bf16 storage. All activation
         # conversions below are explicit, independent of this weight dtype.
-        super().__init__(weights, quant="w4a4", device=device, dtype=torch.bfloat16, layers=layers)
+        # quant "w8a8": the weights are ComfyUI's int8 ConvRot checkpoint (rows + scales).
+        super().__init__(weights, quant=quant, device=device, dtype=torch.bfloat16, layers=layers)
 
     def project(self, name, x, rotated=False):
         linear = self.lin(name).q
         xr = x if rotated else R.rotate_groups(x.float(), self.h)
-        codes, scale = R.quant_int4_rows(xr)
+        codes, scale = R.quant_rows(xr, linear.levels)
         acc = codes @ linear.q.float().T
         return (acc * linear.scale.T) * scale
 

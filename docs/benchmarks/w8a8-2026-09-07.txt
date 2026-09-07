@@ -1,0 +1,14 @@
+# W8A8 (ComfyUI int8 ConvRot rows, int8 per-token activations), 2026-09-07, idle box
+# native bundle build/native-int8 (block weights build/weights_int8), tools/bench_native.py --runs 3
+{"load_seconds": 1.191661239019595}
+{"run": 0, "seconds": 28.44353754702024, "rgb_sha256": "3c8cf3352bde44dcb83a6235311630dc00ead2f95d1bb6ba29e50f2351c9fefd"}
+{"run": 1, "seconds": 26.96363356290385, "rgb_sha256": "3c8cf3352bde44dcb83a6235311630dc00ead2f95d1bb6ba29e50f2351c9fefd"}
+{"run": 2, "seconds": 27.724694552016445, "rgb_sha256": "3c8cf3352bde44dcb83a6235311630dc00ead2f95d1bb6ba29e50f2351c9fefd"}
+# W4A4 right after, build/native-deploy, --runs 2
+{"run": 0, "seconds": 22.43631551694125, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+{"run": 1, "seconds": 16.635801934055053, "rgb_sha256": "65507120ecf9fca0ccfb96d3a1ed7d9fc95e087abb4f7a0aed2be75cb21e5f09"}
+# tests/test_blocks.py --profile --weights build/weights_int8 (28 blocks, 4115 tokens): total 3303 ms
+# gate|up+swiglu 1209 ms, down+residual 622, qkv|gate 559, attention 403, wo+residual 248, SA2 preprocessing 155, prepare 86, rope 20
+# tests/test_blocks.py --curve 1,28 --weights build/weights_int8 --int8 <ckpt>: composition exact, update cosine vs bf16 0.99996 (1) / 0.99209 (28); W4A4: 0.99898 / 0.96576
+# seed 0, 1024^2, 8 steps, tools/pipeline.py --backend loom --weights build/weights_int8 -> tools/decode_latents.py:
+# bf16 vs W8A8: latent 17.87 dB, image 26.79 dB;  bf16 vs W4A4: latent 9.75 dB, image 18.91 dB;  W4A4 vs W8A8: latent 9.48, image 18.36

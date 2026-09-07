@@ -32,6 +32,10 @@ class CacheTests(unittest.TestCase):
                 first = builder.build(129)
                 self.assertEqual(builder.build(129), first)
                 self.assertEqual(compile_mock.call_count, 9)
+                wide = builder.build(4115, 8)
+                self.assertEqual((wide / "launch.txt").read_text(), "3 4115 256 4 4160 8 6144 16448 4 8\n")
+                self.assertIn("gemm_i8_resid_256", (wide / "gemm_down.hsaco").read_text())
+                self.assertIn("prepare_plain_i8", (wide / "prepare_plain_i8.hsaco").read_text())
                 for tokens, waves in ((129, 8), (8191, 8), (8192, 4), (16896, 4)):
                     selected = builder.build(tokens)
                     launch = (selected / "launch.txt").read_text()
@@ -39,7 +43,7 @@ class CacheTests(unittest.TestCase):
                     self.assertEqual(fields[0], "3")
                     self.assertEqual(fields[5], str(waves))
                     self.assertEqual(fields[2], str(builder.gemm_rows(tokens)))
-                    self.assertEqual(fields[6:], ["6144", "16512", "4"])
+                    self.assertEqual(fields[6:], ["6144", "16512", "4", "4"])
                     expected = "attention_sage_i4_fast" + ("_prefetch" if waves == 4 else "")
                     self.assertIn(expected, (selected / "attention.hsaco").read_text())
                     self.assertEqual(builder.build(tokens), selected)
@@ -66,6 +70,8 @@ class CacheTests(unittest.TestCase):
         for tokens in (4096, 4115, 16896):
             self.assertEqual(builder.gemm_m_group(tokens, 256), 4)
         self.assertEqual([builder.gemm_pitch(k) for k in (6144, 16384)], [6144, 16512])
+        self.assertEqual([builder.gemm_pitch(k, 8) for k in (6144, 16384)], [6144, 16448])
+        self.assertEqual([builder.gemm_rows(t, 8) for t in (16, 1040, 4115)], [256, 256, 256])
         self.assertEqual([builder.gemm_rows(t) for t in (16, 1040, 2047, 2064, 4115, 4353, 8192, 16896)],
                          [128, 128, 128, 256, 256, 256, 256, 256])
 
@@ -106,7 +112,7 @@ class AdapterTests(unittest.TestCase):
             def final(self, x, t): return x
         sessions = []
         class Blocks:
-            def __init__(self, tokens, layers):
+            def __init__(self, tokens, layers, weights=None):
                 self.tokens, self.closed = tokens, False
                 sessions.append(self)
             def close(self): self.closed = True

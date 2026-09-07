@@ -53,19 +53,27 @@ def rotate_groups(x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
     return (x.reshape(-1, shape[-1] // g, g).float() @ h.T).reshape(shape).to(x.dtype)
 
 
+def quant_rows(x: torch.Tensor, levels: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric per-row quantization of the last axis: q in -levels..levels, scale = absmax / levels
+    (7 for int4, 127 for int8)."""
+    scale = x.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-30) / float(levels)
+    q = torch.round(x.float() / scale).clamp(-levels, levels)
+    return q, scale
+
+
 def quant_int4_rows(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Symmetric int4 per row of the last axis: q in -7..7, scale = absmax / 7."""
-    scale = x.float().abs().amax(dim=-1, keepdim=True).clamp(min=1e-30) / 7.0
-    q = torch.round(x.float() / scale).clamp(-7, 7)
-    return q, scale
+    return quant_rows(x, 7)
 
 
 @dataclass
 class QuantLinear:
-    """A linear layer prepared for W4A4: rotated int4 weights and row scales."""
-    q: torch.Tensor          # [N, K] values in -7..7 (stored as int8)
+    """A linear layer prepared for W4A4 (or W8A8): rotated integer weights and row scales,
+    activations rotated and quantised per token to the same number of levels."""
+    q: torch.Tensor          # [N, K] values in -levels..levels (stored as int8)
     scale: torch.Tensor      # [N, 1] f32
     h: torch.Tensor          # the Hadamard block
+    levels: int = 7
 
     @classmethod
     def prepare(cls, w: torch.Tensor, h: torch.Tensor) -> "QuantLinear":
@@ -75,16 +83,21 @@ class QuantLinear:
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         xr = rotate_groups(x.float(), self.h)
-        xq, xs = quant_int4_rows(xr)                          # per token
+        xq, xs = quant_rows(xr, self.levels)                  # per token
         acc = xq @ self.q.float().T                           # exact in f32 (|sum| < 2^24)
         return (acc * xs * self.scale.T).to(x.dtype)
 
 
 class Linear:
-    """bf16 linear or its W4A4 stand-in, chosen once per layer."""
-    def __init__(self, w: torch.Tensor, quant: str, h: torch.Tensor | None):
+    """bf16 linear or its W4A4 / W8A8 stand-in, chosen once per layer. int8: ComfyUI's
+    already-rotated int8 rows and their per-row scales, activations at 127 levels."""
+    def __init__(self, w: torch.Tensor, quant: str, h: torch.Tensor | None, int8: tuple | None = None):
         self.w = w
-        self.q = QuantLinear.prepare(w, h) if quant == "w4a4" else None
+        if quant == "w8a8":
+            q, scale = int8
+            self.q = QuantLinear(q.to(torch.int8), scale.float().reshape(-1, 1), h, 127)
+        else:
+            self.q = QuantLinear.prepare(w, h) if quant == "w4a4" else None
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         if self.q is not None:
@@ -138,7 +151,7 @@ class Krea2Ref:
                  layers: int = 28):
         self.w, self.dev, self.dtype, self.quant = weights, device, dtype, quant
         self.layers = layers
-        self.h = hadamard(HADAMARD_GROUP).to(device) if quant == "w4a4" else None
+        self.h = hadamard(HADAMARD_GROUP).to(device) if quant in ("w4a4", "w8a8") else None
         self._lin = {}
 
     def t(self, name: str, dtype=None) -> torch.Tensor:
@@ -146,7 +159,9 @@ class Krea2Ref:
 
     def lin(self, name: str, quantized: bool = True) -> Linear:
         if name not in self._lin:
-            self._lin[name] = Linear(self.t(name), self.quant if quantized else "none", self.h)
+            quant = self.quant if quantized else "none"
+            int8 = (self.w[name], self.w[name.replace(".weight", ".weight_scale")]) if quant == "w8a8" else None
+            self._lin[name] = Linear(self.w[name] if quant == "w8a8" else self.t(name), quant, self.h, int8)
         return self._lin[name]
 
     # --- attention shared by the text fusion and the blocks -----------------------------

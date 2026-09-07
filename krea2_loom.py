@@ -3,6 +3,7 @@ repos: a resident session per sequence length, one ctypes call per forward."""
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import time
 import sys
@@ -34,7 +35,9 @@ class Krea2Blocks:
         native.krea2_abi_version.restype = ctypes.c_uint32
         if native.krea2_abi_version() != _ABI:
             raise Krea2Error("ABI mismatch; rebuild with scripts/build_host.sh")
-        kernels = build_kernels(tokens)
+        config = weights / "config.json"
+        bits = json.loads(config.read_text()).get("bits", 4) if config.is_file() else 4
+        kernels = build_kernels(tokens, bits)
         native.krea2_create.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p, ctypes.c_size_t]
         native.krea2_run.argtypes = [ctypes.c_void_p, _U16P, ctypes.c_size_t, _F32P, ctypes.c_size_t, _F32P, _F32P, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_size_t]
         native.krea2_run_range.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, *native.krea2_run.argtypes[1:]]

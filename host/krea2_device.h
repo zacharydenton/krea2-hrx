@@ -6,6 +6,8 @@
 // Immutable device weights shared by shape-specific sessions in one pipeline.
 struct krea2_weights;
 std::shared_ptr<krea2_weights> krea2_load_weights(const std::string &directory);
+// The GEMM operand width the weights were exported for: 4 (W4A4) or 8 (W8A8).
+int krea2_weights_bits(const krea2_weights &weights);
 krea2_session *krea2_create_shared(const std::shared_ptr<krea2_weights> &weights,
                                     const std::string &kernels, int tokens, int layers);
 

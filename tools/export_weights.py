@@ -1,6 +1,11 @@
-"""Export the Krea 2 transformer blocks for the Loom runtime: W4A4 ConvRot layouts.
+"""Export the Krea 2 transformer blocks for the Loom runtime: W4A4 or W8A8 ConvRot layouts.
 
     python3 tools/export_weights.py [--layers 28] [--out build/weights]
+    python3 tools/export_weights.py --bits 8 --source ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors --out build/weights_int8
+
+--bits 8 takes ComfyUI's int8 ConvRot checkpoint verbatim: its rows are already rotated by
+the same group-256 Hadamard the kernels use (checked on the first block against the bf16
+release when it is present), with one f32 scale per output row; nothing is requantised.
 
 Per block, seven GEMM weights [N][K] bf16 become int4 nibbles (low first) after the
 group-256 Hadamard rotation along K (comfy-quants' regular Hadamard, H4 Kronecker
@@ -52,11 +57,38 @@ def quantize(w: torch.Tensor, h: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     return pack_i4(q).cpu(), s.reshape(-1).float().cpu()
 
 
+def int8_rows(w: dict, name: str) -> tuple[torch.Tensor, torch.Tensor]:
+    """ComfyUI's int8 ConvRot rows and per-row f32 scale, verbatim."""
+    q = w[f"{name}.weight"]
+    if q.dtype != torch.int8:
+        raise SystemExit(f"{name}.weight is {q.dtype}, not int8: pass the int8 ConvRot checkpoint with --bits 8")
+    return q, w[f"{name}.weight_scale"].float().reshape(-1)
+
+
+def check_rotation(w: dict, name: str, h: torch.Tensor, reference: Path) -> None:
+    """The int8 rows must be the bf16 rows rotated by our Hadamard: compare the first block."""
+    if not reference.is_file():
+        print(f"  (no {reference}: rotation convention not checked)", flush=True)
+        return
+    from safetensors import safe_open
+    with safe_open(str(reference), "pt", device=w[f"{name}.weight"].device.type) as f:
+        bf16 = f.get_tensor(f"{name}.weight")
+    rotated = R.rotate_groups(bf16.float(), h)
+    q, s = int8_rows(w, name)
+    dequantized = q.float() * s[:, None]
+    cos = torch.nn.functional.cosine_similarity(rotated.flatten(), dequantized.flatten(), dim=0).item()
+    print(f"  rotation check {name}: cosine {cos:.6f} between our rotation of the bf16 rows and the int8 rows", flush=True)
+    if cos < 0.999:
+        raise SystemExit("the int8 checkpoint's rotation does not match the kernels' Hadamard")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--layers", type=int, default=28)
     ap.add_argument("--out", default=str(ROOT / "build/weights"))
     ap.add_argument("--source", default=str(TURBO))
+    ap.add_argument("--bits", type=int, choices=(4, 8), default=4, help="8: ComfyUI's int8 ConvRot rows verbatim (W8A8)")
+    ap.add_argument("--reference", default=str(TURBO), help="the bf16 release, for the --bits 8 rotation check")
     a = ap.parse_args()
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -66,14 +98,26 @@ def main() -> None:
     blobs: list[tuple[str, torch.Tensor]] = []          # (name, cpu tensor)
     def add(name, t):
         blobs.append((name, t.contiguous().cpu()))
+    if a.bits == 8:
+        check_rotation(w, "blocks.0.attn.wq", h, Path(a.reference))
     for i in range(a.layers):
         p = f"blocks.{i}"
-        qkvg = torch.cat([w[f"{p}.attn.wq.weight"], w[f"{p}.attn.wk.weight"], w[f"{p}.attn.wv.weight"], w[f"{p}.attn.gate.weight"]], dim=0)
-        for name, mat in (("qkvg", qkvg), ("wo", w[f"{p}.attn.wo.weight"]),
-                          ("gu", interleave_gate_up(w[f"{p}.mlp.gate.weight"], w[f"{p}.mlp.up.weight"])),
-                          ("down", w[f"{p}.mlp.down.weight"])):
-            q, s = quantize(mat, h)
-            add(f"{p}.{name}.q", q); add(f"{p}.{name}.s", s)
+        if a.bits == 8:
+            parts = [int8_rows(w, f"{p}.attn.{n}") for n in ("wq", "wk", "wv", "gate")]
+            gate, up = int8_rows(w, f"{p}.mlp.gate"), int8_rows(w, f"{p}.mlp.up")
+            fused = {"qkvg": (torch.cat([q for q, _ in parts]), torch.cat([s for _, s in parts])),
+                     "wo": int8_rows(w, f"{p}.attn.wo"),
+                     "gu": (interleave_gate_up(gate[0], up[0]), interleave_gate_up(gate[1][:, None], up[1][:, None]).reshape(-1)),
+                     "down": int8_rows(w, f"{p}.mlp.down")}
+            for name, (q, s) in fused.items():
+                add(f"{p}.{name}.q", q.contiguous()); add(f"{p}.{name}.s", s.contiguous())
+        else:
+            qkvg = torch.cat([w[f"{p}.attn.wq.weight"], w[f"{p}.attn.wk.weight"], w[f"{p}.attn.wv.weight"], w[f"{p}.attn.gate.weight"]], dim=0)
+            for name, mat in (("qkvg", qkvg), ("wo", w[f"{p}.attn.wo.weight"]),
+                              ("gu", interleave_gate_up(w[f"{p}.mlp.gate.weight"], w[f"{p}.mlp.up.weight"])),
+                              ("down", w[f"{p}.mlp.down.weight"])):
+                q, s = quantize(mat, h)
+                add(f"{p}.{name}.q", q); add(f"{p}.{name}.s", s)
         add(f"{p}.prenorm", w[f"{p}.prenorm.scale"].float())
         add(f"{p}.postnorm", w[f"{p}.postnorm.scale"].float())
         add(f"{p}.qnorm", w[f"{p}.attn.qknorm.qnorm.scale"].float())
@@ -88,7 +132,7 @@ def main() -> None:
             f.write(b); offset += len(b)
     (out / "manifest.txt").write_text("\n".join(manifest) + "\n")
     (out / "config.json").write_text(json.dumps(dict(layers=a.layers, hidden=R.HIDDEN, heads=R.HEADS, kv_heads=R.KV_HEADS,
-                                                    head_dim=R.HEAD_DIM, inter=16384, group=R.HADAMARD_GROUP), indent=1))
+                                                    head_dim=R.HEAD_DIM, inter=16384, group=R.HADAMARD_GROUP, bits=a.bits), indent=1))
     print(f"wrote {out}/weights.bin: {offset / 1e9:.2f} GB, {len(manifest)} tensors, {time.time() - t0:.0f} s")
 
 
