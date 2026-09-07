@@ -308,9 +308,9 @@ Tensor Models::residual(const Tensor &x, const std::string &p, int h, int w) {
   if (vae.has(p + ".conv_shortcut.weight"))
     skip = ops.conv(x, h, w, vae[p + ".conv_shortcut.weight"],
                     vae[p + ".conv_shortcut.bias"].t.ptr);
-  auto y = ops.unary(ops.norm(x, vae[p + ".norm1.gamma"], 2), 0);
+  auto y = ops.norm_silu(x, vae[p + ".norm1.gamma"]);
   y = ops.conv(y, h, w, vae[p + ".conv1.weight"], vae[p + ".conv1.bias"].t.ptr);
-  y = ops.unary(ops.norm(y, vae[p + ".norm2.gamma"], 2), 0);
+  y = ops.norm_silu(y, vae[p + ".norm2.gamma"]);
   return ops.binary(
       ops.conv(y, h, w, vae[p + ".conv2.weight"], vae[p + ".conv2.bias"].t.ptr),
       skip, 0);
@@ -341,7 +341,7 @@ Tensor Models::decode_tile(const Tensor &input, int h, int w) {
       x = conv(x, p + ".upsamplers.0.resample.1");
     }
   }
-  return conv(ops.unary(ops.norm(x, vae["decoder.norm_out.gamma"], 2), 0),
+  return conv(ops.norm_silu(x, vae["decoder.norm_out.gamma"]),
               "decoder.conv_out");
 }
 std::vector<uint8_t> Models::decode(const Tensor &packed, int height,

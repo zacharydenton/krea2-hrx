@@ -51,8 +51,22 @@ Tensor Ops::norm(const Tensor &x, const Weight &w, int mode, float eps) {
   Tensor y(x.rows, x.cols);
   gpu::Args args;
   args.i32(x.rows).f32(eps).ptr(x.ptr).ptr(w.as_f32()).ptr(y.ptr);
-  native_launch("norm_" + std::to_string(mode),
-                {{"xsize", x.size()}, {"cols", size_t(x.cols)}}, args, x.rows);
+  const bool wave = mode == 2 && x.cols <= 1024;
+  native_launch(wave ? "norm_2_wave" : "norm_" + std::to_string(mode),
+                {{"xsize", x.size()}, {"cols", size_t(x.cols)}}, args,
+                wave ? (x.rows + 7) / 8 : x.rows);
+  return y;
+}
+Tensor Ops::norm_silu(const Tensor &x, const Weight &w) {
+  if (w.count() != size_t(x.cols))
+    throw std::invalid_argument("normalization dimensions");
+  if (x.cols > 1024)
+    return unary(norm(x, w, 2), 0);
+  Tensor y(x.rows, x.cols);
+  gpu::Args args;
+  args.i32(x.rows).f32(1e-5f).ptr(x.ptr).ptr(w.as_f32()).ptr(y.ptr);
+  native_launch("norm_2_wave_silu", {{"xsize", x.size()}, {"cols", size_t(x.cols)}},
+                args, (x.rows + 7) / 8);
   return y;
 }
 Tensor Ops::unary(const Tensor &x, int op) {
@@ -148,13 +162,14 @@ Tensor Ops::conv(const Tensor &x, int h, int w, const Weight &weight,
   Tensor patches(h * w, x.cols * kernel * kernel);
   gpu::Args args;
   args.i32(patches.size()).ptr(x.ptr).ptr(patches.ptr);
-  native_launch("im2col",
+  const bool coalesced = kernel == 3 && x.cols % 32 == 0 && x.cols <= 1024;
+  native_launch(coalesced ? "im2col_coalesced" : "im2col",
                 {{"xsize", x.size()},
                  {"channels", size_t(x.cols)},
                  {"width", size_t(w)},
                  {"height", size_t(h)},
                  {"kernel", size_t(kernel)}},
-                args, (patches.size() + 255) / 256);
+                args, coalesced ? h * w : (patches.size() + 255) / 256);
   return linear(patches, weight, bias);
 }
 Tensor Ops::upsample(const Tensor &x, int h, int w) {

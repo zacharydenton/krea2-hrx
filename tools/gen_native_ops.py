@@ -425,6 +425,51 @@ point(
 )
 
 
+def im2col_coalesced(k):
+    # One pixel per workgroup. Read neighboring pixels in channel order, then
+    # transpose in LDS to the checkpoint's [channel, kernel_y, kernel_x] order.
+    # The input and output contain exactly the same bf16 bits as im2col.
+    area = k.mul("%kernel", "%kernel")
+    patch = k.mul("%channels", area)
+    nbytes = k.mul(patch, k.c(2))
+    offset = k.cast(nbytes, "index", "offset")
+    k.emit(f"%patch_buffer = buffer.alloca<workgroup> align(16) {offset} : buffer")
+    k.emit(f"%patch_view = buffer.view %patch_buffer[%zero_offset] : buffer -> view<[{patch}]xbf16>")
+    i = k.var()
+    k.emit(f"scf.for {i} = [%lane to {patch} step {k.c(256)}] {{")
+    channel, kernel_i = k.rem(i, "%channels"), k.div(i, "%channels")
+    yy = k.op("index.sub", k.add(k.div("%group", "%width"), k.div(kernel_i, "%kernel")), k.div("%kernel", k.c(2)))
+    xx = k.op("index.sub", k.add(k.rem("%group", "%width"), k.rem(kernel_i, "%kernel")), k.div("%kernel", k.c(2)))
+    good = k.op("scalar.andi", k.cmp(yy, "%height"), k.cmp(xx, "%width"), t="i1")
+    out = k.add(k.mul(channel, area), kernel_i)
+    out_b = k.var()
+    k.emit(f"{out_b} = index.assume {out} [range({out}, 0, 1073741824), lt({out}, {patch})] : index")
+    k.begin(good)
+    yy_b, xx_b = k.var(), k.var()
+    k.emit(f"{yy_b} = index.assume {yy} [range({yy}, 0, 1048576), lt({yy}, %height)] : index")
+    k.emit(f"{xx_b} = index.assume {xx} [range({xx}, 0, 1048576), lt({xx}, %width)] : index")
+    value = k.load("x", k.add(k.mul(k.add(k.mul(yy_b, "%width"), xx_b), "%channels"), channel), wide=False)
+    k.emit(f"view.store {value}, %patch_view[{out_b}] : bf16, view<[{patch}]xbf16>")
+    k.emit("} else {")
+    zero = k.cast(k.c("0.0", "f32"), "f32", "bf16")
+    k.emit(f"view.store {zero}, %patch_view[{out_b}] : bf16, view<[{patch}]xbf16>")
+    k.end()
+    k.end()
+    k.emit("kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)")
+    j = k.var()
+    k.emit(f"scf.for {j} = [%lane to {patch} step {k.c(256)}] {{")
+    value = k.var()
+    k.emit(f"{value} = view.load %patch_view[{j}] : view<[{patch}]xbf16> -> bf16")
+    k.store("y", k.add(k.mul("%group", patch), j), k.cast(value, "bf16", "f32"))
+    k.end()
+
+
+coalesced = Kernel("im2col_coalesced", [("x", "bf16", "%xsize"), ("y", "bf16", "%count_b")],
+                   ["xsize", "channels", "width", "height", "kernel"])
+im2col_coalesced(coalesced)
+save(coalesced)
+
+
 # Sequential per-lane sums followed by the exact 256-lane tree used by the oracle.
 def norm(mode):
     k = Kernel(
@@ -489,6 +534,55 @@ def norm(mode):
 
 for mode in range(3):
     norm(mode)
+
+
+def vae_norm_wave(silu=False):
+    name = "norm_2_wave" + ("_silu" if silu else "")
+    k = Kernel(name, [("x", "bf16", "%xsize"), ("w", "f32", "%cols"),
+                      ("y", "bf16", "%xsize")], ["xsize", "cols"],
+               scalars=[("eps", "f32")])
+    lane = k.rem("%lane", k.c(32))
+    row = k.add(k.mul("%group", k.c(8)), k.div("%lane", k.c(32)))
+    k.begin(k.cmp(row, "%count_b"))
+    base = k.mul(row, "%cols")
+    # Emulate the original 256 lanes inside one wave. Each virtual lane keeps
+    # its original sequential accumulation, followed by the SAME reduction tree.
+    partials = []
+    for group in range(8):
+        partials.append(k.loop(
+            k.add(lane, k.c(group * 32)), "%cols", k.c(256), k.c("0.0", "f32"),
+            lambda j, a: k.math("addf", a, k.math("mulf", k.load("x", k.add(base, j)),
+                                                  k.load("x", k.add(base, j))))))
+    for distance in (4, 2, 1):
+        partials = [k.math("addf", partials[j], partials[j + distance])
+                    for j in range(distance)]
+    total = partials[0]
+    for distance in (16, 8, 4, 2, 1):
+        peer, valid = k.var(), k.var()
+        k.emit(f"{peer}, {valid} = kernel.subgroup.shuffle<xor> {total}, {k.c(distance, 'i32')}, {k.c(32, 'i32')} : f32, i32, i32")
+        total = k.math("addf", total, peer)
+    # All lanes use lane zero's result, including its operand ordering.
+    total0, valid = k.var(), k.var()
+    k.emit(f"{total0}, {valid} = kernel.subgroup.shuffle<index> {total}, {k.c(0, 'i32')}, {k.c(32, 'i32')} : f32, i32, i32")
+    inv = k.math("divf", k.c("1.0", "f32"),
+                 k.math("maxnumf", k.math("sqrtf", total0), k.c("1e-12", "f32")))
+    cf = k.float("%cols")
+    j = k.var()
+    k.emit(f"scf.for {j} = [{lane} to %cols step {k.c(32)}] {{")
+    x = k.math("mulf", k.load("x", k.add(base, j)), inv)
+    y = k.math("mulf", k.rnd(k.math("mulf", k.rnd(x), k.math("sqrtf", cf))), k.load("w", j))
+    if silu:
+        y = k.rnd(y)  # Preserve the bf16 norm output before applying SiLU.
+        y = k.math("divf", y, k.math("addf", k.c("1.0", "f32"),
+                                     k.math("expf", k.math("negf", y))))
+    k.store("y", k.add(base, j), y)
+    k.end()
+    k.end()
+    save(k)
+
+
+vae_norm_wave()
+vae_norm_wave(silu=True)
 
 
 def rope(k):

@@ -1,0 +1,84 @@
+{
+  "results": [
+    {
+      "arm": "baseline",
+      "metadata": {
+        "library": "/home/zach/code/krea2-loom/build/vae-opt/baseline/libkrea2_pipeline.so",
+        "width": 1024,
+        "height": 1024,
+        "binary_sha256": {
+          "libkrea2_pipeline.so": "e3556e08a2fd7cd576c16bf68dfb0cee3211feaf00711f209514adbe5452137b",
+          "libkrea2.so": "2bb5de6c5f8043e2b785db70994010623535ce98f88eeed005232de4dfea7d76"
+        },
+        "latents_sha256": "11a06a9534b10c1c3805033f077fa8c3a6b03c7106ced8ff08dd8dfa6d890217",
+        "profile": false
+      },
+      "warm_seconds": [
+        1.2760201870005403,
+        1.2761143950010592,
+        1.2785281489996123
+      ]
+    },
+    {
+      "arm": "candidate",
+      "metadata": {
+        "library": "/home/zach/code/krea2-loom/build/libkrea2_pipeline.so",
+        "width": 1024,
+        "height": 1024,
+        "binary_sha256": {
+          "libkrea2_pipeline.so": "6d340da0f5a27d5bfd02bd528cc1d38aa7e9b9cc829102e77908b81968baf037",
+          "libkrea2.so": "e92fadfd5aaa250bb73dd3c823992d3dfd5fc7e0fe4dd585e9f1a0a15ec29ebf"
+        },
+        "latents_sha256": "11a06a9534b10c1c3805033f077fa8c3a6b03c7106ced8ff08dd8dfa6d890217",
+        "profile": false
+      },
+      "warm_seconds": [
+        1.0320360379992053,
+        1.031836664002185,
+        1.0311444330000086
+      ]
+    },
+    {
+      "arm": "candidate",
+      "metadata": {
+        "library": "/home/zach/code/krea2-loom/build/libkrea2_pipeline.so",
+        "width": 1024,
+        "height": 1024,
+        "binary_sha256": {
+          "libkrea2_pipeline.so": "6d340da0f5a27d5bfd02bd528cc1d38aa7e9b9cc829102e77908b81968baf037",
+          "libkrea2.so": "e92fadfd5aaa250bb73dd3c823992d3dfd5fc7e0fe4dd585e9f1a0a15ec29ebf"
+        },
+        "latents_sha256": "11a06a9534b10c1c3805033f077fa8c3a6b03c7106ced8ff08dd8dfa6d890217",
+        "profile": false
+      },
+      "warm_seconds": [
+        1.0449037379985384,
+        1.0473679809983878,
+        1.053003417000582
+      ]
+    },
+    {
+      "arm": "baseline",
+      "metadata": {
+        "library": "/home/zach/code/krea2-loom/build/vae-opt/baseline/libkrea2_pipeline.so",
+        "width": 1024,
+        "height": 1024,
+        "binary_sha256": {
+          "libkrea2_pipeline.so": "e3556e08a2fd7cd576c16bf68dfb0cee3211feaf00711f209514adbe5452137b",
+          "libkrea2.so": "2bb5de6c5f8043e2b785db70994010623535ce98f88eeed005232de4dfea7d76"
+        },
+        "latents_sha256": "11a06a9534b10c1c3805033f077fa8c3a6b03c7106ced8ff08dd8dfa6d890217",
+        "profile": false
+      },
+      "warm_seconds": [
+        1.3100087179991533,
+        1.3119656250019034,
+        1.3086911949976638
+      ]
+    }
+  ],
+  "baseline_median_seconds": 1.293609671998638,
+  "candidate_median_seconds": 1.0384698879988719,
+  "speedup": 1.2456881869645924,
+  "rgb_exact": true
+}

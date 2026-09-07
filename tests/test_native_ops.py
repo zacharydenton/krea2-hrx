@@ -185,7 +185,24 @@ def main():
             grid=(7, 1),
         )
         np.testing.assert_allclose(f32(got), f32(bf(y)), atol=4e-5, rtol=0.008)
-    print("PASS activations and all three normalization modes", flush=True)
+    # Exact reduction order and bf16 rounding must survive both wave packing
+    # and norm/SiLU fusion, including partial waves and zero/subnormal rows.
+    for cols in (3, 32, 96, 192, 256, 384, 513, 1024):
+        x = bf(rng.standard_normal((17, cols)))
+        x[0] = 0
+        x[1] = bf(np.full(cols, 1e-20, np.float32))
+        weights = rng.standard_normal(cols).astype(np.float32)
+        cfg = dict(xsize=x.size, cols=cols)
+        original = run("norm_2", cfg, 17, [x, weights], x.shape,
+                       scalar=1e-5, grid=(17, 1))
+        wave = run("norm_2_wave", cfg, 17, [x, weights], x.shape,
+                   scalar=1e-5, grid=(3, 1))
+        np.testing.assert_array_equal(wave, original)
+        separate = run("unary_silu", {}, x.size, [original], x.shape)
+        fused = run("norm_2_wave_silu", cfg, 17, [x, weights], x.shape,
+                    scalar=1e-5, grid=(3, 1))
+        np.testing.assert_array_equal(fused, separate)
+    print("PASS activations, normalization modes, and exact wave norm/SiLU fusion", flush=True)
     x = bf(np.arange(5 * 7 * 3).reshape(5, 7, 3))
     padded = np.pad(x, ((1, 1), (1, 1), (0, 0)))
     want = np.array(
@@ -203,6 +220,17 @@ def main():
         want.shape,
     )
     np.testing.assert_array_equal(got, want)
+    for h, width, channels in ((1, 1, 32), (3, 7, 96), (8, 5, 192),
+                                (7, 9, 384), (2, 3, 1024)):
+        source = bf(rng.standard_normal((h, width, channels)))
+        padded_source = np.pad(source, ((1, 1), (1, 1), (0, 0)))
+        expected = np.array([
+            padded_source[y:y + 3, z:z + 3].transpose(2, 0, 1).reshape(-1)
+            for y in range(h) for z in range(width)])
+        cfg = dict(xsize=source.size, channels=channels, width=width, height=h, kernel=3)
+        patches = run("im2col_coalesced", cfg, expected.size, [source],
+                      expected.shape, grid=(h * width, 1))
+        np.testing.assert_array_equal(patches, expected)
     got = run(
         "upsample",
         dict(xsize=x.size, channels=3, width=7),

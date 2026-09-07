@@ -294,6 +294,7 @@ struct Ops {
   // RMSNorm with float32 scales (mode 0: x * (1 + w), 1: x * w, 2: GroupNorm-style).
   Tensor norm(const Tensor &x, const Weight &weight, int mode = 0,
               float eps = 1e-5f);
+  Tensor norm_silu(const Tensor &x, const Weight &weight);
   Tensor unary(const Tensor &x, int op);
   Tensor binary(const Tensor &x, const Tensor &y, int op);
   Tensor attention(const Tensor &q, const Tensor &k, const Tensor &v, int batch,

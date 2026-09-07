@@ -1,0 +1,47 @@
+{
+  "candidate": [
+    {
+      "load_seconds": 1.2828122690007149
+    },
+    {
+      "run": 0,
+      "seconds": 29.291632907999883,
+      "rgb_sha256": "45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253"
+    },
+    {
+      "run": 1,
+      "seconds": 27.473527558999194,
+      "rgb_sha256": "45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253"
+    },
+    {
+      "run": 2,
+      "seconds": 27.53735697600132,
+      "rgb_sha256": "45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253"
+    },
+    {
+      "run": 3,
+      "seconds": 27.53747079799723,
+      "rgb_sha256": "45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253"
+    }
+  ],
+  "baseline": [
+    {
+      "load_seconds": 1.31933527900037
+    },
+    {
+      "run": 0,
+      "seconds": 29.525211214997398,
+      "rgb_sha256": "45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253"
+    }
+  ],
+  "warm_median_seconds": 27.53735697600132,
+  "rgb_exact": true,
+  "settings": {
+    "width": 1024,
+    "height": 1024,
+    "steps": 8,
+    "prompt": "a red fox in the snow",
+    "attention": "original fp16",
+    "gemm": "W8A8"
+  }
+}

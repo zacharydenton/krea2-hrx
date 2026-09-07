@@ -1,6 +1,8 @@
 #include "native_kernels.h"
 #include "sha256.h"
 #include "compiler_spawn.h"
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
@@ -13,6 +15,14 @@ namespace krea_native {
 namespace {
 std::mutex mutex;
 std::string compiler;
+struct KernelProfile {
+  std::map<std::string, std::pair<size_t, double>> totals;
+  ~KernelProfile() {
+    for (const auto &[key, value] : totals)
+      std::fprintf(stderr, "native kernel profile: %zu calls %.3f ms %s\n",
+                   value.first, value.second, key.c_str());
+  }
+};
 std::map<std::string, gpu::Kernel> &kernel_cache() {
   gpu::initialize();
   static std::map<std::string, gpu::Kernel> cache;
@@ -107,6 +117,23 @@ void native_launch(const std::string &name, const Config &input_config,
     it = loaded.emplace(signature, gpu::Kernel(path.string(), "krea2_" + name))
              .first;
   }
-  it->second.launch(gx, gy, threads, args);
+  const char *profile = std::getenv("KREA2_NATIVE_KERNEL_PROFILE");
+  if (profile && std::strcmp(profile, "1") == 0) {
+    gpu::synchronize();
+    auto start = std::chrono::steady_clock::now();
+    it->second.launch(gx, gy, threads, args);
+    gpu::synchronize();
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+    static KernelProfile timing;
+    std::string key = name;
+    for (const auto &[k, v] : input_config)
+      key += " " + k + "=" + std::to_string(v);
+    auto &total = timing.totals[key];
+    ++total.first;
+    total.second += ms;
+  } else {
+    it->second.launch(gx, gy, threads, args);
+  }
 }
 } // namespace krea_native

@@ -74,6 +74,15 @@ int4 kernels reached 16.6 s per image from a rotated-and-requantized export of t
 release, at 18.9 dB; that path is retired with the export, and the numbers stay in
 `docs/notes.md`.)
 
+A later idle decoder-only comparison measures **1.294 s → 1.038 s** with
+coalesced convolution patches and fused wave normalization: **1.25× faster VAE
+decoding**, with identical RGB bytes. This replaces the decoder implementation
+behind the historical timings above; see [docs/vae-performance.md](docs/vae-performance.md)
+for the isolated measurements and exact-output checks.
+The updated full pipeline measures **27.54 s/image** warm at 1024×1024 and eight
+steps, with original fp16 attention and exact RGB agreement with the archived
+build—about **1.31×** the recorded ComfyUI throughput.
+
 ## Against ComfyUI's arithmetic
 
 The kernels are checked against ComfyUI's own evaluation of the same checkpoint, not only
