@@ -968,3 +968,55 @@ K and V for the layer is 25 MB and the part has a 32 MB last-level cache -- if t
 already absorbing the re-reads, more query tiles per workgroup will buy nothing, which is
 exactly what the (unusable) numbers hinted at. Measure that first on an idle box: the
 baseline against `ATTN_QTILES=2`, alternating, before touching the kernel further.
+
+## No C or C++ in the repository (2026-09-08)
+
+The host layer is Rust. `host/` is gone, and with it `examples/generate.c`, the two
+committed headers, and eleven C++ test and benchmark programs. `libhrx` and
+`loom-compile` underneath us are still C++, and what we export is still a C ABI --
+the README says so rather than claiming more.
+
+What went, and what took over:
+
+| gone | lines | now |
+| --- | ---: | --- |
+| `unicode_data.h`, `unicode.h`, `native_tokenizer.cpp` | 5,170 | the `tokenizers` crate |
+| `native_sources.h`, `block_sources.h` | 25,229 | `crates/loom/build.rs`, `include_str!` from `kernels/` |
+| `safetensors.h`, `sha256.h`, nlohmann JSON | ~250 | `safetensors`, `memmap2`, `sha2`, `serde_json` |
+| `gpu.{h,cpp}` | 262 | `crates/hrx` |
+| `native_ops.{h,cpp}`, `sage.cpp` | 664 | `krea2-ops`, `krea2-session::sage` |
+| `native_models.cpp`, `native_pipeline.cpp` | 777 | `krea2-models`, `krea2-pipeline` |
+| `krea2.cpp` | 746 | `krea2-session` |
+| `native_compile.cpp`, `native_kernels.cpp`, `gemm_shape.h` | 476 | `crates/loom` |
+| eleven `tests/*.cpp` | ~1,100 | `crates/testkit` binaries, and Rust tests |
+
+**Every stage was gated on byte-identical output against the C++ it replaced**, not on
+a tolerance. On this box, at the shapes the tests use:
+
+- The checkpoint index over all five model files here (878 / 878 / 1217 / 713 / 194
+  tensors): identical name, dtype, shape, length and edge bytes.
+- `krea2-native-components`: `condition`, `temb`, `mod`, `block_mod`, `final`.
+- Through the pipeline C ABI, both libraries, same inputs: `krea2_tokenize`,
+  `krea2_encode` (15 tokens of `[15][12][2560]`), `krea2_transformer` (a full 28-block
+  forward and the final layer), `krea2_decode` (512² RGB), and `krea2_generate_guided`
+  over four steps on supplied latents.
+- The 28 blocks at 4115 tokens under `KREA2_ATTN_QK=4`, `=8` and unset: identical.
+- Block bundles: the Rust builder's signature digest names the same cache directory the
+  C++ builder wrote (`T4115-4b1a7ba5...`) and passes its manifest check unchanged.
+- The sigma grid for seven image sizes x 100 step counts: exactly equal to diffusers.
+
+**The noise generator changed, deliberately.** It is `rand_chacha` + `rand_distr` now,
+not `std::mt19937_64` through a hand-written Box-Muller pair, so `krea2_generate(seed)`
+produces a different -- not worse -- image and the seed-0 hash
+`45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253` no longer describes
+this build. Nothing downstream of the noise depends on its provenance, and every gate
+that compares against a reference supplies its own latents.
+
+Two bugs the port surfaced, both from porting the C++ *tests* rather than the code:
+
+- `Session::open` was loading thirteen gigabytes of weights before validating the
+  `launch.txt` beside them. `tests/test_session.cpp` had asserted that ordering; the
+  Rust port had quietly lost it.
+- The `hf-hub` fallback needed a rule, or a missing sibling next to a path the user
+  gave would have started an eight-gigabyte download. A path now means that directory;
+  naming a checkpoint is what asks for the set to be fetched.

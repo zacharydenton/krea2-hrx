@@ -1,10 +1,10 @@
 """Compare the two tuned gfx1151 attention kernels, including GPU preprocessing.
 
 Synthetic inputs, warmed native kernels; not a full-image latency benchmark.
-Requires scripts/build_host.sh. The native inference libraries do not use Torch.
+Requires scripts/build.sh. The native inference libraries do not use Torch.
 
 --against DIR pairs this tree against another checkout of the repo (a git worktree
-with its own scripts/build_host.sh done): each round runs both trees' preprocessing
+with its own scripts/build.sh done): each round runs both trees' preprocessing
 and kernel on the same inputs, alternating order, and reports the paired ratio.
 Time on an idle GPU only (the check refuses a busy box unless BENCH_FORCE is set).
 """

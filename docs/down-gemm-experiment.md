@@ -18,7 +18,7 @@ below are kept for the record and can be read back out of the history.
 ## Kernel measurements
 
 ```sh
-scripts/build_host.sh
+scripts/build.sh
 env -u LD_LIBRARY_PATH .venv/bin/python tools/bench_down_gemm.py --baseline db476cf
 ```
 

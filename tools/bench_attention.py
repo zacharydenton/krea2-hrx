@@ -1,7 +1,7 @@
 """Resident-buffer fp16 attention A/B with a CPU oracle and alternating pairs.
 
 --prepare-only compiles kernels and writes inputs without accessing the GPU.
-Normal runs require an idle GPU and build/attention-bench (scripts/build_host.sh).
+Normal runs require an idle GPU and build/attention-bench (scripts/build.sh).
 The fixed baseline revision keeps the 2x target stable as the working tree changes.
 """
 import argparse

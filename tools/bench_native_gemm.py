@@ -1,6 +1,6 @@
 """Compare auxiliary BF16 GEMMs with a Git revision, using resident GPU inputs.
 
-Run scripts/build_host.sh first. Alternating order reduces clock and scheduling
+Run scripts/build.sh first. Alternating order reduces clock and scheduling
 bias; a busy GPU can still invalidate timings. Output must be bit identical.
 """
 

@@ -1,6 +1,6 @@
 """Paired A/B of an INT4 GEMM kernel against a Git revision (or another kernel).
 
-Run scripts/build_host.sh first. Both sides run on the same resident operands,
+Run scripts/build.sh first. Both sides run on the same resident operands,
 alternating order within each pair, and must agree bit for bit before and after
 timing. Use it for a kernel edit (--baseline REV), a different tile
 (--candidate-source/--candidate-symbol/--tile-candidate), or the operand-pitch

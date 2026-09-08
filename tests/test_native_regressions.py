@@ -1,6 +1,6 @@
 """GPU scheduler, modulation, and resolution reuse checks without a Torch model.
 
-Requires scripts/build_native.sh and ComfyUI's checkpoint (krea2_loom.DEFAULT_MODEL). Torch is only an oracle.
+Requires scripts/build.sh and ComfyUI's checkpoint (krea2_loom.DEFAULT_MODEL). Torch is only an oracle.
 """
 import ctypes as C
 import json

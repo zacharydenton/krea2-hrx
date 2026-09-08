@@ -72,7 +72,7 @@ source parity, runtime checks, and all native, GEMM and attention kernel tests.
 
 ```sh
 source scripts/env.sh
-scripts/build_native.sh
+scripts/build.sh
 env -u LD_LIBRARY_PATH OPENBLAS_NUM_THREADS=2 .venv/bin/python tools/bench_vae.py \
   build/vae-opt/latents.npy --runs 4 --output build/vae.rgb
 ```

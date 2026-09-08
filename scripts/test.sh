@@ -3,7 +3,7 @@
 # against the reference, the host build, and the native blocks against the fixture.
 #   scripts/test.sh          everything (needs ComfyUI's checkpoint, build/fixture_step0.pt and the models)
 #   scripts/test.sh --quick  host, API and kernel regressions
-#   scripts/test.sh --native include full native pipeline comparisons
+#   scripts/test.sh --native include full pipeline comparisons against Torch
 #   scripts/test.sh --quality include eight-step latent/image quality vs an archived baseline
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -22,27 +22,26 @@ status=0
 step() { local name="$1"; shift; printf '\n=== %s ===\n' "$name"; if "$@"; then printf '  ok\n'; else printf '  FAILED: %s\n' "$name"; status=1; return 1; fi; }
 step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom kernels/native/*.loom'
 step "generated kernels match their generators" bash -c '
-  cp -r kernels "$tmpdir/kernels" && mkdir -p "$tmpdir/experiments" && cd "$tmpdir" && mkdir -p tools host &&
+  cp -r kernels "$tmpdir/kernels" && mkdir -p "$tmpdir/experiments" && cd "$tmpdir" && mkdir -p tools &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_prepare.py" > tools/gen_prepare.py &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#; s#OUT = Path(__file__).resolve().parent.parent / \"kernels\"#OUT = Path(\"$tmpdir\") / \"kernels\"#" "$OLDPWD/tools/gen_attention_lds.py" > tools/gen_attention_lds.py &&
   sed "s#ROOT = Path(__file__).resolve().parent.parent#ROOT = Path(\"$tmpdir\")#" "$OLDPWD/tools/gen_native_ops.py" > tools/gen_native_ops.py &&
-  python3 tools/gen_native_ops.py && cmp -s host/native_sources.h "$OLDPWD/host/native_sources.h" && diff -r kernels/native "$OLDPWD/kernels/native" &&
+  python3 tools/gen_native_ops.py && diff -r kernels/native "$OLDPWD/kernels/native" &&
   cp "$OLDPWD/tools/gen_attention_query.py" tools/gen_attention_query.py && cp "$OLDPWD/tools/gen_attention_query32.py" tools/gen_attention_query32.py && python3 tools/gen_attention_query32.py >/dev/null &&
   cp "$OLDPWD/tools/gen_sage_attention.py" tools/gen_sage_attention.py && cp "$OLDPWD/tools/gen_gemm.py" tools/gen_gemm.py &&
   python3 tools/gen_prepare.py >/dev/null && python3 tools/gen_attention_lds.py >/dev/null && python3 tools/gen_sage_attention.py >/dev/null && python3 tools/gen_gemm.py >/dev/null &&
   for f in attention_query32 attention_gqa_lds_f16_wmma prepare_norm_i4 prepare_gated_i4 prepare_plain_i4 prepare_norm_i8 prepare_gated_i8 prepare_plain_i8 attention_sage_i4_fast attention_sage_i4_fast_prefetch attention_sage_i8_fast attention_sage_i8_fast_prefetch gemm_i4_256 gemm_i4_resid_256 gemm_i4_swiglu_256 gemm_i8_256 gemm_i8_resid_256 gemm_i8_swiglu_256; do "$LOOM_FORMAT" --in-place "kernels/$f.loom" >/dev/null && cmp -s "kernels/$f.loom" "$OLDPWD/kernels/$f.loom" || { echo "  $f differs"; exit 1; }; done'
-step "build host"                 ./scripts/build_host.sh
-step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
+step "build"                      ./scripts/build.sh
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
 step "Rust formatting and lints" bash -c 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings'
+# Covers the HRX dispatch and dependency audit, the checkpoint and constructor
+# regressions, and the softmax shared-memory repeat, all of which were separate
+# C++ programs.
 step "Rust workspace tests" cargo test --quiet --workspace
 step "CPU trajectory quality gate" env OPENBLAS_NUM_THREADS=2 .venv/bin/python tests/test_quality_gate.py
 step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py
 step "CPU fp16 attention lane model and benchmark oracle" env OPENBLAS_NUM_THREADS=2 python3 tests/test_attention_query_cpu.py
-step "CPU checkpoint loading regressions" bash -c '${CXX:-c++} -std=c++17 -O2 -Wall -Werror tests/test_checkpoint.cpp -o "$tmpdir/test-checkpoint" && "$tmpdir/test-checkpoint" "$tmpdir"'
 step "repeat-image failure capture" python3 tests/test_bench_native.py
-step "softmax shared-memory reuse regression" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_softmax_repeat.cpp -Lbuild -lkrea2 -Wl,-rpath,"$PWD/build" -o "$tmpdir/test-softmax-repeat" && "$tmpdir/test-softmax-repeat"'
-step "native constructor cleanup" bash -c 'source scripts/build_common.sh && "$CXX" "${CXXFLAGS[@]}" tests/test_session.cpp build/obj/{gpu,krea2,sage,native_kernels}.o "${HRXLIBS[@]}" -Wl,--wrap=hrx_buffer_allocate,--wrap=hrx_buffer_release,--wrap=hrx_gpu_initialize -o "$tmpdir/test-session" && "$tmpdir/test-session" "$tmpdir"'
 step "auxiliary Loom kernel regressions" bash -c 'source .venv/bin/activate && python3 tests/test_native_ops.py'
 step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && python3 tests/test_ref_vs_diffusers.py'
 step "prepare kernels"            bash -c 'python3 tests/test_prepare.py'
@@ -55,16 +54,12 @@ if [ "$quick" = 0 ]; then
   step "native blocks vs reference (fixture)" bash -c 'source .venv/bin/activate && python3 tests/test_blocks.py --curve 1,28'
 fi
 if [ "$native" = 1 ]; then
-  if step "build native pipeline" ./scripts/build_native.sh; then
-    step "native scheduler and weight reuse regressions" bash -c '.venv/bin/python tests/test_native_regressions.py'
-    step "native pipeline vs reference" bash -c '.venv/bin/python tests/test_native_pipeline.py'
-  fi
+  step "native scheduler and weight reuse regressions" bash -c '.venv/bin/python tests/test_native_regressions.py'
+  step "native pipeline vs reference" bash -c '.venv/bin/python tests/test_native_pipeline.py'
 fi
 if [ "$quality" = 1 ]; then
-  if step "build native pipeline for quality gate" ./scripts/build_native.sh; then
-    step "eight-step latent and image quality" .venv/bin/python tools/quality_vs_bf16.py regression \
-      --baseline "${KREA2_QUALITY_BASELINE:-build/quality}" --work "$tmpdir/quality"
-  fi
+  step "eight-step latent and image quality" .venv/bin/python tools/quality_vs_bf16.py regression \
+    --baseline "${KREA2_QUALITY_BASELINE:-build/quality}" --work "$tmpdir/quality"
 fi
 printf '\n'; [ "$status" = 0 ] && printf 'all checks passed\n' || printf 'SOME CHECKS FAILED\n'
 exit $status

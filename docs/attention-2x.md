@@ -43,7 +43,7 @@ with the same VAE, then applies this gate. Set `KREA2_QUALITY_BASELINE` to an
 archived accepted run; the default is `build/quality`. For a retained run:
 
 ```sh
-scripts/build_native.sh
+scripts/build.sh
 OPENBLAS_NUM_THREADS=2 .venv/bin/python tools/quality_vs_bf16.py regression \
   --baseline build/quality_qt1_check --work build/quality-restored
 ```
@@ -179,7 +179,7 @@ compiler experiments cannot be identified solely by identical source text.
 Once GPU use is authorized and the device is idle:
 
 ```sh
-scripts/build_host.sh
+scripts/build.sh
 OPENBLAS_NUM_THREADS=2 python3 tools/bench_attention.py --tokens 16,17,65,100 --rounds 10
 OPENBLAS_NUM_THREADS=2 python3 tools/bench_attention.py --tokens 4115 --rounds 80
 OPENBLAS_NUM_THREADS=2 python3 tools/bench_attention.py --tokens 65,4115 --scale 3 --rounds 20

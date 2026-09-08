@@ -1,4 +1,5 @@
-//! A safe wrapper over the runtime's C ABI (`host/krea2_pipeline.h`), and the
+//! A safe wrapper over the runtime's C ABI (`build/include/krea2_pipeline.h`),
+//! and the
 //! worked example of using it from another language: open the checkpoint, set a
 //! progress callback, generate RGB.
 //!
@@ -8,7 +9,7 @@
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::Path;
 
-/// Must match `KREA2_PIPELINE_ABI_VERSION` in the header the library was built from.
+/// Must match `krea2_pipeline_abi_version()` in the library it links.
 pub const ABI_VERSION: u32 = 3;
 
 #[repr(C)]

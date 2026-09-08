@@ -1,15 +1,16 @@
 # HRX runtime on gfx1151
 
-The inference path is C ABI → C++ host → public HRX C API → Loom HSACO → gfx1151.
-`host/gpu.cpp` uses HRX device, stream, buffer and executable APIs directly. It
+The inference path is C ABI → Rust host → public HRX C API → Loom HSACO → gfx1151.
+`crates/hrx` uses HRX device, stream, buffer and executable APIs directly. It
 packs Loom's scalar/pointer argument ABI and submits custom direct arguments.
 Every dispatch/copy has an execution barrier on the shared ordered stream.
 Host transfers synchronize that stream; tensors and temporary buffers stay on
 the GPU between operations. There is no HIP compatibility layer.
 
-`libkrea2.so` owns the shared runtime, block implementation and auxiliary-kernel
-cache. `libkrea2_pipeline.so` links that core, so loading the block and pipeline
-APIs in one process does not create duplicate runtime ownership. Sessions retain
+`libkrea2.so` and `libkrea2_pipeline.so` are one cdylib under two names — the
+second is a symlink to the first — so loading the block and pipeline APIs in one
+process cannot create duplicate runtime ownership: the dynamic linker sees one
+soname. Sessions retain
 separate pools and buffers. Each weight bundle is validated, mapped read-only,
 uploaded once, and exposed as tensor views into one resident GPU allocation.
 This avoids a separate HRX allocation and synchronization for every tensor.
@@ -41,11 +42,13 @@ Cache hashes use the included SHA-256 implementation.
 
 ## Building and deploying
 
-`scripts/build_native.sh` uses a normal C++ compiler. HRX headers and `libhrx.so`
-come from the local HRX checkout. The build copies HRX and the compatible HSA
-provider into `build/runtime` and publishes libraries by rename. The C++ loader
-locates the provider beside `libkrea2.so`; a standalone process needs no
-`LD_LIBRARY_PATH` setting. Deployment includes both Krea libraries, the `runtime`
+`scripts/build.sh` needs only cargo; nothing here is compiled by a C or C++
+compiler. `libhrx.so` comes from the local HRX checkout. `scripts/runtime.sh`
+copies HRX and the compatible HSA provider into `build/runtime` and publishes
+them by rename, so a running process keeps its mappings. The loader locates the
+provider beside `libkrea2.so`; a standalone process needs no `LD_LIBRARY_PATH`
+setting. The C headers under `build/include` are generated from the Rust sources
+by cbindgen and are build artifacts, not inputs. Deployment includes both Krea libraries, the `runtime`
 directory, ComfyUI's model files (read as they are; the tokenizer and kernel
 sources are embedded in the library), and populated caches or `loom-compile`.
 The GPU still needs Linux's amdgpu/KFD driver and normal device permissions.
@@ -79,7 +82,7 @@ checks plus standalone auxiliary arithmetic, main block kernels and Sage oracles
 The tokenizer is checked where each implementation lives: `cargo test` covers the
 Rust one, including that the file's NFC normalizer is applied and that Krea's
 template costs the 34 tokens the encoder later strips, and
-`tests/test_native_pipeline.py` compares the shipping C++ one with HuggingFace's
+`tests/test_native_pipeline.py` compares the shipping one with HuggingFace's
 `AutoTokenizer` through `krea2_tokenize`. The native model suites compare
 components, the full transformer and tiled VAE to the installed references and
 verify the real CUDA scheduler's BF16 rounding.
@@ -121,7 +124,7 @@ speedup and latency percentiles; compilation, allocation and transfers are
 outside the timed region. These are kernel measurements, not image latency.
 
 ```sh
-scripts/build_host.sh
+scripts/build.sh
 env -u LD_LIBRARY_PATH .venv/bin/python tools/bench_native_gemm.py --baseline 2870077
 ```
 

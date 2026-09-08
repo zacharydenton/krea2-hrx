@@ -38,7 +38,7 @@ class Krea2Blocks:
         native = ctypes.CDLL(str(library))
         native.krea2_abi_version.restype = ctypes.c_uint32
         if native.krea2_abi_version() != _ABI:
-            raise Krea2Error("ABI mismatch; rebuild with scripts/build_host.sh")
+            raise Krea2Error("ABI mismatch; rebuild with scripts/build.sh")
         # ComfyUI's int8 ConvRot checkpoint, read directly; its rows' dtype decides the GEMM family.
         with weights.open("rb") as f:
             header = json.loads(f.read(int.from_bytes(f.read(8), "little")))

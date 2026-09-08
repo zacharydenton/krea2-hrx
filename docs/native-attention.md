@@ -26,7 +26,7 @@ quantization groups matched to CUDA MMA threads, and FP8 PV. This implementation
 adapts its Q/K smoothing and INT4 QK approach to gfx11 WMMA. It uses per-token
 scales and fp16 PV; it is not an exact port of upstream SageAttention2.
 
-`host/sage.cpp` dispatches Loom preprocessing through the native HRX C API:
+`crates/session/src/sage.rs` dispatches Loom preprocessing through the HRX C API:
 
 1. Compute the K mean over the actual sequence, independently per head/channel.
 2. Center Q within 64-token groups, excluding padded rows from the mean.
@@ -82,7 +82,7 @@ Immutable caches fingerprint the source and configuration. `launch.txt` contains
 version 2 fixed the preprocessing contract to 64-token query groups and transposed
 V, version 3 added the GEMM tile rows (128 or 256), the operand row pitches and a
 raster group of 1 for a single tile row. The host derives every field from the same
-rules (`host/gemm_shape.h`, mirrored by `scripts/build_kernels.py`) and rejects a
+rules (`crates/loom/src/shape.rs`, mirrored by `scripts/build_kernels.py`) and rejects a
 bundle that disagrees before loading weights; the last two fields are the attention
 code width (16 by default, 4 or 8 for the Sage kernels selected with
 `KREA2_ATTN_QK`) and the GEMM operand width. Every deployment source, the fp16
