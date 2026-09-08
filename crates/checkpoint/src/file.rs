@@ -1,17 +1,21 @@
-//! A memory-mapped safetensors file: the JSON header, then the tensor bytes.
+//! A memory-mapped safetensors file.
 //!
-//! The mapping is owned by [`Checkpoint`] and every tensor borrows from it, so
-//! a row cannot outlive the file it came from — the C++ handed out bare
+//! The format's own crate parses and validates the header; this adds the
+//! mapping and an index of where each tensor's bytes are, so a tensor borrows
+//! from the file it came from and cannot outlive it. The C++ handed out bare
 //! pointers into the mapping and relied on discipline instead.
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
+use safetensors::tensor::{Dtype, SafeTensors};
 
 use crate::{Error, Result};
 
 /// One tensor's dtype, shape and bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct Tensor<'a> {
+    /// As safetensors names it: `I8`, `F32`, `BF16`, `F8_E4M3`.
     pub dtype: &'a str,
     pub shape: &'a [usize],
     pub bytes: &'a [u8],
@@ -33,10 +37,40 @@ impl Tensor<'_> {
 }
 
 struct Entry {
-    dtype: String,
+    dtype: &'static str,
     shape: Vec<usize>,
     start: usize,
     end: usize,
+}
+
+/// The dtype names this runtime matches on, which are safetensors' own.
+fn dtype_name(dtype: Dtype) -> &'static str {
+    match dtype {
+        Dtype::BOOL => "BOOL",
+        Dtype::U8 => "U8",
+        Dtype::I8 => "I8",
+        Dtype::F8_E4M3 => "F8_E4M3",
+        Dtype::F8_E5M2 => "F8_E5M2",
+        Dtype::I16 => "I16",
+        Dtype::U16 => "U16",
+        Dtype::F16 => "F16",
+        Dtype::BF16 => "BF16",
+        Dtype::I32 => "I32",
+        Dtype::U32 => "U32",
+        Dtype::F32 => "F32",
+        Dtype::F64 => "F64",
+        Dtype::I64 => "I64",
+        Dtype::U64 => "U64",
+        // Something this runtime has never seen. Every consumer matches on the
+        // names above and reports the rest as unsupported, which this is.
+        _ => "UNSUPPORTED",
+    }
+}
+
+pub struct Checkpoint {
+    path: PathBuf,
+    map: Mmap,
+    entries: BTreeMap<String, Entry>,
 }
 
 impl std::fmt::Debug for Checkpoint {
@@ -45,15 +79,8 @@ impl std::fmt::Debug for Checkpoint {
     }
 }
 
-pub struct Checkpoint {
-    path: PathBuf,
-    map: Mmap,
-    data: usize, // where the tensor bytes begin, past the header
-    entries: std::collections::BTreeMap<String, Entry>,
-}
-
 impl Checkpoint {
-    /// Maps a `.safetensors` file and parses its header.
+    /// Maps a `.safetensors` file and indexes it.
     pub fn open(path: &Path) -> Result<Checkpoint> {
         if path.extension().is_none_or(|e| e != "safetensors") {
             return Err(Error(format!(
@@ -69,52 +96,29 @@ impl Checkpoint {
         #[allow(unsafe_code)]
         let map = unsafe { Mmap::map(&file) }
             .map_err(|e| Error(format!("cannot map {}: {e}", path.display())))?;
-        if map.len() < 8 {
-            return Err(Error(format!("invalid safetensors file: {}", path.display())));
-        }
-        let header_len = u64::from_le_bytes(map[..8].try_into().expect("eight bytes")) as usize;
-        let data = 8usize
-            .checked_add(header_len)
-            .filter(|&end| end <= map.len())
-            .ok_or_else(|| Error(format!("corrupt safetensors header: {}", path.display())))?;
-        let header: serde_json::Value = serde_json::from_slice(&map[8..data]).map_err(|e| {
-            Error(format!("corrupt safetensors header: {}: {e}", path.display()))
-        })?;
-        let object = header
-            .as_object()
-            .ok_or_else(|| Error(format!("corrupt safetensors header: {}", path.display())))?;
-        let available = map.len() - data;
-        let mut entries = std::collections::BTreeMap::new();
-        for (name, value) in object {
-            if name == "__metadata__" {
-                continue;
-            }
-            let dtype = value["dtype"]
-                .as_str()
-                .ok_or_else(|| Error(format!("{name} has no dtype")))?
-                .to_string();
-            let shape: Vec<usize> = value["shape"]
-                .as_array()
-                .ok_or_else(|| Error(format!("{name} has no shape")))?
-                .iter()
-                .map(|n| n.as_u64().map(|n| n as usize))
-                .collect::<Option<_>>()
-                .ok_or_else(|| Error(format!("{name} has a bad shape")))?;
-            let offsets = value["data_offsets"]
-                .as_array()
-                .ok_or_else(|| Error(format!("{name} has no data_offsets")))?;
-            let (Some(start), Some(end)) = (
-                offsets.first().and_then(serde_json::Value::as_u64).map(|n| n as usize),
-                offsets.get(1).and_then(serde_json::Value::as_u64).map(|n| n as usize),
-            ) else {
-                return Err(Error(format!("corrupt tensor span: {name}")));
-            };
-            if end < start || end > available {
-                return Err(Error(format!("corrupt tensor span: {name}")));
-            }
-            entries.insert(name.clone(), Entry { dtype, shape, start, end });
-        }
-        Ok(Checkpoint { path: path.to_path_buf(), map, data, entries })
+        // The crate validates the header and every tensor's span; the index
+        // keeps where each one lives so the views can be rebuilt per call
+        // without reparsing 13 GB worth of header.
+        let base = map.as_ptr() as usize;
+        let entries = {
+            let tensors = SafeTensors::deserialize(&map)
+                .map_err(|e| Error(format!("cannot read {}: {e}", path.display())))?;
+            tensors
+                .tensors()
+                .into_iter()
+                .map(|(name, view)| {
+                    let start = view.data().as_ptr() as usize - base;
+                    let entry = Entry {
+                        dtype: dtype_name(view.dtype()),
+                        shape: view.shape().to_vec(),
+                        start,
+                        end: start + view.data().len(),
+                    };
+                    (name, entry)
+                })
+                .collect()
+        };
+        Ok(Checkpoint { path: path.to_path_buf(), map, entries })
     }
 
     pub fn path(&self) -> &Path {
@@ -130,9 +134,9 @@ impl Checkpoint {
             Error(format!("missing tensor {name} in {}", self.path.display()))
         })?;
         Ok(Tensor {
-            dtype: &entry.dtype,
+            dtype: entry.dtype,
             shape: &entry.shape,
-            bytes: &self.map[self.data + entry.start..self.data + entry.end],
+            bytes: &self.map[entry.start..entry.end],
         })
     }
 
@@ -174,7 +178,7 @@ mod tests {
         bytes[..8].copy_from_slice(&u64::MAX.to_le_bytes());
         std::fs::write(&path, bytes).expect("rewriting the fixture");
         let error = Checkpoint::open(&path).unwrap_err();
-        assert!(error.0.contains("corrupt safetensors header"), "{error}");
+        assert!(error.0.starts_with("cannot read "), "{error}");
         std::fs::remove_file(path).ok();
     }
 
@@ -183,7 +187,7 @@ mod tests {
         let header = r#"{"w":{"dtype":"I8","shape":[2,2],"data_offsets":[0,64]}}"#;
         let path = write("span.safetensors", header, &[0u8; 4]);
         let error = Checkpoint::open(&path).unwrap_err();
-        assert_eq!(error.0, "corrupt tensor span: w");
+        assert!(error.0.starts_with("cannot read "), "{error}");
         std::fs::remove_file(path).ok();
     }
 
