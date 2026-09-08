@@ -11,7 +11,5 @@ name = "krea2_ops"
 
 [dependencies]
 hrx = { path = "../hrx" }
-loom = { path = "../loom" }
-
-[dev-dependencies]
 krea2-numerics = { path = "../numerics" }
+loom = { path = "../loom" }

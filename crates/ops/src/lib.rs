@@ -8,12 +8,14 @@
 
 pub mod tensor;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use hrx::{Args, DevicePtr};
-use loom::{auxiliary_kernel, Config};
+use hrx::{device, Args, Buffer, DevicePtr};
+use loom::auxiliary_kernel;
 
-pub use tensor::{Pool, Tensor};
+pub use loom::Config;
+
+pub use tensor::{Pool, Scratch, Tensor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -65,16 +67,45 @@ pub enum Norm {
 }
 
 /// A weight already on the device: bf16 values, and the shape they came with.
+///
+/// The norms want their scales in float32. A checkpoint that kept a tensor in
+/// float32 supplies them; for one stored as bf16 the upcast is made on first
+/// use and kept, which is what the C++ `Weight::as_f32` did behind `mutable`.
 pub struct Weight {
-    pub tensor: Tensor,
+    /// bf16 values: what every kernel but the norms reads.
+    pub values: DevicePtr,
     pub shape: Vec<usize>,
-    /// The float32 copy, for the norms that take their scales in f32.
-    pub f32_values: Option<DevicePtr>,
+    pub count: usize,
+    given: Option<DevicePtr>,
+    upcast: OnceLock<Buffer>,
 }
 
 impl Weight {
-    pub fn count(&self) -> usize {
-        self.tensor.size()
+    /// `f32` is the checkpoint's own float32 copy, when it kept one.
+    pub fn new(
+        values: DevicePtr,
+        shape: Vec<usize>,
+        count: usize,
+        f32: Option<DevicePtr>,
+    ) -> Weight {
+        Weight { values, shape, count, given: f32, upcast: OnceLock::new() }
+    }
+
+    /// The scales as float32, upcast once if the file did not keep them so.
+    pub fn f32_values(&self) -> Result<DevicePtr> {
+        if let Some(pointer) = self.given {
+            return Ok(pointer);
+        }
+        if let Some(buffer) = self.upcast.get() {
+            return Ok(buffer.ptr());
+        }
+        let mut bits = vec![0u16; self.count];
+        device().read(&mut bits, self.values)?;
+        let floats: Vec<f32> = bits.into_iter().map(krea2_numerics::to_f32).collect();
+        let buffer = device().allocate(floats.len() * 4)?;
+        device().write(buffer.ptr(), &floats)?;
+        // A losing race drops its buffer, which releases it.
+        Ok(self.upcast.get_or_init(|| buffer).ptr())
     }
 }
 
@@ -100,21 +131,21 @@ impl Ops {
     pub fn linear(&self, x: &Tensor, w: &Weight, bias: Option<DevicePtr>) -> Result<Tensor> {
         let n = *w.shape.first().ok_or_else(|| Error("linear dimensions".into()))?;
         let k = x.cols;
-        if n < 1 || x.rows < 1 || x.cols < 1 || w.tensor.size() != n * k {
+        if n < 1 || x.rows < 1 || x.cols < 1 || w.count != n * k {
             return Err(Error("linear dimensions".into()));
         }
         let y = self.tensor(x.rows, n)?;
         let name = if bias.is_some() { "gemm_bf16_bf16_nt_bias" } else { "gemm_bf16_bf16_nt" };
-        self.matmul(name, x.ptr(), w.tensor.ptr(), y.ptr(), x.rows, n, k, 1, 1.0, bias)?;
+        self.matmul(name, x.ptr(), w.values, y.ptr(), x.rows, n, k, 1, 1.0, bias)?;
         Ok(y)
     }
 
     /// RMSNorm with float32 scales.
     pub fn norm(&self, x: &Tensor, w: &Weight, mode: Norm, eps: f32) -> Result<Tensor> {
-        let scales = w.f32_values.ok_or_else(|| Error("norm scales are not float32".into()))?;
-        if w.count() != x.cols {
+        if w.count != x.cols {
             return Err(Error("norm dimensions".into()));
         }
+        let scales = w.f32_values()?;
         let y = self.tensor(x.rows, x.cols)?;
         let mut args = Args::new();
         args.i32(x.rows as i32).f32(eps).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
@@ -136,14 +167,14 @@ impl Ops {
 
     /// GroupNorm and SiLU in one pass, for the VAE's residual blocks.
     pub fn norm_silu(&self, x: &Tensor, w: &Weight) -> Result<Tensor> {
-        if w.count() != x.cols {
+        if w.count != x.cols {
             return Err(Error("normalization dimensions".into()));
         }
         if x.cols > 1024 {
             let normed = self.norm(x, w, Norm::Group, 1e-5)?;
             return self.unary(&normed, Unary::Silu);
         }
-        let scales = w.f32_values.ok_or_else(|| Error("norm scales are not float32".into()))?;
+        let scales = w.f32_values()?;
         let y = self.tensor(x.rows, x.cols)?;
         let mut args = Args::new();
         args.i32(x.rows as i32).f32(1e-5).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
@@ -234,7 +265,196 @@ impl Ops {
         self.launch("guidance", Config::new(), &args, cond.size().div_ceil(256), 1, 256)
     }
 
-    fn launch(
+    /// Multi-head attention over `batch * tokens` rows, softmax in float32.
+    ///
+    /// `heads` query heads share `kv` key/value heads. The three operands
+    /// arrive as `[batch * tokens][heads * dim]` and are packed head-major for
+    /// the batched GEMMs, then unpacked back.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attention(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        batch: usize,
+        tokens: usize,
+        heads: usize,
+        kv: usize,
+        dim: usize,
+        causal: bool,
+    ) -> Result<Tensor> {
+        if batch == 0
+            || tokens == 0
+            || heads == 0
+            || kv == 0
+            || dim == 0
+            || !heads.is_multiple_of(kv)
+            || q.size() != batch * tokens * heads * dim
+            || k.size() != batch * tokens * kv * dim
+            || v.size() != k.size()
+        {
+            return Err(Error("attention dimensions".into()));
+        }
+        let rows = batch * heads * tokens;
+        let packed = [q, k, v]
+            .into_iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let out = self.tensor(rows, dim)?;
+                let mut args = Args::new();
+                args.i32(out.size() as i32).ptr(source.ptr()).ptr(out.ptr());
+                self.launch(
+                    "head_pack",
+                    config(&[
+                        ("dim", dim),
+                        ("tokens", tokens),
+                        ("heads", heads),
+                        // Queries are already one head each; keys and values
+                        // repeat over the group they serve.
+                        ("kv", if index == 0 { heads } else { kv }),
+                        ("xsize", source.size()),
+                        ("ysize", out.size()),
+                    ]),
+                    &args,
+                    out.size().div_ceil(256),
+                    1,
+                    256,
+                )?;
+                Ok(out)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let count = batch * heads * tokens * tokens;
+        let scores = self.pool.scratch(count * 4)?;
+        self.matmul(
+            "gemm_bf16_f32_nt",
+            packed[0].ptr(),
+            packed[1].ptr(),
+            scores.ptr(),
+            tokens,
+            tokens,
+            dim,
+            batch * heads,
+            1.0 / (dim as f32).sqrt(),
+            None,
+        )?;
+
+        let probabilities = self.tensor(rows, tokens)?;
+        let mut args = Args::new();
+        args.i32(rows as i32).ptr(scores.ptr()).ptr(probabilities.ptr());
+        self.launch(
+            if causal { "softmax_causal" } else { "softmax" },
+            config(&[("xsize", count), ("tokens", tokens)]),
+            &args,
+            rows,
+            1,
+            256,
+        )?;
+
+        let weighted = self.tensor(rows, dim)?;
+        self.matmul(
+            "gemm_bf16_bf16_nn",
+            probabilities.ptr(),
+            packed[2].ptr(),
+            weighted.ptr(),
+            tokens,
+            dim,
+            tokens,
+            batch * heads,
+            1.0,
+            None,
+        )?;
+
+        let out = self.tensor(batch * tokens, heads * dim)?;
+        let mut args = Args::new();
+        args.i32(weighted.size() as i32).ptr(weighted.ptr()).ptr(out.ptr());
+        self.launch(
+            "head_unpack",
+            config(&[
+                ("dim", dim),
+                ("tokens", tokens),
+                ("heads", heads),
+                ("kv", heads),
+                ("xsize", weighted.size()),
+                ("ysize", out.size()),
+            ]),
+            &args,
+            weighted.size().div_ceil(256),
+            1,
+            256,
+        )?;
+        Ok(out)
+    }
+
+    /// A square, odd-sized, stride-one, same-padded convolution as im2col and
+    /// a GEMM. A 1x1 kernel is the GEMM alone.
+    pub fn conv(
+        &self,
+        x: &Tensor,
+        height: usize,
+        width: usize,
+        w: &Weight,
+        bias: Option<DevicePtr>,
+    ) -> Result<Tensor> {
+        if w.shape.len() != 4
+            || w.shape[1] != x.cols
+            || w.shape[2] != w.shape[3]
+            || w.shape[2] % 2 != 1
+            || height == 0
+            || width == 0
+            || x.rows != height * width
+        {
+            return Err(Error("convolution dimensions".into()));
+        }
+        let kernel = w.shape[2];
+        if kernel == 1 {
+            return self.linear(x, w, bias);
+        }
+        let patches = self.tensor(height * width, x.cols * kernel * kernel)?;
+        let mut args = Args::new();
+        args.i32(patches.size() as i32).ptr(x.ptr()).ptr(patches.ptr());
+        // One workgroup per output pixel when a row of channels is a whole
+        // number of 32-lane reads.
+        let coalesced = kernel == 3 && x.cols.is_multiple_of(32) && x.cols <= 1024;
+        self.launch(
+            if coalesced { "im2col_coalesced" } else { "im2col" },
+            config(&[
+                ("xsize", x.size()),
+                ("channels", x.cols),
+                ("width", width),
+                ("height", height),
+                ("kernel", kernel),
+            ]),
+            &args,
+            if coalesced { height * width } else { patches.size().div_ceil(256) },
+            1,
+            256,
+        )?;
+        self.linear(&patches, w, bias)
+    }
+
+    /// Nearest-neighbour 2x, the VAE's upsampler.
+    pub fn upsample(&self, x: &Tensor, height: usize, width: usize) -> Result<Tensor> {
+        if height == 0 || width == 0 || height * width != x.rows {
+            return Err(Error("upsampling dimensions".into()));
+        }
+        let y = self.tensor(height * width * 4, x.cols)?;
+        let mut args = Args::new();
+        args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
+        self.launch(
+            "upsample",
+            config(&[("xsize", x.size()), ("channels", x.cols), ("width", width)]),
+            &args,
+            y.size().div_ceil(256),
+            1,
+            256,
+        )?;
+        Ok(y)
+    }
+
+    /// Launches one auxiliary kernel: the models graph has kernels of its own
+    /// (embedding, layer taps, the modulation table) that are not operations.
+    pub fn launch(
         &self,
         name: &str,
         config: Config,
@@ -300,7 +520,9 @@ impl Ops {
     }
 }
 
-fn config(entries: &[(&str, usize)]) -> Config {
+/// A kernel configuration from shape entries, which is how these kernels take
+/// their shapes: compiled in, not passed.
+pub fn config(entries: &[(&str, usize)]) -> Config {
     entries.iter().map(|(key, value)| ((*key).to_string(), *value as u64)).collect()
 }
 

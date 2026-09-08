@@ -65,6 +65,24 @@ impl Pool {
         free.cached += buffer.len();
         free.blocks.entry(buffer.len()).or_default().push(buffer);
     }
+
+    /// Raw pooled bytes, for the one intermediate that is not bf16: attention
+    /// scores, which the GEMM writes as float32.
+    pub fn scratch(self: &Arc<Self>, bytes: usize) -> Result<Scratch> {
+        if bytes == 0 {
+            return Err(Error("empty scratch".into()));
+        }
+        Ok(Scratch(self.take(bytes)?))
+    }
+}
+
+/// Pooled device bytes with no shape.
+pub struct Scratch(Pooled);
+
+impl Scratch {
+    pub fn ptr(&self) -> DevicePtr {
+        self.0.ptr()
+    }
 }
 
 /// A buffer that returns to its pool when dropped.
@@ -87,13 +105,28 @@ impl Drop for Pooled {
     }
 }
 
+/// Where a tensor's elements live: its own pooled block, or someone else's.
+enum Storage {
+    Owned(Pooled),
+    Borrowed(DevicePtr),
+}
+
+impl Storage {
+    fn ptr(&self) -> DevicePtr {
+        match self {
+            Storage::Owned(pooled) => pooled.ptr(),
+            Storage::Borrowed(pointer) => *pointer,
+        }
+    }
+}
+
 /// A bf16 matrix on the device. Cloning shares the storage; [`Tensor::view`]
 /// makes a window onto it without copying.
 #[derive(Clone)]
 pub struct Tensor {
     pub rows: usize,
     pub cols: usize,
-    storage: Arc<Pooled>,
+    storage: Arc<Storage>,
     offset: usize,
 }
 
@@ -105,7 +138,18 @@ impl Tensor {
             return Err(Error("empty tensor".into()));
         }
         let storage = pool.take(rows * cols * 2)?;
-        Ok(Tensor { rows, cols, storage: Arc::new(storage), offset: 0 })
+        Ok(Tensor { rows, cols, storage: Arc::new(Storage::Owned(storage)), offset: 0 })
+    }
+
+    /// A matrix over memory this tensor does not own — a weight, read by an
+    /// operation that takes tensors. The caller keeps the memory alive; a
+    /// device address is never dereferenced here, so this stays safe code, in
+    /// the same way the C++ `Tensor::view` over a weight was.
+    pub fn borrowed(values: DevicePtr, rows: usize, cols: usize) -> Result<Tensor> {
+        if rows == 0 || cols == 0 {
+            return Err(Error("empty tensor".into()));
+        }
+        Ok(Tensor { rows, cols, storage: Arc::new(Storage::Borrowed(values)), offset: 0 })
     }
 
     pub fn from_slice(
