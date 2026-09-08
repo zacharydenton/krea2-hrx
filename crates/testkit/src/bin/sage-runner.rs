@@ -57,7 +57,7 @@ fn run(arguments: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let v = read(directory, "v.bin", capacity * kv * 128 * 2)?;
     let out = device().allocate(tokens * heads * 128 * 2)?;
 
-    let sage = Sage::new(tokens, capacity, heads, kv, bits)?;
+    let sage = Sage::new(tokens, capacity, heads, kv, bits, None)?;
     let kernel = Kernel::load(Path::new(hsaco), symbol)?;
     let mut args = Args::new();
     args.i32(tokens as i32)

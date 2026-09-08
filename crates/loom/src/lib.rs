@@ -15,7 +15,7 @@ pub mod shape;
 pub mod sources;
 
 pub use blocks::{prepare, Shape};
-pub use cache::{auxiliary_kernel, cache_root, set_compiler};
+pub use cache::{auxiliary_kernel, cache_root};
 pub use compile::{compiler, user_cache_directory, Compilation};
 
 /// Anything the compiler, the cache or the runtime rejects.

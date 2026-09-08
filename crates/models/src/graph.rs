@@ -38,12 +38,15 @@ pub struct Models {
 }
 
 impl Models {
-    pub fn open(files: &Files) -> Result<Models> {
+    /// `compiler` is the `loom-compile` this graph's auxiliary kernels are
+    /// built with; `None` takes `LOOM_COMPILE`, else PATH.
+    pub fn open(files: &Files, compiler: Option<&str>) -> Result<Models> {
         Models::load(
             &files.checkpoint,
             &files.text_encoder,
             &files.vae,
             files.tokenizer.as_deref(),
+            compiler,
         )
     }
 
@@ -53,10 +56,11 @@ impl Models {
         text_encoder: &std::path::Path,
         vae: &std::path::Path,
         tokenizer: Option<&std::path::Path>,
+        compiler: Option<&str>,
     ) -> Result<Models> {
         let pool = Pool::new();
         let models = Models {
-            ops: Ops::new(Arc::clone(&pool)),
+            ops: Ops::with_compiler(Arc::clone(&pool), compiler),
             tokenizer: match tokenizer {
                 Some(path) => Tokenizer::from_file(path)?,
                 None => Tokenizer::embedded()?,

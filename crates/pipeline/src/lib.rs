@@ -129,9 +129,8 @@ struct State {
 impl Pipeline {
     /// `compiler` of `None` takes `LOOM_COMPILE`, else `loom-compile` on PATH.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
-        loom::set_compiler(compiler);
         Ok(Pipeline {
-            models: Models::open(&files)?,
+            models: Models::open(&files, compiler)?,
             files,
             compiler: compiler.map(str::to_string),
             cache: loom::user_cache_directory("blocks-gfx1151-v1")?,
@@ -331,7 +330,8 @@ impl Pipeline {
         state.blocks = None;
         let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
         let bundle = loom::prepare(&self.cache, self.compiler.as_deref(), &shape)?;
-        let session = Session::with_weights(weights, &bundle, tokens, 28)?;
+        let session =
+            Session::with_weights(weights, &bundle, tokens, 28, self.compiler.as_deref())?;
         state.blocks = Some(Blocks { session, tokens });
         Ok(())
     }

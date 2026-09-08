@@ -22,6 +22,8 @@ pub struct Sage {
     kv_heads: usize,
     tiles: usize,
     bits: u32,
+    /// The compiler the session was opened with, for the preparation kernels.
+    compiler: Option<String>,
     pub q4: Buffer,
     pub k4: Buffer,
     pub q_scale: Buffer,
@@ -44,6 +46,7 @@ impl Sage {
         heads: usize,
         kv_heads: usize,
         bits: u32,
+        compiler: Option<&str>,
     ) -> Result<Sage> {
         let tiles = tokens.div_ceil(64);
         if !(16..=16896).contains(&tokens)
@@ -66,6 +69,7 @@ impl Sage {
             kv_heads,
             tiles,
             bits,
+            compiler: compiler.map(str::to_string),
             q4: device().allocate(capacity * heads * row_bytes)?,
             k4: device().allocate(capacity * kv_heads * row_bytes)?,
             q_scale: device().allocate(capacity * heads * 4)?,
@@ -246,7 +250,7 @@ impl Sage {
     ) -> Result<()> {
         let config: Config =
             config.iter().map(|(key, value)| ((*key).to_string(), *value as u64)).collect();
-        let kernel = auxiliary_kernel(name, &config, grid)?;
+        let kernel = auxiliary_kernel(name, &config, grid, self.compiler.as_deref())?;
         kernel.launch_2d(grid.0, grid.1, threads, args)?;
         Ok(())
     }
@@ -266,7 +270,7 @@ mod tests {
             (64, 66, 48, 12, 4, "a capacity off the 32-row grid"),
             (64, 64, 24, 12, 4, "a group size that is not four"),
         ] {
-            let Err(error) = Sage::new(tokens, capacity, heads, kv, bits) else {
+            let Err(error) = Sage::new(tokens, capacity, heads, kv, bits, None) else {
                 panic!("{why} was accepted");
             };
             assert!(error.message.contains("unsupported Sage dimensions"), "{why}");

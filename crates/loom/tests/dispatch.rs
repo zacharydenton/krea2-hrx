@@ -44,6 +44,7 @@ fn unary_one_writes_one_into_every_element() {
         "unary_one",
         &config([("count_b", COUNT as u64)]),
         (COUNT.div_ceil(256) as u32, 1),
+        None,
     )
     .expect("compiling unary_one");
     let mut args = Args::new();
@@ -121,7 +122,7 @@ fn the_cache_key_matches_the_cpp_host() {
     let key = loom::compile::digest(format!("{source}{signature}").as_bytes());
 
     // Compiling through the normal path must land on exactly that key.
-    auxiliary_kernel("euler", &loom::Config::new(), (4, 1)).expect("compiling euler");
+    auxiliary_kernel("euler", &loom::Config::new(), (4, 1), None).expect("compiling euler");
     let root = loom::cache_root().expect("a cache directory");
     let path = root.join(format!("{key}.hsaco"));
     assert!(

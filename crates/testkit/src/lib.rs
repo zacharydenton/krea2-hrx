@@ -108,7 +108,7 @@ unsafe fn run(
     let mut blob = Args::new();
     blob.raw(std::slice::from_raw_parts(args as *const u8, size))
         .map_err(|e: hrx::Error| e.0)?;
-    let kernel = auxiliary_kernel(name, &config, (grid_x, grid_y)).map_err(|e| e.0)?;
+    let kernel = auxiliary_kernel(name, &config, (grid_x, grid_y), None).map_err(|e| e.0)?;
     kernel.launch_2d(grid_x, grid_y, threads, &blob).map_err(|e| e.0)?;
     device().synchronize().map_err(|e| e.0)?;
     Ok(())

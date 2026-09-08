@@ -14,13 +14,7 @@ use crate::{compiler, sources, Config, Error, Result};
 
 const ROOT: &str = "native-gfx1151-v1";
 
-static COMPILER: Mutex<Option<String>> = Mutex::new(None);
 static LOADED: Mutex<Option<HashMap<String, Kernel>>> = Mutex::new(None);
-
-/// Overrides the `loom-compile` executable for this process.
-pub fn set_compiler(path: Option<&str>) {
-    *COMPILER.lock().unwrap_or_else(|e| e.into_inner()) = path.map(str::to_string);
-}
 
 pub fn cache_root() -> Result<PathBuf> {
     user_cache_directory(ROOT)
@@ -40,7 +34,12 @@ fn signature(name: &str, config: &Config) -> String {
 ///
 /// `grid_x` and `grid_y` join the configuration for every kernel but
 /// `sage_transpose`, which is written for any grid.
-pub fn auxiliary_kernel(name: &str, config: &Config, grid: (u32, u32)) -> Result<Kernel> {
+pub fn auxiliary_kernel(
+    name: &str,
+    config: &Config,
+    grid: (u32, u32),
+    compiler_path: Option<&str>,
+) -> Result<Kernel> {
     let mut config = config.clone();
     if name != "sage_transpose" {
         config.insert("grid_x".into(), u64::from(grid.0));
@@ -69,8 +68,7 @@ pub fn auxiliary_kernel(name: &str, config: &Config, grid: (u32, u32)) -> Result
                 root.join(format!("{name}.log")),
                 staging.clone(),
             ]);
-            let compiler =
-                compiler(COMPILER.lock().unwrap_or_else(|e| e.into_inner()).as_deref());
+            let compiler = compiler(compiler_path);
             let settings =
                 config.iter().map(|(key, value)| (key.clone(), value.to_string())).collect();
             Compilation { compiler: &compiler, name, source, config: &settings }
@@ -107,7 +105,8 @@ mod tests {
 
     #[test]
     fn an_unknown_kernel_is_named_in_the_error() {
-        let error = auxiliary_kernel("no_such_kernel", &Config::new(), (1, 1)).unwrap_err();
+        let error =
+            auxiliary_kernel("no_such_kernel", &Config::new(), (1, 1), None).unwrap_err();
         assert_eq!(error.0, "no auxiliary kernel named no_such_kernel");
     }
 }

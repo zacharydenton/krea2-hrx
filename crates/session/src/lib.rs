@@ -161,18 +161,22 @@ impl Session {
     ) -> Result<Session> {
         let metadata = Session::metadata(kernels_dir, tokens, layers)?;
         let weights = std::sync::Arc::new(Weights::load(checkpoint)?);
-        Session::build(weights, kernels_dir, metadata, tokens, layers)
+        Session::build(weights, kernels_dir, metadata, tokens, layers, None)
     }
 
     /// The same, sharing a checkpoint already on the device.
+    /// The same, sharing a checkpoint already on the device. `compiler` is the
+    /// `loom-compile` the smoothed attention's preparation kernels are built
+    /// with, when the bundle asks for them.
     pub fn with_weights(
         weights: std::sync::Arc<Weights>,
         kernels_dir: &Path,
         tokens: usize,
         layers: usize,
+        compiler: Option<&str>,
     ) -> Result<Session> {
         let metadata = Session::metadata(kernels_dir, tokens, layers)?;
-        Session::build(weights, kernels_dir, metadata, tokens, layers)
+        Session::build(weights, kernels_dir, metadata, tokens, layers, compiler)
     }
 
     /// The bundle's `launch.txt`, checked against the shape rules for `tokens`.
@@ -199,6 +203,7 @@ impl Session {
         metadata: Metadata,
         tokens: usize,
         layers: usize,
+        compiler: Option<&str>,
     ) -> Result<Session> {
         if weights.bits() != metadata.gemm_bits {
             return Err(Error::invalid(format!(
@@ -273,6 +278,7 @@ impl Session {
                 (KV_HEADS * 4) as usize,
                 KV_HEADS as usize,
                 bits,
+                compiler,
             )?),
         };
         Ok(Session {

@@ -30,7 +30,7 @@ fn main() -> std::process::ExitCode {
 
 fn run(checkpoint: &Path, directory: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let files = Files::of(checkpoint).resolve()?;
-    let models = Models::open(&files)?;
+    let models = Models::open(&files, None)?;
 
     let text = read(&models, &directory.join("text.bin"), 2560)?;
     write(&directory.join("condition.bin"), &models.text_fusion(&text)?)?;

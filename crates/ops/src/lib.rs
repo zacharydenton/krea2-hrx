@@ -130,11 +130,24 @@ impl Weight {
 /// The operations, over one buffer pool.
 pub struct Ops {
     pool: Arc<Pool>,
+    /// The `loom-compile` to spawn for an auxiliary kernel this has not seen.
+    /// Carried rather than global, so two runtimes in one process cannot
+    /// silently reconfigure each other's compiler.
+    compiler: Option<String>,
 }
 
 impl Ops {
     pub fn new(pool: Arc<Pool>) -> Ops {
-        Ops { pool }
+        Ops { pool, compiler: None }
+    }
+
+    /// The same, with an explicit compiler instead of `LOOM_COMPILE`/PATH.
+    pub fn with_compiler(pool: Arc<Pool>, compiler: Option<&str>) -> Ops {
+        Ops { pool, compiler: compiler.map(str::to_string) }
+    }
+
+    pub fn compiler(&self) -> Option<&str> {
+        self.compiler.as_deref()
     }
 
     pub fn pool(&self) -> &Arc<Pool> {
@@ -481,7 +494,8 @@ impl Ops {
         grid_y: usize,
         threads: u32,
     ) -> Result<()> {
-        let kernel = auxiliary_kernel(name, &config, (grid_x as u32, grid_y as u32))?;
+        let kernel =
+            auxiliary_kernel(name, &config, (grid_x as u32, grid_y as u32), self.compiler())?;
         kernel.launch_2d(grid_x as u32, grid_y as u32, threads, args)?;
         Ok(())
     }

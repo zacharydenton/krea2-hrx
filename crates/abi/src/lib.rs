@@ -330,6 +330,10 @@ pub unsafe extern "C" fn krea2_create_shared(
                 path_of(kernels)?,
                 tokens as usize,
                 layers as usize,
+                // The bundle is already compiled by the time a session shares
+                // it; only the smoothed attention's preparation kernels could
+                // still need a compiler, and they take LOOM_COMPILE or PATH.
+                None,
             )?);
             Ok(())
         }),
