@@ -79,9 +79,11 @@ unsafe fn slice_of<'a, T>(pointer: *const T, len: usize) -> Option<&'a [T]> {
     }
 }
 
-/// ComfyUI's files named explicitly. `text_encoder` or `vae` null: found beside
-/// the model, or in the Hugging Face cache. `distilled`: 1 for Turbo, 0 for
-/// Raw, -1 to read the file name.
+/// ComfyUI's files named explicitly. `model` is a path, or the name of a
+/// checkpoint in ComfyUI's Krea 2 repository -- a name is looked for beside a
+/// models directory the path implies before the hub is asked. `text_encoder`
+/// or `vae` null: found beside the model, or in the Hugging Face cache.
+/// `distilled`: 1 for Turbo, 0 for Raw, -1 to read the file name.
 ///
 /// # Safety
 /// Every pointer must be null or a NUL-terminated string; `out` must be

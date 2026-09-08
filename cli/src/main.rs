@@ -153,13 +153,15 @@ fn run(args: Args) -> Result<()> {
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
         bail!("--guidance must be between 0 and 100");
     }
-    // An explicit --model may be a path or the name of a checkpoint in
-    // ComfyUI's repository; a --models directory is a layout on disk, so a file
-    // missing from it is worth saying so plainly rather than fetching.
+    // --model is a path or a checkpoint's name; --models is where a name is
+    // looked for first. Without --model, the checkpoint is the one --checkpoint
+    // names, and a models directory that does not have it is worth saying so
+    // plainly rather than fetching.
+    let models = expand_home(&args.models);
     let model = match &args.model {
         Some(model) => model.clone(),
         None => {
-            let path = expand_home(&args.models)
+            let path = models
                 .join("diffusion_models")
                 .join(format!("krea2_{}_int8_convrot.safetensors", args.checkpoint));
             if !path.is_file() {
@@ -192,6 +194,7 @@ fn run(args: Args) -> Result<()> {
 
     let loading = Instant::now();
     let files = Files::of(&model)
+        .models(Some(&models))
         .text_encoder(args.text_encoder.as_deref())
         .vae(args.vae.as_deref())
         .distilled(Some(args.checkpoint == "turbo"))

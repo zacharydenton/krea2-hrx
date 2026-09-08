@@ -7,6 +7,9 @@
 //! by path or just by name, and a file another tool already downloaded is used
 //! where it lies.
 //!
+//! The hub is the last place looked, never the first: a checkpoint named rather
+//! than pathed is still found in the local models directory if it is there.
+//!
 //! The tokenizer comes from the text encoder's own repository rather than
 //! ComfyUI's, which does not carry one. It is seven megabytes, so it is fetched
 //! whenever the network is allowed; the copy compiled into `krea2-tokenizer` is
@@ -33,7 +36,14 @@ impl Files {
     /// Resolves `checkpoint`, which is either a path to a file or the name of
     /// one in ComfyUI's Krea 2 repository (`krea2_turbo_int8_convrot`).
     pub fn of(checkpoint: &Path) -> Request<'_> {
-        Request { checkpoint, text_encoder: None, vae: None, distilled: None, offline: false }
+        Request {
+            checkpoint,
+            models: None,
+            text_encoder: None,
+            vae: None,
+            distilled: None,
+            offline: false,
+        }
     }
 }
 
@@ -41,6 +51,7 @@ impl Files {
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
     checkpoint: &'a Path,
+    models: Option<&'a Path>,
     text_encoder: Option<&'a Path>,
     vae: Option<&'a Path>,
     distilled: Option<bool>,
@@ -48,6 +59,13 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
+    /// ComfyUI's models directory, searched before the hub when the checkpoint
+    /// is named rather than pathed.
+    pub fn models(mut self, directory: Option<&'a Path>) -> Request<'a> {
+        self.models = directory;
+        self
+    }
+
     /// Overrides the text encoder, which is otherwise the bf16 one where both
     /// it and the fp8 one are present.
     pub fn text_encoder(mut self, path: Option<&'a Path>) -> Request<'a> {
@@ -74,19 +92,31 @@ impl<'a> Request<'a> {
     }
 
     pub fn resolve(self) -> Result<Files> {
-        let local = std::path::absolute(self.checkpoint).ok().filter(|path| path.is_file());
-        // A checkpoint that is not a file on disk names one in the repository,
-        // whose diffusion models are all .safetensors. Naming a model is how
-        // you ask for it to be fetched: giving a path means that directory, so
-        // a file missing from it is an error and not an eight-gigabyte
-        // download nobody asked for.
-        let (checkpoint, root) = match local {
-            Some(path) => {
-                let root = path.parent().and_then(Path::parent).map(Path::to_path_buf);
-                (path, root)
-            }
-            None => (hub::file(hub::REPO, &self.repository_name()?, self.offline)?, None),
-        };
+        // The checkpoint as given, then the same name inside the models
+        // directory, and only then the hub. Naming a model rather than pathing
+        // it is how you ask for it to be fetched -- but not if it is already
+        // here, and not from a directory you named, where a missing file is an
+        // error rather than an eight-gigabyte download nobody asked for.
+        let beside = |path: &Path| path.parent().and_then(Path::parent).map(Path::to_path_buf);
+        let (checkpoint, root) =
+            match std::path::absolute(self.checkpoint).ok().filter(|path| path.is_file()) {
+                Some(path) => {
+                    let root = beside(&path);
+                    (path, root)
+                }
+                // Not a file, so it is a name: the models directory, then the hub.
+                None => {
+                    let name = self.repository_name()?;
+                    match self.models.map(|root| root.join(&name)).filter(|path| path.is_file())
+                    {
+                        Some(path) => {
+                            let root = beside(&path);
+                            (path, root)
+                        }
+                        None => (hub::file(hub::REPO, &name, self.offline)?, None),
+                    }
+                }
+            };
         let named = root.is_none();
         let text_encoder = match self.text_encoder {
             Some(path) => path.to_path_buf(),
@@ -225,6 +255,33 @@ mod tests {
         let error = Files::of(&checkpoint).resolve().unwrap_err();
         assert!(error.0.contains("the text encoder was not found beside"), "{error}");
         assert!(error.0.contains("text_encoders/qwen3vl_4b_{bf16,fp8_scaled}"), "{error}");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_named_checkpoint_is_found_in_the_models_directory_before_the_hub() {
+        // Offline, so if the models directory were skipped this would fail
+        // rather than quietly fetching thirteen gigabytes.
+        let root = layout("krea2_raw_int8_convrot.safetensors", "qwen3vl_4b_bf16.safetensors");
+        let files = Files::of(Path::new("krea2_raw_int8_convrot"))
+            .models(Some(&root))
+            .offline(true)
+            .resolve()
+            .expect("the local copy is found");
+        assert_eq!(
+            files.checkpoint,
+            root.join("diffusion_models/krea2_raw_int8_convrot.safetensors")
+        );
+        assert_eq!(files.text_encoder, root.join("text_encoders/qwen3vl_4b_bf16.safetensors"));
+        assert!(!files.distilled, "the name still decides the sampler");
+
+        // A name the directory does not have falls through to the hub.
+        let error = Files::of(Path::new("krea2_turbo_mxfp8"))
+            .models(Some(&root))
+            .offline(true)
+            .resolve()
+            .unwrap_err();
+        assert!(error.0.contains("diffusion_models/krea2_turbo_mxfp8.safetensors"), "{error}");
         std::fs::remove_dir_all(root).ok();
     }
 
