@@ -1,13 +1,6 @@
-//! Device tensors and the pool they come from.
-//!
-//! Every intermediate is bf16 `[rows][cols]` in device memory. Allocations go
-//! through a [`Pool`] because the pipeline makes and drops hundreds of them per
-//! image and HRX allocation is not free: a dropped tensor's storage goes back
-//! on a free list and the next request of a similar size takes it.
-//!
-//! The C++ did this with a thread-local pool and `shared_ptr` deleters. Here
-//! the pool is owned by whoever owns the ops, and a tensor holds an `Arc` to
-//! it, so the lifetime is in the type rather than in a convention.
+//! BF16 device matrices and pooled allocations.
+//! A [`Pool`] reuses released buffers up to its cache limit. Tensors and views
+//! retain ownership of their backing allocation.
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -105,12 +98,7 @@ impl Drop for Pooled {
     }
 }
 
-/// Where a tensor's elements live: its own pooled block, or a share of an
-/// allocation someone else made.
-///
-/// Either way the tensor keeps the allocation alive, which is the difference
-/// between this and handing out a bare address: a view cannot outlive what it
-/// points into.
+/// Backing allocation retained by a tensor and its views.
 enum Storage {
     Owned(Pooled),
     /// The allocation is held only to keep it alive; the address is what the
@@ -130,12 +118,8 @@ impl Storage {
     }
 }
 
-/// A bf16 matrix on the device. Cloning shares the storage; [`Tensor::view`]
-/// makes a window onto it without copying.
-///
-/// The shape is read-only: a kernel is launched for the shape its operands
-/// report, so a caller that could assign `rows` could make a launch read past
-/// the allocation the shape was checked against.
+/// BF16 device matrix with a checked, read-only shape.
+/// Cloning shares storage; [`Tensor::view`] creates a window without copying.
 #[derive(Clone)]
 pub struct Tensor {
     rows: usize,
@@ -145,8 +129,8 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    /// An uninitialized tensor. Kernels write every element they read, as they
-    /// did in the C++; a tensor that must start at zero is zeroed explicitly.
+    /// Allocates uninitialized storage. Initialize every element before reading it;
+    /// call [`Tensor::zero`] when zero-filled storage is required.
     pub fn new(pool: &Arc<Pool>, rows: usize, cols: usize) -> Result<Tensor> {
         let storage = pool.take(bytes(rows, cols)?)?;
         Ok(Tensor { rows, cols, storage: Arc::new(Storage::Owned(storage)), offset: 0 })
@@ -242,8 +226,7 @@ fn elements(rows: usize, cols: usize) -> Result<usize> {
     }
 }
 
-/// The same as bytes. The element count fitting in a `usize` does not mean the
-/// byte count does, and it is the byte count every bound is checked against.
+/// Checked byte count, including the two bytes per bf16 element.
 fn bytes(rows: usize, cols: usize) -> Result<usize> {
     elements(rows, cols)?.checked_mul(2).ok_or_else(|| Error("tensor shape".into()))
 }

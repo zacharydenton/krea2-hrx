@@ -1,9 +1,5 @@
-//! `KREA2_NATIVE_PROFILE=1`: synchronized wall-clock stage timing on stderr.
-//!
-//! Off during normal inference, because every mark synchronizes the stream and
-//! a number that does not wait for the GPU means nothing. This is what
-//! `host/native_profile.h` did, in the same format, so the notes and
-//! benchmarks that quote those lines still read.
+//! Synchronized stage timings on stderr, enabled by `KREA2_NATIVE_PROFILE=1`.
+//! Synchronization affects latency, so disable profiling for performance measurements.
 use hrx::device;
 
 use crate::Result;

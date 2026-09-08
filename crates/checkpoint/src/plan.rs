@@ -142,8 +142,7 @@ impl Plan {
                 spans.insert(format!("{p}.{out}"), vector(file, &name)?);
             }
         }
-        // Each tensor starts at a 256-byte boundary, in name order, as the C++
-        // laid them out — the session addresses them by offset.
+        // Tensors start at 256-byte boundaries in name order; sessions use these offsets.
         let mut total = 0;
         for span in spans.values_mut() {
             span.device_offset = total;

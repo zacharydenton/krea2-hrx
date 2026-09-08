@@ -1,13 +1,8 @@
 //! Compiling and caching Loom kernels for gfx1151.
 //!
-//! Two caches, as the C++ host had: auxiliary kernels keyed by the hash of
-//! source plus configuration, and (later) whole block bundles keyed by a
-//! signature over every job. Both publish atomically under a lock file, so
-//! several processes can share one cache directory, and both verify a cached
-//! artifact's hash before loading it.
-//!
-//! The kernel sources themselves are embedded by `build.rs` from `kernels/`,
-//! which is the only copy — there is no generated header to keep in step.
+//! Auxiliary kernels are keyed by source and configuration; transformer bundles
+//! also track compiler identity. Both caches verify artifact hashes and serialize
+//! publication with process locks. Sources are embedded from `kernels/` at build time.
 pub mod blocks;
 pub mod cache;
 pub mod compile;
@@ -44,8 +39,7 @@ impl From<String> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A kernel's configuration: named `size_t` values, ordered as the C++
-/// `std::map` ordered them so cache keys stay byte-identical.
+/// Named kernel configuration values, sorted for stable cache serialization.
 pub type Config = std::collections::BTreeMap<String, u64>;
 
 /// A compiler invocation's `--config` values, which are not all counts.

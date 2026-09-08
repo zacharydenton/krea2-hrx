@@ -1,13 +1,5 @@
-//! The gate for the Rust device layer: compile an embedded kernel with
-//! `loom-compile`, dispatch it on the gfx1151, and read the result back.
-//!
-//! This is what `tests/test_hrx_runtime.cpp` proves for the C++ host, kept in
-//! the same shape: `unary_one` writes `1 + x` for every element, so a zeroed
-//! buffer must come back as bf16 1.0 (`0x3f80`) in every lane, and a span that
-//! runs past its allocation must be rejected rather than truncated.
-//!
-//! Requires a GPU and `loom-compile` on PATH (or `LOOM_COMPILE`); it is skipped
-//! when neither is present, so `cargo test` still works on a build machine.
+//! GPU dispatch, allocation-span and runtime-dependency checks.
+//! Requires HRX, a gfx1151 GPU and a compiler; tests return early when unavailable.
 use hrx::{device, Args};
 use loom::{auxiliary_kernel, config};
 
@@ -102,14 +94,7 @@ fn the_process_maps_no_hip_torch_or_system_crypto() {
     }
 }
 
-/// The Rust cache must key exactly as the C++ host did, or a port silently
-/// recompiles everything and, worse, could diverge on what it loads.
-///
-/// The C++ `Ops::euler_step` launched `euler` with no configuration of its own
-/// and a 4x1 grid at 1000 elements, which made the signature `"euler\ngrid_x=4\n
-/// grid_y=1\n"`. Compiling it here and finding the artifact under the key that
-/// signature derives checks the whole chain -- signature, digest, cache path --
-/// without needing an entry some earlier test happened to leave behind.
+/// Check source, ordered launch configuration, digest and artifact path together.
 #[test]
 fn the_cache_key_matches_the_cpp_host() {
     if !usable() {

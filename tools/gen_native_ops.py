@@ -725,12 +725,10 @@ softmax(True)
 
 
 def conv_source(k, row, col):
-    """Where a 3x3 convolution's A element comes from, given its (row, k).
+    """Map (output pixel, tap * channels + channel) to an image element.
 
-    The row is an output pixel and k is `tap * channels + channel` under the
-    [out][ky][kx][in] weight packing. A four-element load stays inside one tap
-    because every channel count here is a multiple of four, so one bounds check
-    covers the packet and the load stays contiguous.
+    With channel counts divisible by four, a four-element load stays within
+    one tap. Other channel counts use scalar loads.
     """
     three = k.c(3)
     one = k.c(1)
@@ -750,17 +748,13 @@ def conv_source(k, row, col):
         k.op("scalar.andi", k.cmp(row, "%m"), k.cmp(col, "%k"), t="i1"),
         t="i1",
     )
-    # The address is formed from coordinates forced back inside the image. The
-    # guard means the clamped value is never the one that is read; forming it
-    # unclamped would leave an underflowed index the target cannot prove fits
-    # in its 32-bit address arithmetic.
+    # Clamp masked coordinates so the compiler can prove that address arithmetic
+    # fits 32 bits. The validity predicate prevents reading these padded elements.
     zero = k.c(0)
     safe_y = k.choose(inside_y, iy, zero)
     safe_x = k.choose(inside_x, ix, zero)
-    # Each step is bounded on its own. The target folds a multiply and an add
-    # into one addressing instruction and checks the result fits 32 bits, which
-    # it cannot see through two chained multiplies of unconstrained config
-    # values -- so the pixel index is pinned before it is scaled by channels.
+    # Bound the pixel before scaling by channels: the compiler cannot infer the
+    # 32-bit address bound through two multiplies of configuration values.
     pixel = k.var()
     raw_pixel = k.add(k.mul(safe_y, "%width"), safe_x)
     k.emit(
@@ -782,18 +776,11 @@ def conv_source(k, row, col):
 # Scalar predication at the edges handles arbitrary M/N/K, including RGB's N=3.
 def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, tile_n=64,
          conv=False):
-    """The GEMM, and the same GEMM reading a 3x3 convolution's patches directly.
+    """Generate tiled GEMM or 3x3 implicit convolution.
 
-    `conv` replaces the A operand's address with the pixel it would have been
-    copied from, so no patch buffer is written or read. It needs the weights
-    packed [out][ky][kx][in] rather than [out][in][ky][kx]: with channels last,
-    four consecutive k are four consecutive channels of one tap, which is the
-    same contiguous four-element load the GEMM already does. With channels
-    innermost they would be four taps of one channel, strided by the channel
-    count, and the load would fall apart into four.
-
-    That repack also changes the reduction order from channel-major to
-    tap-major, so a conv kernel does not reproduce im2col's bits.
+    Convolution reads image pixels directly and expects [out][ky][kx][in]
+    weights. Its tap-major reduction differs from im2col's channel-major
+    order, so the two paths need not produce identical bits.
     """
     name = (
         ("conv3x3_" if conv else "gemm_")
@@ -1222,8 +1209,6 @@ def write():
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    # The kernels are the output. crates/loom/build.rs embeds them straight
-    # from kernels/native/, so there is no generated header to keep in step.
 
 
 if __name__ == "__main__":

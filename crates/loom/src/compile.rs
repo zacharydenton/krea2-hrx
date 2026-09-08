@@ -5,12 +5,8 @@ use std::process::Command;
 
 use crate::{Error, Result, Settings};
 
-/// The compiler to spawn: the caller's choice, else `LOOM_COMPILE`, else the
-/// one an installed build fetched into its cache, else PATH.
-///
-/// The cache entry is what makes `cargo install` work: nothing puts
-/// `loom-compile` on PATH, and it is needed at run time, not only at build
-/// time -- the first image at a new sequence length compiles a bundle.
+/// Resolves the compiler: explicit override, `LOOM_COMPILE`, runtime cache,
+/// then `loom-compile` on PATH.
 pub fn compiler(override_path: Option<&str>) -> String {
     resolve_compiler(
         override_path,
@@ -19,9 +15,7 @@ pub fn compiler(override_path: Option<&str>) -> String {
     )
 }
 
-/// The decision itself, with the environment passed in rather than read, so it
-/// can be tested against a directory the test controls instead of against
-/// whatever this machine happens to have installed.
+/// Compiler selection with explicit inputs for isolated tests.
 fn resolve_compiler(
     override_path: Option<&str>,
     environment: Option<&str>,
@@ -42,8 +36,7 @@ fn resolve_compiler(
     "loom-compile".to_string()
 }
 
-/// Where an installed build keeps the Loom runtime it fetched: `libhrx.so`
-/// beside `loom-compile`, under the same cache root as the kernel bundles.
+/// Optional runtime installation under the user's kernel-cache root.
 pub fn runtime_directory() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -66,8 +59,7 @@ pub struct Compilation<'a> {
 impl Compilation<'_> {
     /// Compiles into `output`, using `scratch` for the source and the log.
     ///
-    /// The command line is the C++ host's, argument for argument, so a cache
-    /// built by either implementation is usable by the other.
+    /// Shape settings are passed as `--config=krea2.<name>.<key>=<value>`.
     pub fn run(&self, scratch: &Path, output: &Path) -> Result<()> {
         let source_path = scratch.join(format!("{}.loom", self.name));
         let log_path = scratch.join(format!("{}.log", self.name));

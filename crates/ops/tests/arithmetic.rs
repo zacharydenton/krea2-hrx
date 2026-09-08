@@ -1,8 +1,6 @@
-//! The ops against arithmetic worked out on the CPU.
-//!
-//! These are the operations whose rounding is part of the model's contract, so
-//! they are compared bit for bit rather than within a tolerance. Skipped when
-//! there is no GPU or no compiler.
+//! Device operations checked against CPU arithmetic and alternate layouts.
+//! Scheduler rounding is checked exactly; convolution reduction orders use a
+//! tolerance. Tests return early when the GPU or compiler is unavailable.
 use krea2_numerics::{from_f32, to_f32};
 use krea2_ops::{Binary, Layout, Ops, Pool, Tensor, Unary, Weight};
 
@@ -107,14 +105,8 @@ fn the_pointwise_and_broadcast_operations_agree_with_the_host() {
     assert_eq!(download(&product), want);
 }
 
-/// A convolution's answer must not depend on which order its values are in.
-///
-/// `Ops::conv` has two implementations and they read the weight differently:
-/// the implicit one reduces over `[out][ky][kx][in]`, the patch one over the
-/// file's `[out][in][ky][kx]`. Only the weight knows which it holds, so this
-/// builds the same convolution both ways and checks they agree. Before the
-/// layout travelled with the weight, a hand-built `Weight` in the file's order
-/// was read as though it were packed.
+/// Convolution dispatch must respect the declared weight layout.
+/// The two reduction orders must agree within the numerical tolerance.
 #[test]
 fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
     if !usable() {
@@ -163,7 +155,7 @@ fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
         worst <= 0.02 * scale.max(1.0),
         "the two paths disagree by {worst} on values up to {scale}"
     );
-    // A packed weight that is not 3x3 is a contradiction, not a silent misread.
+    // An explicitly packed 3×3 weight is accepted.
     let flat = weight(&row_major, Layout::ChannelsLast);
     assert!(ops.conv(&x, height, width, &flat, None).is_ok(), "3x3 packed is fine");
 }

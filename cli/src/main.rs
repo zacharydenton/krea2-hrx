@@ -1,7 +1,4 @@
-//! krea2: prompt to image on the Radeon 8060S.
-//!
-//! Everything interesting is in `krea2-pipeline`; this file is argument
-//! handling, model discovery and file output around it.
+//! Command-line interface, model discovery and image output for `krea2-pipeline`.
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -67,7 +64,7 @@ struct Args {
     /// Qwen-Image VAE (default: beside the model)
     #[arg(long)]
     vae: Option<PathBuf>,
-    /// A loom-compile executable (default: LOOM_COMPILE, else PATH)
+    /// Loom compiler override (default: LOOM_COMPILE, runtime cache, then PATH)
     #[arg(long)]
     compiler: Option<PathBuf>,
     /// Only the output lines
@@ -154,10 +151,7 @@ fn run(args: Args) -> Result<()> {
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
         bail!("--guidance must be between 0 and 100");
     }
-    // --model is a path or a checkpoint's name; --models is where a name is
-    // looked for first. Without --model, the checkpoint is the one --checkpoint
-    // names, and a models directory that does not have it is worth saying so
-    // plainly rather than fetching.
+    // Without --model, require the selected checkpoint in the local models tree.
     let models = expand_home(&args.models);
     let named = args.checkpoint.as_deref().unwrap_or("turbo");
     let model = match &args.model {

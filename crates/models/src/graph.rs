@@ -1,12 +1,6 @@
-//! The graph around the 28 blocks: text encoder, text fusion, time embedding,
-//! image projection, final layer and the VAE decoder.
-//!
-//! All of it runs through [`krea2_ops`], so nothing here is arithmetic — it is
-//! the order the tensors go in, and the names ComfyUI's three checkpoints use
-//! for them. The exceptions are the handful of places the C++ did on the host
-//! and this does too, each of which rounds to bf16 at every term because that
-//! is what the reference implementation rounds: the time embedding's sinusoids,
-//! the latent unpack, and the tile blend.
+//! Text encoder, text fusion, embeddings, projections and VAE decoder.
+//! GPU operations use [`krea2_ops`]. Host-side sinusoids, latent unpacking and tile
+//! blending preserve the reference's bf16 rounding boundaries.
 use std::sync::Arc;
 
 use hrx::{device, Args};

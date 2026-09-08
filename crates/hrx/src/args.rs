@@ -1,9 +1,5 @@
-//! Loom's AMDGPU kernel argument ABI: scalars at their natural alignment in
-//! declaration order, then one 8-byte device address per buffer operand.
-//!
-//! This is the only implementation in the tree; the C++ host had three, with
-//! different capacities and one that left its padding uninitialized. Padding
-//! here is always zero, which is what the largest of the three did.
+//! Loom's AMDGPU argument ABI: naturally aligned scalars in declaration order,
+//! then one 8-byte device address per buffer operand. Padding bytes are zeroed.
 use crate::DevicePtr;
 
 /// The dispatch limit is 256 bytes of direct arguments.

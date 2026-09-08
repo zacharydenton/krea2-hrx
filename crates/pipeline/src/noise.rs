@@ -1,11 +1,6 @@
-//! The initial latents for a seed.
-//!
-//! The C++ drew from `std::mt19937_64` through a hand-written Box-Muller pair.
-//! This uses `rand`'s ChaCha generator and `rand_distr`'s normal distribution,
-//! which is a deliberate change: the same seed does not produce the same image
-//! as the C++ build did. Nothing downstream depends on the noise's provenance,
-//! only on its distribution, and every gate that compares against a reference
-//! supplies its own latents rather than a seed.
+//! Seeded standard-normal initial latents using ChaCha8.
+//! Native seeds do not reproduce Torch's noise; reference comparisons must supply
+//! identical initial latents.
 use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
 

@@ -1,19 +1,9 @@
-//! ComfyUI's other checkpoints — the text encoder and the VAE — on the device.
+//! Dense checkpoint tensors in device memory.
 //!
-//! Unlike the block weights these are dense tensors the auxiliary kernels read
-//! directly, so this converts where the file and the kernels disagree and
-//! nowhere else: bf16 and float32 keep their dtype, float8 e4m3 rows with a
-//! per-tensor scale are dequantised to bf16, and the VAE's five-dimensional
-//! causal convolutions are reduced to their last temporal tap, which is the
-//! single-image frame.
-//!
-//! One reordering: a 3x3 convolution's weights are stored `[out][ky][kx][in]`
-//! rather than the file's `[out][in][ky][kx]`. The implicit-GEMM convolution
-//! reduces over `tap * channels + channel`, so channels-last is what makes its
-//! four-element loads contiguous. The shape it reports is unchanged, because
-//! the shape is what the operation checks its dimensions against; only the
-//! order of the values behind it moves. `krea2_ops::Ops::conv` is the only
-//! reader, and it takes the matching path for every 3x3.
+//! BF16 values are uploaded directly; F32 values retain a float32 copy and gain a
+//! bf16 copy. Scaled fp8 values are dequantized to bf16. Single-image causal
+//! convolutions use the last temporal tap. Packed 3×3 weights use `[out, ky, kx, in]`
+//! values with logical `[out, in, ky, kx]` shapes; the layout travels with the weight.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -123,10 +113,7 @@ impl Weights {
             let base = storage.ptr().offset(item.offset);
             let staged = stage(&item.dtype, tensor.bytes, item)?;
             let bytes = staged.as_deref().unwrap_or(&tensor.bytes[..item.bytes]);
-            // Every 3x3 convolution, not only the ones stage() touched: three
-            // of the decoder's are stored four-dimensional, with no temporal
-            // tap to reduce, so they would otherwise reach the device in the
-            // file's order while the kernel read them as channels-last.
+            // Repack both ordinary 4D and reduced causal 5D convolutions.
             let element = if item.dtype == "F32" { 4 } else { 2 };
             let packed = (is_square_convolution(&item.shape, 3)
                 && krea2_ops::pack_convolutions())
@@ -135,8 +122,7 @@ impl Weights {
                 true => krea2_ops::Layout::ChannelsLast,
                 false => krea2_ops::Layout::RowMajor,
             };
-            // Everything below reads the values as they are on the device, so
-            // it has to be the packed ones where there are any.
+            // The F32 and BF16 copies must use the same packed layout.
             let bytes = packed.as_deref().unwrap_or(bytes);
             device().copy_from_host(base, bytes)?;
             let (bf16, holder) = if item.dtype == "F32" {

@@ -1,11 +1,6 @@
-//! The component oracle harness: `<checkpoint> <directory>`.
-//!
-//! Reads `text.bin` and `hidden.bin` as float32, writes `condition.bin`,
-//! `temb.bin`, `mod.bin`, `block_mod.bin` and `final.bin` the same way, so the
-//! Python regression tests can compare each stage of the graph against Torch —
-//! and so this build can be compared against the C++ one file by file.
-//!
-//! Not part of the inference API.
+//! Component test harness: `<checkpoint> <directory>`.
+//! Reads float32 `text.bin` and `hidden.bin`; writes conditioning, time embedding,
+//! modulation and final-layer outputs for comparison with reference implementations.
 use std::path::{Path, PathBuf};
 
 use hrx::device;

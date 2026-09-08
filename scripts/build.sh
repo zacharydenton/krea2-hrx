@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Everything this repository builds. Rust and the Loom kernels; no C++.
+# Build and stage the workspace binaries, libraries and C headers.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 if ! command -v cargo > /dev/null; then

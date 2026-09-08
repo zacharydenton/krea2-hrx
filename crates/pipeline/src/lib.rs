@@ -1,9 +1,6 @@
-//! Krea 2 end to end: prompt in, RGB out.
-//!
-//! This is the C++ `native_pipeline.cpp` — the graph in `krea2-models`, the
-//! blocks in `krea2-session`, and the sampler that drives them. One image is
-//! one `generate`; the models stay resident and the block session is rebuilt
-//! only when the sequence length changes, which is when the image size does.
+//! Krea 2 generation from prompts to RGB.
+//! Models remain resident across calls. A block session is rebuilt when the total
+//! text/image sequence length changes.
 #![deny(unsafe_code)]
 
 pub mod noise;

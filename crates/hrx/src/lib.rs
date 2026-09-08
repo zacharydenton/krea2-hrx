@@ -1,14 +1,10 @@
-//! gfx1151 dispatch through the public HRX C API. No HIP, no GPU math library.
+//! gfx1151 dispatch through the public HRX C API.
 //!
-//! One process-wide [`Device`]: one gfx1151 device, one ordered stream, and a
-//! registry of every live allocation. Kernels are dispatched with custom direct
-//! arguments and an execution barrier after each launch, so operations are
-//! ordered without a host synchronization between them.
-//!
-//! Device addresses are handed out as [`DevicePtr`], a `Copy` address that is
-//! never dereferenced on the host. Offsetting one stays legal, and the registry
-//! resolves any address inside an allocation back to (buffer, offset) at
-//! dispatch time — which is what lets tensors be views into one big allocation.
+//! A process-wide [`Device`] owns an ordered stream and a registry of live
+//! allocations. Execution barriers order dispatches and copies; host transfers
+//! synchronize. [`DevicePtr`] values are device addresses, never host pointers.
+//! Copy operations resolve allocation spans through the registry; kernel callers
+//! must ensure their pointer arguments and shapes describe valid buffers.
 pub mod sys;
 
 mod args;
@@ -19,8 +15,7 @@ pub use args::Args;
 pub use device::{device, try_device, Buffer, Device, DevicePtr};
 pub use kernel::Kernel;
 
-/// Anything libhrx or this crate rejects. The message is HRX's own where there
-/// is one, so failures read the same as they did from the C++ host.
+/// An HRX or adapter error, retaining the HRX message when available.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
 

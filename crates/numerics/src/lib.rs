@@ -1,11 +1,7 @@
-//! The host-side number formats: bf16 as the residual stream and the weights
-//! use it, and the fp8 E4M3 the text encoder's `_scaled` checkpoints store.
+//! Host-side bf16 and fp8 E4M3 conversions.
 //!
-//! There are deliberately **two** float-to-bf16 conversions here, because the
-//! C++ host had two and they are not interchangeable. Both round to nearest
-//! with ties to even for finite values; they differ only on NaN, and the
-//! difference reaches the weights, so collapsing them would quietly change what
-//! the model runs on.
+//! Activation and checkpoint conversions both round finite values to nearest,
+//! ties to even, but preserve distinct NaN handling for numerical compatibility.
 #![forbid(unsafe_code)]
 
 /// bf16 bits: the top half of an f32, rounded.
@@ -18,8 +14,7 @@ pub fn to_f32(bits: Bits) -> f32 {
 
 /// f32 → bf16, round to nearest even, **quieting NaN**.
 ///
-/// This is the C++ `struct B`, used for the residual stream, activations and
-/// every intermediate the pipeline rounds. A NaN stays a NaN.
+/// Used for activations and intermediate pipeline values; preserves NaNs.
 pub fn from_f32(value: f32) -> Bits {
     let u = value.to_bits();
     if (u & 0x7fff_ffff) > 0x7f80_0000 {
@@ -32,11 +27,9 @@ pub fn from_f32(value: f32) -> Bits {
 
 /// f32 → bf16, round to nearest even, **without the NaN branch**.
 ///
-/// This is the C++ `float_to_bf16`, which converts float32 checkpoint tensors
-/// and dequantised fp8 rows. On a NaN the rounding carry can reach the
-/// exponent: `0x7FFF_FFFF` becomes `0x8000`, negative zero. That is the
-/// behaviour the weights were converted with, so it is preserved rather than
-/// fixed; no finite value is affected.
+/// Used for checkpoint conversion and fp8 dequantization. The rounding carry
+/// can change a NaN's exponent: `0x7FFF_FFFF` becomes negative zero (`0x8000`).
+/// This behavior is retained for checkpoint compatibility.
 pub fn from_f32_carrying(value: f32) -> Bits {
     let u = value.to_bits();
     ((u + 0x7fff + ((u >> 16) & 1)) >> 16) as Bits

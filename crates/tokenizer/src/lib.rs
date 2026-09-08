@@ -1,13 +1,9 @@
-//! Qwen3-VL's tokenizer, and Krea 2's prompt template.
-//!
-//! The tokenizer file is HuggingFace's own format, so this is the `tokenizers`
-//! crate reading `assets/tokenizer.json`: the NFC normalization and the
-//! byte-level pre-tokenizer come from the file rather than from code here,
-//! which is why 5,000 lines of hand-written Unicode tables go away with it.
-//! What is ours is the template, the truncation and the input limit.
+//! Qwen3-VL tokenization and Krea 2's prompt template.
+//! The `tokenizers` crate applies the file's normalizer and pre-tokenizer;
+//! this module adds templating, truncation and an input-byte limit.
 use tokenizers::Tokenizer as Inner;
 
-/// The tokenizer file, in the library, as it was in the C++ host.
+/// Embedded Qwen tokenizer configuration; see `assets/README.md` for attribution.
 pub const EMBEDDED: &[u8] = include_bytes!("../../../assets/tokenizer.json");
 
 /// The longest prompt this accepts, in UTF-8 bytes.

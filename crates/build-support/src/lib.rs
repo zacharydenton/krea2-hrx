@@ -1,17 +1,10 @@
-//! Where `libhrx.so` lives, decided once for every build script that needs it.
-//!
-//! Six of them used to assume the crate sat in a checkout and reach for
-//! `<repo>/build/runtime`. That is true for a `cargo build` here and false for
-//! a `cargo install`, which unpacks the crate under `~/.cargo`, so the binary
-//! failed to link. The directory is looked for now rather than assumed.
+//! Shared runtime-library discovery and linker search paths for build scripts.
 use std::path::{Path, PathBuf};
 
 /// The environment variable that names the runtime directory outright.
 pub const RUNTIME: &str = "KREA2_RUNTIME";
 
-/// Everything the answer depends on. Cargo reruns a build script only when a
-/// variable it was told about changes, so a cache moved from under a built
-/// binary would otherwise leave a stale RUNPATH pointing at the old one.
+/// Environment inputs that invalidate cached linker search paths.
 const WATCHED: [&str; 3] = [RUNTIME, "XDG_CACHE_HOME", "HOME"];
 
 /// The directory holding `libhrx.so`, in the order a build should prefer:
@@ -19,11 +12,10 @@ const WATCHED: [&str; 3] = [RUNTIME, "XDG_CACHE_HOME", "HOME"];
 /// 1. `KREA2_RUNTIME`, which is the answer for a packager or a developer with
 ///    their own HRX build;
 /// 2. the repository's `build/runtime`, when the crate is being built in one;
-/// 3. `$XDG_CACHE_HOME/krea2-loom/runtime`, where an installed build keeps the
-///    library it fetched.
+/// 3. `$XDG_CACHE_HOME/krea2-loom/runtime`, for an optional installed library.
 ///
-/// The first that exists wins, and the choice is printed so a build that later
-/// fails to link says where it looked. `None` means none of them is there.
+/// Selects the first directory containing `libhrx.so`, falling back to the
+/// checkout's runtime directory when no library is found.
 pub fn runtime_directory() -> Option<PathBuf> {
     for name in WATCHED {
         println!("cargo:rerun-if-env-changed={name}");
@@ -33,9 +25,7 @@ pub fn runtime_directory() -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    // Nothing has it. Fall back to the repository's directory so an in-tree
-    // build that has not run scripts/runtime.sh yet gets the familiar path in
-    // its linker error rather than a bare "cannot find -lhrx".
+    // Preserve the checkout path in linker diagnostics before runtime staging.
     in_repository()
 }
 
@@ -50,14 +40,14 @@ fn candidates() -> Vec<PathBuf> {
 }
 
 /// `<repo>/build/runtime`, when this crate is being built inside the checkout.
-/// A crate unpacked by `cargo install` has no such ancestor.
+/// Returns None when no ancestor contains the kernel sources.
 fn in_repository() -> Option<PathBuf> {
     let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
     let root = Path::new(&manifest).ancestors().find(|path| path.join("kernels").is_dir())?;
     Some(root.join("build/runtime"))
 }
 
-/// Where an installed build keeps the runtime it fetched.
+/// Optional runtime installation in the user's cache.
 pub fn cache_directory() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
@@ -66,7 +56,7 @@ pub fn cache_directory() -> Option<PathBuf> {
 }
 
 /// The rpath entries a binary or cdylib needs to find `libhrx.so` at run time:
-/// wherever it was linked from, the cache an installed build fetches into, and
+/// the selected library directory, the user's runtime cache, and
 /// a `runtime/` directory beside the artifact for a self-contained deployment.
 pub fn emit_rpath() {
     let mut emitted = Vec::new();

@@ -31,7 +31,7 @@ def compile_one(src: str, root: str, out: Path, cfg: dict) -> None:
         raise RuntimeError(f"{src}: {r.stderr.strip()[:600]}")
 
 
-# The GEMM launch shape rules, mirrored from host/gemm_shape.h; the launch metadata
+# The GEMM launch shape rules, shared with crates/loom/src/shape.rs; the launch metadata
 # records their results and the session rejects a bundle that disagrees with its own.
 WIDE_TILE_TOKENS = 2048
 
@@ -81,7 +81,7 @@ def fp16_query_tiles(tokens):
 
 def build(tokens: int, bits: int = 4) -> Path:
     """Return a complete, immutable kernel bundle matching the current sources and configuration.
-    bits: the GEMM operand width the weights were exported for (build/weights/config.json)."""
+    bits: the checkpoint's GEMM operand width."""
     if not 16 <= tokens <= 16896:
         raise ValueError("tokens must be 16..16896")
     if bits not in (4, 8):

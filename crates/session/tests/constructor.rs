@@ -1,10 +1,5 @@
-//! What a session must reject, and must reject before it touches the GPU.
-//!
-//! The C++ proved "before the GPU" by wrapping the three HRX entry points with
-//! `-Wl,--wrap` and counting. Rust does not need the linker for it: this test
-//! never opens the device itself, so if any rejection path did, the HSA
-//! provider would appear in the process map. That is the same assertion with
-//! nothing to keep in step.
+//! Invalid constructors must fail before initializing the GPU.
+//! Tests inspect process mappings to check that the HSA provider was not loaded.
 use std::path::{Path, PathBuf};
 
 use krea2_session::{Error, Session};

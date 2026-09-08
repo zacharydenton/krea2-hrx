@@ -1,9 +1,5 @@
-//! A memory-mapped safetensors file.
-//!
-//! The format's own crate parses and validates the header; this adds the
-//! mapping and an index of where each tensor's bytes are, so a tensor borrows
-//! from the file it came from and cannot outlive it. The C++ handed out bare
-//! pointers into the mapping and relied on discipline instead.
+//! Memory-mapped safetensors with validated headers and indexed tensor spans.
+//! Tensor views borrow from the mapping.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -90,9 +86,8 @@ impl Checkpoint {
         }
         let file = std::fs::File::open(path)
             .map_err(|e| Error(format!("cannot open {}: {e}", path.display())))?;
-        // Safety: mapping a file is unsafe because another process truncating
-        // it underneath us is undefined; the C++ host mapped the checkpoint the
-        // same way, and this is a read-only model file.
+        // Safety: the checkpoint must not be modified or truncated while mapped.
+        // Model files are opened read-only and expected to remain immutable.
         #[allow(unsafe_code)]
         let map = unsafe { Mmap::map(&file) }
             .map_err(|e| Error(format!("cannot map {}: {e}", path.display())))?;

@@ -1,19 +1,7 @@
-//! Finding ComfyUI's three files.
+//! Model discovery from local ComfyUI directories and the Hugging Face cache.
 //!
-//! A local models directory first — `<models>/diffusion_models/<checkpoint>`
-//! beside `<models>/text_encoders/qwen3vl_4b_{bf16,fp8_scaled}.safetensors` and
-//! `<models>/vae/qwen_image_vae.safetensors` — and then the Hugging Face hub,
-//! whose Krea 2 repository has that same layout. So a checkpoint can be named
-//! by path or just by name, and a file another tool already downloaded is used
-//! where it lies.
-//!
-//! The hub is the last place looked, never the first: a checkpoint named rather
-//! than pathed is still found in the local models directory if it is there.
-//!
-//! The tokenizer comes from the text encoder's own repository rather than
-//! ComfyUI's, which does not carry one. It is seven megabytes, so it is fetched
-//! whenever the network is allowed; the copy compiled into `krea2-tokenizer` is
-//! the fallback, and a test pins the two as identical.
+//! Names search local models before the hub. Explicit paths require local weight
+//! files. The Qwen tokenizer is resolved separately, with an embedded fallback.
 use std::path::{Path, PathBuf};
 
 use crate::hub;
@@ -92,11 +80,7 @@ impl<'a> Request<'a> {
     }
 
     pub fn resolve(self) -> Result<Files> {
-        // The checkpoint as given, then the same name inside the models
-        // directory, and only then the hub. Naming a model rather than pathing
-        // it is how you ask for it to be fetched -- but not if it is already
-        // here, and not from a directory you named, where a missing file is an
-        // error rather than an eight-gigabyte download nobody asked for.
+        // Only model names permit hub fallback; missing explicit paths are errors.
         let beside = |path: &Path| path.parent().and_then(Path::parent).map(Path::to_path_buf);
         let (checkpoint, root) =
             match std::path::absolute(self.checkpoint).ok().filter(|path| path.is_file()) {
@@ -147,8 +131,7 @@ impl<'a> Request<'a> {
                 .map(|name| name.to_string_lossy().to_lowercase().contains("raw"))
                 .unwrap_or(false)
         });
-        // Small, and the same for every checkpoint: worth fetching, and no
-        // loss when it cannot be.
+        // Fall back to the embedded tokenizer when the hub is unavailable.
         let tokenizer = hub::file(hub::TOKENIZER_REPO, "tokenizer.json", self.offline).ok();
         Ok(Files { checkpoint, text_encoder, vae, tokenizer, distilled })
     }

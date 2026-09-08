@@ -1,8 +1,5 @@
-//! The auxiliary kernel cache: one HSACO per (source, configuration).
-//!
-//! Keys, paths and the compiler command line match the C++ host's exactly, so a
-//! cache populated by either implementation is usable by the other — which is
-//! also how the port is checked: a full run must add no new entries.
+//! Auxiliary kernel cache, keyed by source and configuration.
+//! Compilation is locked across processes; artifact hashes are verified on load.
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;

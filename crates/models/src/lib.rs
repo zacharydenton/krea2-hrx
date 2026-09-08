@@ -1,8 +1,5 @@
-//! The models around the 28 blocks: ComfyUI's text encoder and VAE, their
-//! weights, and the graph that runs them.
-//!
-//! The blocks are `krea2-session`; everything here is what feeds them and what
-//! turns their output back into pixels.
+//! Model discovery, dense weight loading, text encoder and VAE graphs.
+//! Transformer block execution is provided by `krea2-session`.
 #![deny(unsafe_code)]
 
 pub mod files;

@@ -6,6 +6,11 @@ description = "Prompt to image on the Radeon 8060S"
 license = "MIT"
 publish = false
 
+[[bin]]
+name = "krea2"
+path = "src/main.rs"
+doc = false
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }

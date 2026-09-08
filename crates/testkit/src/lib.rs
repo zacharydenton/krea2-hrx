@@ -1,15 +1,11 @@
-//! `build/libnative_ops_test.so`: one auxiliary Loom kernel at a time.
-//!
-//! `tests/test_native_ops.py` drives this through ctypes to check each kernel
-//! against a NumPy or Torch oracle, which is the only reason these entry points
-//! exist — nothing in the runtime calls them.
+//! Auxiliary-kernel test C API in `libnative_ops_test.so`.
+//! Used by `tests/test_native_ops.py` for NumPy and Torch oracle comparisons.
 use std::ffi::{c_char, c_int, c_uint, c_void, CStr};
 
 use hrx::{device, Args, Buffer, DevicePtr};
 use loom::{auxiliary_kernel, Config};
 
-/// Allocations are leaked into this table so a raw address can be freed later;
-/// the C++ handed out `hrx` addresses the same way.
+/// Retain allocations until the C caller frees their raw addresses.
 static LIVE: std::sync::Mutex<Option<std::collections::HashMap<usize, Buffer>>> =
     std::sync::Mutex::new(None);
 

@@ -1,13 +1,8 @@
-//! Compiling one block bundle: the nine or ten kernels a sequence length needs.
+//! Transformer kernel bundles with launch metadata and artifact hashes.
 //!
-//! A bundle is a directory of HSACOs plus `launch.txt` (the shape the session
-//! checks against) and `manifest.json` (each artifact's hash). Its name is a
-//! digest over every source, symbol and configuration that went into it, so a
-//! bundle is immutable: if the directory exists, it is the right one, and it is
-//! usable on a machine with no compiler at all.
-//!
-//! `scripts/build_kernels.py` writes the same directories from the same rules;
-//! either can populate a cache the other reads.
+//! Each bundle is keyed by its sources, configurations and compiler identity.
+//! `scripts/build_kernels.py` uses the same format and shape rules. Verified
+//! cached bundles can be loaded without a compiler.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 

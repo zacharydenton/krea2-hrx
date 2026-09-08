@@ -50,9 +50,7 @@ step "generated kernels match their generators" bash -c '
 step "build"                      ./scripts/build.sh
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
 step "Rust formatting and lints" bash -c 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings'
-# Covers the HRX dispatch and dependency audit, the checkpoint and constructor
-# regressions, and the softmax shared-memory repeat, all of which were separate
-# C++ programs.
+# Covers HRX dispatch, dependencies, checkpoints, constructors and softmax repeats.
 step "Rust workspace tests" cargo test --quiet --workspace
 step "CPU trajectory quality gate" .venv/bin/python tests/test_quality_gate.py
 step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py

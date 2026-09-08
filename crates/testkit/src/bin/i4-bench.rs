@@ -229,8 +229,7 @@ fn scales(random: &mut Xorshift, count: usize, signed: bool) -> Result<Buffer, h
     Ok(buffer)
 }
 
-/// A seeded stream. The C++ used `std::mt19937`; nothing here depends on the
-/// exact sequence, only on it being the same for both sides.
+/// Seeded inputs shared by the kernel and reference implementation.
 struct Xorshift(u64);
 
 impl Xorshift {

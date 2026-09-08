@@ -1,7 +1,4 @@
-// The kernels ship inside the library: this emits one table of (name, source)
-// per directory, read straight from the .loom files the generators write. It
-// replaces host/native_sources.h (16k committed lines) and the block_sources.h
-// that scripts/build_common.sh used to generate with shell.
+// Embed a table of (name, source) pairs from each generated .loom directory.
 use std::fmt::Write as _;
 use std::path::Path;
 

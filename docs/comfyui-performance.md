@@ -1,106 +1,69 @@
-# Local ComfyUI comparison
+# ComfyUI comparison
 
-## 2026-09-07, idle box
+## Latest measurements
 
-Same settings as below (1024x1024, eight Euler steps, CFG 1, seed 0, `a red fox in the
-snow`), nothing else on the GPU, the two backends alternated: ComfyUI three images, native
-three, ComfyUI two, native two. ComfyUI ran through `toolbox run -c amd-strix-halo-comfyui`
-(the container's runtime had to be restarted first). Native was the exported W4A4 bundle at
-commit `5eeb51e` (padded down pitch, 256x128 tiles, head-major attention operands); since
-then the runtime reads ComfyUI's checkpoints directly and the W8A8 row below is the
-like-for-like path.
+Measured on one idle Radeon 8060S on 2026-09-08. Both backends used Krea 2 Turbo
+int8 ConvRot, 1024×1024, eight Euler steps, batch one, seed 0 and prompt
+`a red fox in the snow`. ComfyUI used CFG 1; the native Turbo path was unguided.
 
-| Backend | first image | warm images | warm median |
-| --- | ---: | ---: | ---: |
-| ComfyUI INT8 ConvRot | 57.32 s (84.20 s in the second series, after DynamicVRAM eviction) | 35.54, 36.08, 36.92 s | 36.1 s |
-| Native Loom W8A8 (the same int8 rows, later the same day) | 28.44 s | 26.96, 27.72 s | 27.7 s |
-| Native Loom W4A4 | 26.49 s (20.37 s in the second series) | 17.98, 17.13, 16.62 s | 17.1 s |
+| Warm timing | ComfyUI INT8 ConvRot | krea2-loom W8A8 |
+| --- | ---: | ---: |
+| Generation median | 36.31 s | 27.30 s |
+| Denoising | 34.52 s | About 24 s |
+| VAE decode | 0.652 s | 0.586 s |
 
-ComfyUI warm stages: text 0.31-0.56 s, denoising 34.40-35.70 s, VAE 0.66 s. Native warm
-stages (from `KREA2_NATIVE_PROFILE=1`): text encoding and fusion 0.17 s, eight forwards
-about 13 s, tiled VAE decode 3.2 s. The transformer is 2.7x faster here; the VAE decode is
-5x slower than ComfyUI's untiled bf16 decoder and is now the largest gap to close. Every
-run of each backend repeated its RGB hash (`fe1c9792…` ComfyUI, `65507120…` native).
-Raw lines: `docs/benchmarks/comfyui-2026-09-07.txt`; logs under
-`build/comfy-comparison-2026-09-07/`.
+Warm generation samples were 36.83 and 35.80 s for ComfyUI, and 27.30, 27.13
+and 28.06 s for krea2-loom. The generation ratio is 1.33× on these samples.
+The [VAE report](vae-performance.md) describes the decoder change.
+September 8 samples are recorded in commit `0a8651f`; separate machine-readable
+logs were not committed. [September 7 raw logs](benchmarks/comfyui-2026-09-07.txt)
+and [W8A8 results](benchmarks/w8a8-2026-09-07.txt) are historical baselines.
 
-Reproduction:
+## What is being compared
 
-```sh
-toolbox run -c amd-strix-halo-comfyui bash -c 'cd ~/code/ComfyUI && \
-  PYTHONPATH=/home/zach/code/krea2-loom/build/comfy-bench-deps \
-  /opt/venv/bin/python /home/zach/code/krea2-loom/tools/bench_comfyui.py --runs 3'
-source scripts/env.sh
-env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE .venv/bin/python tools/bench_native.py \
-  --model ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors --runs 3
-```
+ComfyUI loads the checkpoint through its own APIs, using bf16 transformer
+compute, PyTorch attention, Comfy Kitchen GEMMs and DynamicVRAM. The native
+runtime uses the same int8 checkpoint rows with per-token int8 activations,
+fp16 attention and tiled VAE decoding. Model loading and kernel warmup are
+outside warm timings; text encoding and decode run on every iteration.
 
-## 2026-09-05, contended box
+The timers are not identical: the ComfyUI timer ends after GPU decode, before
+RGB8 conversion and download; the native timer includes RGB8 output. Both
+exclude PNG encoding and UI/server overhead. ComfyUI's reported Torch memory
+peak excludes DynamicVRAM allocations and is not a total-memory comparison.
 
-The installed ComfyUI INT8 setup averaged **105.74 s/image**, versus **31.88 s**
-for the current native Loom runtime: **3.32× throughput** on the two measured
-warm samples. A separate video-generation job was active on the GPU throughout
-these sequential benchmark batches. Loom's samples varied substantially, so this
-is a provisional local comparison, not an isolated hardware speedup claim.
+Matching seeds do not produce matching noise across backends. Repeated RGB
+checksums establish repeatability within each backend, not image equivalence.
+For quality comparisons, supply the same initial latents, conditioning and
+schedule. See `tools/comfy_step.py`, `tools/compare_comfy.py` and
+`tools/compare_comfy_steps.py` for stage replay, or `tools/compare_web.py` for
+shared-noise image inspection.
 
-| Backend | First image | Warm 1 | Warm 2 | Warm mean |
-| --- | ---: | ---: | ---: | ---: |
-| ComfyUI INT8 ConvRot | 118.73 s | 105.85 s | 105.62 s | 105.74 s |
-| Native Loom INT4 | 40.09 s | 20.82 s | 42.94 s | 31.88 s |
+## Reproduce
 
-Settings: 1024×1024, eight Euler steps, CFG 1, batch one, prompt
-`a red fox in the snow`, seed 0. Native seed 0 and ComfyUI seed 0 do not produce
-identical initial noise. Precision, implementation and sampler rounding differ;
-this measures performance and does not establish image-quality equivalence.
-All three outputs within each backend had identical RGB checksums.
-
-ComfyUI uses `/home/zach/code/ComfyUI` at `250b2e95`, with its default
-DynamicVRAM setup, PyTorch attention and automatic HIP Comfy Kitchen operations.
-The local model directory is `/home/zach/comfy-models` (a symlink into `/mnt/usb`);
-`/home/zach/comfyui-models` was not present. Model files:
-
-- `diffusion_models/krea2_turbo_int8_convrot.safetensors`
-- `text_encoders/qwen3vl_4b_fp8_scaled.safetensors`
-- `vae/qwen_image_vae.safetensors`
-
-ComfyUI uses bf16 DiT compute, fp16 text compute and bf16 VAE compute. Its sampler
-is `euler` with the standard `simple` schedule and the model's 1.15 shift. Loom
-uses its fixed smoothed INT4-QK/fp16-PV attention and W4A4 block projections,
-with the corrected scheduler and resident weight/modulation paths.
-
-The ComfyUI benchmark invokes the standard loader, encoder, sampler and VAE APIs
-directly. It re-executes inference every time, excluding server/UI, previews,
-custom nodes and PNG encoding. It includes text encoding on each call. ComfyUI
-warm stage means were 1.71 s text, 100.43 s denoising and 3.59 s VAE. With cached
-text conditioning, its sampling-plus-decoding mean would be 104.02 s. ComfyUI's
-last float-to-RGB8 conversion is outside its timer; the native C-API timer includes
-RGB8 output. Torch's reported allocation peak excludes DynamicVRAM allocations
-and must not be used as a total-memory comparison.
-
-Initialization was 0.94 s for ComfyUI and 10.69 s for Loom. These are not equivalent:
-ComfyUI defers most weight loading until the first image; Loom loads eagerly.
-Including setup, the first completed images took approximately 119.68 s and
-50.78 s respectively. Kernel/compiler and OS caches were not cleared.
-
-ComfyUI ran in the existing `amd-strix-halo-comfyui` toolbox with PyTorch
-`2.14.0a0+rocm7.15.0a20260721`. The toolbox had comfy-aimdo 0.4.15; the checkout
-requires 0.5.2. Exact requirement versions were installed with `--no-deps` into
-`build/comfy-bench-deps`, leaving the existing installation unchanged. The
-benchmark enabled checkpoint `--disable-mmap`, as recommended by the local
-Strix Halo toolbox documentation. The ComfyUI checkout was not edited. The
-previously stopped toolbox was stopped again after measurement.
-
-Reproduction:
+Run the ComfyUI command in an environment with that checkout's dependencies and
+ROCm PyTorch. Replace the paths with your installations:
 
 ```sh
-# Inside the ComfyUI toolbox, after making its dependencies available:
-PYTHONPATH=/home/zach/code/krea2-loom/build/comfy-bench-deps \
-  /opt/venv/bin/python /home/zach/code/krea2-loom/tools/bench_comfyui.py
-
-# On the host, after the ComfyUI benchmark exits:
-source scripts/env.sh
-env -u LD_LIBRARY_PATH -u KREA2_NATIVE_PROFILE \
-  python3 tools/bench_native.py --model ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors --runs 3
+python /path/to/krea2-loom/tools/bench_comfyui.py \
+  --comfy /path/to/ComfyUI --models /path/to/comfy-models \
+  --size 1024 --steps 8 --runs 4 --output-dir /path/to/comfy-results
 ```
 
-Raw logs and machine-readable results are in `build/comfy-comparison/`.
+From the krea2-loom checkout:
+
+```sh
+source scripts/env.sh
+scripts/build.sh
+.venv/bin/python tools/bench_native.py \
+  --model /path/to/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors \
+  --size 1024 --steps 8 --runs 4
+```
+
+The ComfyUI harness bypasses graph-output caching and supports `--width` and
+`--height` for rectangles. It saves initial noise, the latest PNG and metadata
+when `--output-dir` is supplied. Redirect stdout to retain every timing sample.
+
+For a new comparison, record revisions and runtime versions, disable profiling,
+exclude run zero, alternate backends and keep the GPU idle. Report sample counts
+and timer differences with any speedup claim.

@@ -1,12 +1,8 @@
-//! ComfyUI's int8 ConvRot checkpoint, read as it is.
+//! Safetensors parsing and device upload plans for ConvRot block weights.
 //!
-//! Nothing here is converted or re-quantized: the file is mapped read-only and
-//! this crate works out *where every row goes* on the device. The GEMMs want
-//! wq, wk, wv and the attention gate as one operand, the MLP gate and up rows
-//! interleaved in 16-row groups for the SwiGLU epilogue, and every row at the
-//! padded pitch its kernel was compiled for. The result is a [`Plan`]: a list
-//! of destinations and the source rows that fill them, which the session
-//! uploads without ever materializing the whole thing in host memory.
+//! [`Plan`] arranges Q/K/V/gate rows, interleaves MLP gate/up rows in groups of 16,
+//! and applies the operand pitches required by the compiled GEMMs. Uploads stream
+//! from the mapped checkpoint without materializing a full host copy.
 // Mapping the checkpoint is the one unsafe operation here; everything else is
 // slices and arithmetic.
 #![deny(unsafe_code)]

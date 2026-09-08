@@ -1,8 +1,5 @@
-//! `krea2_pipeline_*`: standalone Krea 2 inference behind its C ABI.
-//!
-//! The same boundary discipline as the block ABI next door — raw pointers into
-//! slices, results into `(code, message)`, a catch so a panic becomes an error
-//! — over `krea2-pipeline` rather than `krea2-session`.
+//! C interface to `krea2-pipeline`, with buffer validation, status reporting and
+//! panic containment.
 use std::ffi::{c_char, c_float, c_int, c_void, CStr};
 use std::path::Path;
 

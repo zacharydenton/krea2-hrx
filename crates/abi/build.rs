@@ -1,5 +1,4 @@
-//! Two things the cdylib needs that cargo will not do on its own: the runtime
-//! rpath, and the C headers for the ABI it exports.
+//! Runtime search paths and generated C headers for the shared library.
 use std::path::{Path, PathBuf};
 
 fn main() {
@@ -7,13 +6,7 @@ fn main() {
     headers();
 }
 
-/// `krea2.h` and `krea2_pipeline.h`, from the sources that export them, so the
-/// declarations cannot drift from the definitions.
-///
-/// They go to OUT_DIR, which is where a build artifact belongs and the only
-/// directory a `cargo install` may write to, and are copied into the
-/// repository's `build/include` as well when there is one -- that is the path
-/// the README and the tools name.
+/// Generates C headers in OUT_DIR and, in a checkout, `build/include`.
 fn headers() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
     for (source, header, guard) in [
@@ -24,8 +17,7 @@ fn headers() {
         let generated = cbindgen::Builder::new()
             .with_src(Path::new(env!("CARGO_MANIFEST_DIR")).join(source))
             .with_language(cbindgen::Language::C)
-            // extern "C" guards, so a C++ translation unit including this
-            // header links against the library rather than mangled names.
+            // Preserve C linkage for C++ callers.
             .with_cpp_compat(true)
             .with_documentation(true)
             .with_include_guard(guard)
@@ -33,16 +25,14 @@ fn headers() {
             .with_sys_include("stddef.h")
             .with_sys_include("stdint.h")
             .with_header(BANNER)
-            // The names C has always seen. The Rust types cannot take them:
-            // `krea2_session` would shadow the crate it wraps.
+            // Keep C handle names distinct from Rust crate names.
             .rename_item("SessionHandle", "krea2_session")
             .rename_item("WeightsHandle", "krea2_weights")
             .rename_item("PipelineHandle", "krea2_pipeline")
             .rename_item("ProgressFn", "krea2_progress")
             .generate();
         match generated {
-            // A missing header is not worth failing a build over: it is
-            // documentation for callers in other languages, not an input.
+            // Header generation failures are warnings; the Rust build can continue.
             Err(error) => println!("cargo:warning=cannot generate {header}: {error}"),
             Ok(bindings) => {
                 bindings.write_to_file(out.join(header));

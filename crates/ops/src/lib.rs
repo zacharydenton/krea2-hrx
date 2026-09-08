@@ -1,9 +1,5 @@
-//! The auxiliary operations the pipeline is built from: everything outside the
-//! 28 blocks, in Loom kernels, driven from here.
-//!
-//! Each call compiles (or finds in the cache) the kernel for its exact shape
-//! and launches it. The shapes are configuration, not arguments, which is why
-//! the cache is keyed by them.
+//! Auxiliary Loom operations for encoding, decoding and sampling.
+//! Kernels specialize on tensor shape and launch geometry and are cached on first use.
 #![deny(unsafe_code)]
 
 pub mod tensor;
@@ -67,14 +63,7 @@ pub enum Norm {
     Group = 2,
 }
 
-/// How a convolution's values are ordered behind its shape.
-///
-/// The shape is `[out][in][ky][kx]` either way; this says whether the values
-/// behind it are in that order or with the input channels innermost. Nothing
-/// about a tensor's dimensions reveals which, so it travels with the weight —
-/// the alternative is a convention shared between the loader and the operation,
-/// which is exactly how three of the decoder's convolutions came to be read in
-/// an order they were never written in.
+/// Storage order for convolution weights with logical `[out, in, ky, kx]` shapes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Layout {
     /// The file's order, `[out][in][ky][kx]`. Also every non-convolution.
@@ -84,11 +73,9 @@ pub enum Layout {
     ChannelsLast,
 }
 
-/// A weight already on the device: bf16 values, and the shape they came with.
-///
-/// The norms want their scales in float32. A checkpoint that kept a tensor in
-/// float32 supplies them; for one stored as bf16 the upcast is made on first
-/// use and kept, which is what the C++ `Weight::as_f32` did behind `mutable`.
+/// Device weight with bf16 values, a logical shape and a storage layout.
+/// Float32 normalization scales are retained from the checkpoint or upcast
+/// once on first use.
 pub struct Weight {
     /// bf16 values: what every kernel but the norms reads.
     pub values: DevicePtr,
@@ -161,9 +148,7 @@ impl Weight {
 /// The operations, over one buffer pool.
 pub struct Ops {
     pool: Arc<Pool>,
-    /// The `loom-compile` to spawn for an auxiliary kernel this has not seen.
-    /// Carried rather than global, so two runtimes in one process cannot
-    /// silently reconfigure each other's compiler.
+    /// Compiler override for this operation set's auxiliary kernels.
     compiler: Option<String>,
 }
 
@@ -448,8 +433,9 @@ impl Ops {
         Ok(out)
     }
 
-    /// A square, odd-sized, stride-one, same-padded convolution as im2col and
-    /// a GEMM. A 1x1 kernel is the GEMM alone.
+    /// Square, odd-sized, stride-one convolution with same padding.
+    /// Packed 3×3 weights use implicit GEMM; row-major weights use im2col.
+    /// A 1×1 kernel uses GEMM directly.
     pub fn conv(
         &self,
         x: &Tensor,
@@ -502,14 +488,8 @@ impl Ops {
         self.linear(&patches, w, bias)
     }
 
-    /// A 3x3 convolution as a GEMM that addresses the image directly.
-    ///
-    /// The patch matrix im2col would build is the dominant cost of a
-    /// convolution at high resolution -- 113 MB written and read back for one
-    /// 256x256 layer of 96 channels -- and none of it is information the GEMM
-    /// could not work out from the pixel and the tap. This is the same kernel
-    /// with that address substituted, so the tiles, the wave layout and the
-    /// accumulator count are unchanged.
+    /// Implicit GEMM over `[out, ky, kx, in]` weights, without a patch buffer.
+    /// Uses the dense GEMM tile rules with tap-major accumulation.
     fn conv3x3(
         &self,
         x: &Tensor,
@@ -530,7 +510,7 @@ impl Ops {
         if let Some(bias) = bias {
             args.ptr(bias);
         }
-        // The same tile rules the GEMM uses, and the same reason for them.
+        // Widen only when the larger tile adds no padded rows or columns.
         let wide = m >= 128 && n >= 64 && m.div_ceil(64).is_multiple_of(2);
         let square = wide && n >= 128 && n.div_ceil(64).is_multiple_of(2) && k >= 128;
         let (tile_m, tile_n) = (if wide { 128 } else { 64 }, if square { 128 } else { 64 });
@@ -651,12 +631,9 @@ impl Ops {
     }
 }
 
-/// Whether a loader should pack 3x3 convolution weights channels-last, and so
-/// whether [`Ops::conv`] takes the implicit-GEMM path for them.
-///
-/// This is the loader's decision alone: the operation reads the layout off the
-/// weight. `KREA2_CONV_IM2COL=1` keeps the file's order and the patch buffer,
-/// which is how the two paths are compared against each other.
+/// Whether loaders pack 3×3 weights for implicit GEMM.
+/// `KREA2_CONV_IM2COL=1` disables packing. Read once per process; dispatch
+/// subsequently follows each weight's layout.
 pub fn pack_convolutions() -> bool {
     static CHOICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CHOICE

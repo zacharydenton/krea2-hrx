@@ -1,420 +1,156 @@
 # krea2-loom
 
-Krea 2 (Turbo and Raw), prompt to image, as a native GPU pipeline in **Loom**, AMD's kernel
-language from [ROCm/hrx-system](https://github.com/ROCm/hrx-system), for the Radeon
-8060S (gfx1151, the Strix Halo APU). It reads ComfyUI's model files as they are: the
-int8 ConvRot checkpoints run as **W8A8** (int8 weights and int8 per-token activations on
-the part's `iu8` WMMA, fp16 attention, a bf16 residual stream rounded where ComfyUI rounds
-it), the text encoder and VAE beside them.
-Every kernel with a tensor in it is Loom; the host is Rust on HRX's public C API. A
-1024x1024 eight-step Turbo image takes about 27 s warm, with no Python, Torch or HIP in
-the loop. The int4 (W4A4) kernel family is in the tree and measured (2x the int8 rate on
-this part), but no checkpoint feeds it: the runtime does not quantize weights itself.
+Krea 2 Turbo and Raw inference on the **Radeon 8060S (gfx1151)**. GPU kernels
+are written in [Loom](https://github.com/ROCm/hrx-system); the Rust host uses
+HRX's C API. The native CLI runs the complete pipeline without Python or PyTorch.
 
-![A cloaked figure at the edge of an obsidian canyon, colossal statues buried in the far
-cliffs, god rays through a lightning storm](docs/images/canyon.png)
+The runtime reads ComfyUI's int8 ConvRot checkpoints directly, using W8A8
+transformer GEMMs, fp16 attention, a Qwen3-VL-4B text encoder and a Qwen-Image
+VAE. Model weights are not included.
 
-*Krea 2 Turbo, 1024x1024, eight steps, seed 7, straight out of `build/krea2`:* `a lone
-figure in a red cloak standing at the edge of a vast obsidian canyon, colossal ancient
-statues half-buried in the far cliffs, storm light breaking through thunderclouds,
-volumetric god rays, cinematic wide shot, epic scale, photorealistic, fine detail`
+![Krea 2 Turbo: a cloaked figure overlooking an obsidian canyon](docs/images/canyon.png)
 
-A sibling of [minimax-h3-loom](https://github.com/zacharydenton/minimax-h3-loom),
-[dinov3-loom](https://github.com/zacharydenton/dinov3-loom) and
-[scrfd-loom](https://github.com/zacharydenton/scrfd-loom).
+*1024×1024, eight steps, seed 7. Prompt: a lone figure in a red cloak standing
+at the edge of a vast obsidian canyon, colossal ancient statues half-buried in
+the far cliffs, storm light breaking through thunderclouds, volumetric god rays,
+cinematic wide shot, epic scale, photorealistic, fine detail.*
 
-## The model
+## Requirements
 
-Krea 2 is a 12.9B single-stream transformer of 28 blocks (hidden 6144, 48 query heads
-and 12 key/value heads of 128, SwiGLU 16384, AdaLN modulation per block from the
-timestep embedding) over one packed sequence of text and image tokens. Qwen3-VL-4B is
-the text encoder and the Qwen-Image VAE the image tokenizer; at 1024x1024 the sequence
-is 4096 image tokens plus the prompt. Two checkpoints share the architecture and this
-runtime serves both: **Turbo**, distilled to eight steps with a fixed timestep shift and
-no guidance, and **Raw**, the undistilled base with a resolution-dependent shift,
-classifier-free guidance (Krea's convention, `cond + g * (cond - uncond)`, 3.5 by
-default) and an optional negative prompt, sampled at 52 steps by default. Raw costs
-two transformer forwards per step, so an image is about thirteen times Turbo's block
-work.
+- Linux with an accessible Radeon 8060S and the amdgpu/KFD driver. Other GPUs
+  are not supported by the current kernels.
+- A Rust toolchain and the native build tools required by its dependencies.
+- `libhrx.so`, `loom-compile`, and a compatible ROCm HSA runtime. Build HRX and
+  Loom from [hrx-system](https://github.com/ROCm/hrx-system).
+- The model files below and enough memory to keep the models and GPU workspace
+  resident. The transformer checkpoint alone is about 13 GB.
 
-## What you get
+Python is needed for kernel generation, reference tests and the optional
+Diffusers integration, not native inference. See the
+[runtime guide](docs/hrx-runtime.md) for library discovery and deployment.
 
-- **`build/krea2`**: the CLI (`cli/`), three hundred lines of argument handling and
-  image output over the `krea2-pipeline` crate. `krea2 -p "a red fox in the snow"` finds
-  ComfyUI's files under `~/comfy-models` and writes `image.png`; the prompt can come from
-  stdin instead, `--images N` walks consecutive seeds, `--attn` picks the attention
-  kernels, and `--negative` / `--guidance` drive Raw with the checkpoint's defaults when
-  omitted. It prints per-step progress with an estimate of the time left. `krea2 --help`
-  has the rest.
-- **`libkrea2.so`**, one library with two C ABIs for any language with FFI.
-  `build/include/krea2_pipeline.h` is the whole pipeline (tokenizer, text encoder,
-  transformer, VAE, `krea2_generate` and `krea2_generate_guided`);
-  `build/include/krea2.h` is the 28 blocks alone, resident per sequence length, for use
-  inside diffusers through [krea2_loom.py](krea2_loom.py) (`tools/pipeline.py --backend
-  loom`). Both headers are build artifacts, generated from the Rust sources by cbindgen;
-  neither is committed.
-- No export, no bundle: the weight files are ComfyUI's, unchanged on disk; the tokenizer
-  and the kernel sources are embedded in the library.
-- The kernels themselves under `kernels/`, generated by the scripts in `tools/gen_*.py`.
+## Install
 
-## Against ComfyUI on the same box
+From this checkout, with `HRX_BUILD` set to your hrx-system build directory:
 
-Measured 2026-09-07 on one Radeon 8060S with nothing else on the GPU, alternating the
-two backends: ComfyUI at `250b2e95` in the `amd-strix-halo-comfyui` toolbox (PyTorch
-2.14 ROCm 7.15, the published `krea2_turbo_int8_convrot` checkpoint at bf16 compute,
-PyTorch attention, Comfy Kitchen GEMMs, DynamicVRAM) through its own loader, sampler and
-VAE APIs, against `build/krea2`'s C API. 1024x1024, eight Euler steps, CFG 1,
-seed 0, `a red fox in the snow`. Every run of each backend produced the same RGB hash.
+```sh
+export HRX_BUILD=/path/to/hrx-system/build
+runtime_dir="${XDG_CACHE_HOME:-$HOME/.cache}/krea2-loom/runtime"
+mkdir -p "$runtime_dir"
+cp "$HRX_BUILD/libhrx/src/libhrx/libhrx.so" "$runtime_dir/libhrx.so.0"
+ln -sfn libhrx.so.0 "$runtime_dir/libhrx.so"
+cp "$HRX_BUILD/loom/src/loom/tools/loom-compile/loom-compile" "$runtime_dir/"
+cargo install --locked --path cli
+```
 
-| | ComfyUI INT8 ConvRot | this runtime (W8A8) |
+The system HSA runtime must be compatible with your HRX build. If you need to
+package a separate provider, use the [checkout build](docs/hrx-runtime.md#checkout-build).
+The first request at a new tensor shape compiles and caches kernels, so it is
+slower than subsequent requests.
+
+## Models
+
+Use the files from [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2)
+in this layout (the default root is `~/comfy-models`):
+
+```text
+comfy-models/
+├── diffusion_models/
+│   ├── krea2_turbo_int8_convrot.safetensors
+│   └── krea2_raw_int8_convrot.safetensors     # optional
+├── text_encoders/
+│   └── qwen3vl_4b_bf16.safetensors
+└── vae/
+    └── qwen_image_vae.safetensors
+```
+
+The `qwen3vl_4b_fp8_scaled.safetensors` text encoder is also supported; bf16 is
+preferred when both are present. An existing ComfyUI models directory works
+without conversion.
+
+To download missing models through the Hugging Face cache, use a model name:
+
+```sh
+krea2 --model krea2_turbo_int8_convrot -p "a red fox in the snow"
+```
+
+Explicit model paths require local weight files. `HF_HUB_OFFLINE=1` disables
+network access, including the optional tokenizer lookup; the embedded tokenizer
+is available offline.
+
+## Generate
+
+```sh
+krea2 -p "a red fox in the snow" --out fox.png
+krea2 --models /path/to/comfy-models -p "a lighthouse at dusk" \
+  --width 768 --height 1024 --seed 7 --out lighthouse.png
+printf '%s\n' "a mountain lake at dawn" | krea2 --checkpoint raw \
+  --negative "blurry" --guidance 3.5 --out lake.png
+```
+
+| Checkpoint | Default steps | Default guidance |
+| --- | ---: | --- |
+| Turbo | 8 | Disabled |
+| Raw | 52 | 3.5, using `cond + g * (cond - uncond)` |
+
+`--steps` overrides the step count. `--images N` uses consecutive seeds and
+numbered output files. Dimensions must be multiples of 16 between 64 and 2048;
+text plus image tokens must fit the 16,896-token limit. PNG output is selected
+by `.png`; other extensions produce binary PPM.
+
+Use `--model`, `--text-encoder` and `--vae` for individual files. The checkpoint
+name selects the sampler unless `--checkpoint` overrides it. `krea2 --help`
+lists all options. `KREA2_NATIVE_PROFILE=1` enables diagnostic stage timings.
+
+## Libraries
+
+A checkout build produces `build/krea2` and `build/libkrea2.so`. The shared
+library exports two C interfaces:
+
+| Generated header | Interface |
+| --- | --- |
+| `build/include/krea2_pipeline.h` | Prompt-to-RGB generation and individual pipeline components |
+| `build/include/krea2.h` | Resident transformer block sessions |
+
+Headers are generated from the Rust sources. See the
+[API and deployment guide](docs/hrx-runtime.md#c-api) for ownership and calling
+conventions. Rust callers can use the workspace crates directly. For Diffusers,
+[krea2_loom.py](krea2_loom.py) provides the block wrapper used by
+`tools/pipeline.py --backend loom`.
+
+## Performance and accuracy
+
+Local measurements on one idle Radeon 8060S, 2026-09-08: 1024×1024 Turbo,
+eight Euler steps, batch one, prompt `a red fox in the snow`.
+
+| Warm median | ComfyUI INT8 ConvRot | krea2-loom W8A8 |
 | --- | ---: | ---: |
-| warm image, prompt to RGB (median of 3) | 36.1 s | 27.7 s (1.3x) |
-| best warm image | 35.5 s | 27.0 s |
-| denoising, eight steps | 34.4-35.7 s | about 24 s |
-| text encoding | 0.3-0.6 s | 0.2 s |
-| VAE decode | 0.66 s | 3.2 s (tiled) |
-| first image of a process | 57.3 s | 28.4 s |
-| image PSNR against the bf16 pipeline, seed 0 | | 26.8 dB (on the earlier kernels) |
-
-Both run the same int8 ConvRot rows from the same file; this runtime feeds them int8
-per-token activations on the `iu8` WMMA instead of dequantizing to bf16, and is 1.3x
-faster per image. (Both backends were re-measured on 2026-09-08 after the decoder
-work below: 36.31 s against 27.30 s, and the VAE line reverses.) The transformer is where it wins; its tiled VAE decode is the stage
-that loses to ComfyUI's untiled bf16 decoder. Native seed 0 and ComfyUI seed 0 do not
-share initial noise, so this measures speed, not image equivalence. Conditions, raw logs
-and the reproduction commands: [docs/comfyui-performance.md](docs/comfyui-performance.md),
-`docs/benchmarks/comfyui-2026-09-07.txt`, `docs/benchmarks/w8a8-2026-09-07.txt`. (The
-int4 kernels reached 16.6 s per image from a rotated-and-requantized export of the bf16
-release, at 18.9 dB; that path is retired with the export, and the numbers stay in
-`docs/notes.md`.)
-
-Two later changes, both measured idle and recorded in
-[docs/vae-performance.md](docs/vae-performance.md). Coalesced convolution
-patches and fused wave normalization took decoding from **1.294 s to 1.038 s**
-with identical RGB bytes. Then the patch buffer went away entirely: a 3x3
-convolution now addresses the image from inside the GEMM instead of writing and
-re-reading an im2col matrix — 113 MB of it per convolution at the decoder's
-largest stage — which takes decoding to **0.586 s**, another **1.82x**, with the
-same maximum error against a float64 oracle as the path it replaces.
-
-Both backends re-measured on 2026-09-08, idle, same prompt, size, step count and
-seed, prompt to RGB:
-
-| | ComfyUI INT8 ConvRot | this runtime (W8A8) |
-| --- | ---: | ---: |
-| total, warm median | 36.31 s | **27.30 s** (1.33x) |
-| denoise | 34.52 s | about 24 s |
+| Generation | 36.31 s | 27.30 s |
 | VAE decode | 0.652 s | 0.586 s |
 
-## Against ComfyUI's arithmetic
+These small local samples are not hardware-wide guarantees. Timer boundaries,
+precision and initial noise differ between backends; speed measurements do not
+establish image equivalence. See [the comparison](docs/comfyui-performance.md)
+and [VAE measurements](docs/vae-performance.md) for methodology and limitations.
 
-The kernels are checked against ComfyUI's own evaluation of the same checkpoint, not only
-against our reference: `tools/comfy_step.py` dumps every block's output, the sampler's
-states and its conditioning from a run inside ComfyUI, and `tools/compare_comfy.py` and
-`tools/compare_comfy_steps.py` replay them here.
+The default fp16 attention has the best measured trajectory agreement among
+the supported modes. Int4/int8 QK attention is opt-in with `--attn i4` or
+`--attn i8`. [Attention documentation](docs/native-attention.md) covers the
+quality tradeoff. Native seeds are repeatable within this backend; use identical
+initial latents for comparisons with Torch.
 
-| replayed on ComfyUI's own input | agreement |
-| --- | --- |
-| each of the 28 blocks, its update | cosine 0.99978 or better (image rows), 0.5-2.1% relative rms |
-| the 28 blocks chained from block 0 | state cosine 0.99997 falling to 0.9977 |
-| the whole transformer, per sampling step | velocity cosine 0.9981 at the first step, 0.9989-0.9999 after |
-| the text encoder against ComfyUI's conditioning | cosine 0.99994, same 11 tokens |
+## Development
 
-That is what int8 GEMMs summing in a different order look like: no block is an outlier.
-The residual stream is bf16 with ComfyUI's three rounding points inside a block, and
-attention is the fp16 kernel because ComfyUI calls PyTorch SDPA in bf16; the int4-QK
-kernel is 5.4 ms faster per block but only reaches cosine 0.995 on the same test.
-Eight steps from ComfyUI's own noise end at final-latent cosine 0.966, and the two decoded
-images are the same fox in the same pose, light and colour, apart in fur and snow detail
-(PSNR 19.4 dB). `docs/notes.md` has the full measurements, including how ComfyUI's returned
-latent has to be un-scaled before an end-to-end comparison means anything.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for builds, tests and benchmark requirements.
 
-## Status
+- [Architecture and numerical contracts](docs/notes.md)
+- [Runtime, caches and deployment](docs/hrx-runtime.md)
+- [Attention kernels](docs/native-attention.md)
+- [VAE performance](docs/vae-performance.md)
+- [ComfyUI comparison](docs/comfyui-performance.md)
 
-Measured on one Radeon 8060S, 1024x1024, eight steps, seed 0, warm session
-(`tools/bench_native.py`, best warm run):
+## License
 
-| | Turbo (8 steps) | Raw (52 steps, guidance 3.5) |
-| --- | ---: | ---: |
-| image, prompt to RGB | 27.0 s | 365 s (104 forwards) |
-| one forward of the 28 blocks (4115 tokens) | 3.3 s | 3.3 s, two per step |
-| VAE decode (tiled) | 3.2 s | 3.2 s |
-| text encoding and fusion | 0.2 s | 0.2 s (prompt and negative) |
-| image PSNR vs the bf16 transformer (seed 0) | 33.7 dB (latent 24.6) | 28.1 dB (latent 18.3), older kernels |
-| 28-block update cosine vs bf16 on the fixture | 0.99910 | 0.9986 |
-
-The Turbo row is `tools/quality_vs_bf16.py`: the same noise, the same text states, the same
-schedule and the same VAE, with the whole transformer -- embeddings, 28 blocks, final layer
--- either Torch bf16 from the release checkpoint or the Loom W8A8 kernels through the C ABI.
-The two pictures are hard to tell apart. It is also what settles the attention default on
-its own merits rather than on agreement with ComfyUI:
-
-| attention | latent PSNR | image PSNR |
-| --- | ---: | ---: |
-| fp16 (the default) | 24.6 dB | 33.7 dB |
-| int8-QK (`KREA2_ATTN_QK=8`) | 22.6 dB | 31.8 dB |
-| int4-QK (`KREA2_ATTN_QK=4`) | 21.6 dB | 31.6 dB |
-| query32 (benchmark experiment, rejected as default) | 17.8 dB | 26.3 dB |
-
-The query32 speedup passed block cosine checks but lost 7.4 dB in the decoded
-eight-step image. The original fp16 kernel remains the default at all lengths.
-Attention changes must also pass the full-trajectory quality gate:
-`scripts/test.sh --quick --quality`, using an archived accepted run in
-`KREA2_QUALITY_BASELINE` (default `build/quality`). It allows at most 0.1 dB loss
-in either latent or image PSNR on identical noise, text states and bf16 reference.
-This fixture catches the observed regression; it is not broad image-quality coverage.
-
-The two smoothed kernels sit together, a decibel apart at most: what costs the picture is
-SageAttention's smoothing and per-token quantization, not the code width.
-
-Where a W4A4 forward goes (`tests/test_blocks.py --profile`; in W8A8 the four GEMMs are 80%
-of a 3.3 s forward at 35-39 TOPS and attention is unchanged):
-
-| stage | share |
-| --- | ---: |
-| gate/up GEMM with the SwiGLU product in the epilogue | 28% |
-| attention | 22% (int4-QK; fp16 costs 5.4 ms more per block) |
-| qkv/gate GEMM | 14% |
-| down GEMM with the gated residual | 13% |
-| attention preprocessing (smoothing, quantization, V transpose) | 7% |
-| out GEMM with the gated residual | 6% |
-| prepare kernels (norm, gate, Hadamard rotation, int4 quantization) | 8% |
-| QK norm and RoPE | 1% |
-
-Kernel rates at 4115 tokens on an idle box (`tools/bench_i4_gemm.py`,
-`tools/bench_sage_attention.py`), against the part's measured 117 TOPS `iu4` ceiling:
-
-| kernel | shape | time | rate |
-| --- | --- | ---: | ---: |
-| qkv/gate GEMM, 256x128 tile | 4115 x 15360 x 6144 | 9.9 ms | 78 TOPS |
-| gate/up GEMM with SwiGLU, 256x128 tile | 4115 x 32768 x 6144 | 21.3 ms | 78 TOPS |
-| down GEMM with residual, 256x128 tile, padded pitch | 4115 x 6144 x 16384 | 10.3 ms | 81 TOPS |
-| out GEMM with residual, 256x128 tile | 4115 x 6144 x 6144 | 4.4 ms | 71 TOPS |
-| the same four in int8 (W8A8), from the block profile | | 20.0 / 43.2 / 22.2 / 8.8 ms | 39 / 38 / 37 / 35 TOPS (peak 54) |
-| fp16 attention (the default), 48 heads of 128 | 4115 tokens | 25.2 ms | 16.5 TFLOP/s |
-| int4-QK attention, 48 heads of 128 | 4115 tokens | 14.0 ms | 30 TFLOP/s (21 with preprocessing) |
-
-At 8192 tokens the GEMMs reach 84-87 TOPS and attention 27 TFLOP/s; at 16384 tokens
-attention 30 TFLOP/s.
-
-Quality against the bf16 transformer on the same initial noise and text states (seed 0):
-W8A8 33.7 dB image PSNR today; W4A4 measured 18.9 dB on the kernels of its day. The W4A4 picture is the same fox in the same pose and
-light with different fur and snow detail; a published int4 ConvRot checkpoint of the same
-model that keeps 96 of its 224 block linears in int8 reports a minimum image PSNR of
-17.7 dB against bf16, and this port quantizes every block GEMM to int4 with per-row
-scales. The PSNR between two eight-step trajectories swings by several dB between
-numerically near-identical runs (the sampler amplifies rounding), so the per-block
-update cosine against the reference in `tests/test_blocks.py` (W8A8 0.99996 for one
-block and 0.9921 over 28; W4A4 0.999 and 0.966) is the metric that tracks kernel
-correctness. `docs/notes.md` records every decision and measurement.
-
-## Quick start
-
-**Dependencies.** A Radeon 8060S (gfx1151) on Linux with the amdgpu/KFD driver, a
-system ROCm for its HSA runtime, two files from a build of
-[hrx-system](https://github.com/ROCm/hrx-system) -- `libhrx.so` and the
-`loom-compile` tool that compiles kernels for a new sequence length, about 12 MB
-together -- and a Rust toolchain. That is the whole list: no HIP, hipcc, BLAS,
-ICU, OpenSSL, Python — and no C or C++ compiler. Everything in this repository is
-Rust or a Loom kernel; `libhrx` and `loom-compile` underneath it are still C++, and
-what this exports is still a C ABI. `scripts/env.sh` points at the HRX
-build (`HRX_BUILD`, default `~/code/hrx-system/build-cuda`; the provider under
-`~/.local/rocm-hrx`) and `scripts/runtime.sh` packages the runtime libraries under
-`build/runtime`. Python, PyTorch and diffusers are used only by the tests, the kernel
-generators (`loom-format` too) and the diffusers-side tools. See
-[docs/hrx-runtime.md](docs/hrx-runtime.md).
-
-**Models.** ComfyUI's Krea 2 files from [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2),
-in ComfyUI's models layout: `diffusion_models/krea2_turbo_int8_convrot.safetensors` (or
-`krea2_raw_int8_convrot.safetensors`), `text_encoders/qwen3vl_4b_bf16.safetensors` (or
-the `fp8_scaled` one, dequantized at load) and `vae/qwen_image_vae.safetensors`. A
-ComfyUI installation's models directory works as it is; nothing is converted or copied.
-Naming a checkpoint rather than a path — `--model krea2_turbo_int8_convrot` — fetches
-the set from that repository instead, through the same Hugging Face cache
-`huggingface_hub` uses, so a file another tool already downloaded is used where it
-lies. Giving a path means that directory: a file missing from it is an error, never a
-download. `HF_HUB_OFFLINE=1` refuses the network outright.
-
-**Python (tests and the diffusers path only).** A venv at `.venv` with ROCm PyTorch,
-diffusers (a recent checkout that carries the Krea 2 transformer), safetensors, numpy
-and Pillow. Inference never needs it.
-
-`libhrx.so` is looked for in `KREA2_RUNTIME`, then the repository's
-`build/runtime`, then `$XDG_CACHE_HOME/krea2-loom/runtime`, and `loom-compile`
-in `LOOM_COMPILE`, then that same cache, then `PATH`. So putting the two in
-`~/.cache/krea2-loom/runtime` is enough to `cargo install --path cli` and run
-the binary from anywhere, with nothing else set:
-
-```sh
-mkdir -p ~/.cache/krea2-loom/runtime
-cp "$HRX_BUILD/libhrx/src/libhrx/libhrx.so" ~/.cache/krea2-loom/runtime/libhrx.so.0
-ln -sf libhrx.so.0 ~/.cache/krea2-loom/runtime/libhrx.so
-cp "$LOOM_TOOLS/loom-compile/loom-compile" ~/.cache/krea2-loom/runtime/
-cargo install --path cli
-krea2 -p "a red fox in the snow" --out fox.png
-```
-
-For working in the tree, `scripts/build.sh` puts everything under `build/`:
-
-```sh
-source scripts/env.sh
-scripts/build.sh
-env -u LD_LIBRARY_PATH build/krea2 -p "a red fox in the snow" --out build/fox.png
-# every knob, and a Raw image from a piped prompt:
-echo "a red fox in the snow" | env -u LD_LIBRARY_PATH build/krea2 \
-  --models ~/comfy-models --checkpoint raw --guidance 3.5 --negative "blurry" \
-  --width 1024 --height 1024 --seed 0 --images 4 --out build/fox.png
-```
-
-`--models DIR` (default `~/comfy-models`) holds ComfyUI's `diffusion_models/`,
-`text_encoders/` and `vae/`; `--model`, `--text-encoder` and `--vae` name files
-directly. The output is a PNG or, by any other extension, a binary PPM; `--images N`
-writes `fox-0.png` through `fox-3.png` from consecutive seeds. The checkpoint decides
-the sampler: a Turbo file runs eight
-unguided steps with the fixed timestep shift, a Raw file (detected by its name, or
-`--checkpoint raw`) 52 steps at guidance 3.5 with the resolution-dependent shift;
-`--steps`, `--guidance` and `--negative` override. The first request for a new total
-token count compiles the block kernels with `loom-compile` (`--compiler` or
-`LOOM_COMPILE`) and caches the binaries under `$XDG_CACHE_HOME/krea2-loom` (default
-`~/.cache`) by a fingerprint of sources, configuration and compiler; the auxiliary
-kernels (text encoder, VAE, embeddings, scheduler, attention preprocessing) are cached
-there by tensor shape. Once the shapes you use are cached, inference needs no compiler.
-Dimensions are multiples of 16 from 64 to 2048 (16 to 16,896 total tokens).
-`KREA2_NATIVE_PROFILE=1` prints stage timings to stderr.
-
-**From C, or any language with FFI.** `build/include/krea2_pipeline.h` is the whole
-API: `krea2_pipeline_create` from the checkpoint, `krea2_generate` into a caller-owned
-RGB8 buffer, `krea2_pipeline_destroy`. `krea2_generate_guided` adds the negative prompt
-and guidance scale (pass -1 and 0 for the checkpoint's defaults),
-`krea2_pipeline_create_files` names the text encoder and VAE, and
-`krea2_pipeline_distilled` reports which checkpoint a session holds; the component
-entry points (`krea2_tokenize`, `krea2_encode`, `krea2_transformer`, `krea2_decode`)
-are there for validating a port stage by stage. Calls on one session are serialized;
-errors return a status and write a message into a caller-supplied buffer. The header is
-generated from the Rust sources by cbindgen, so it cannot drift from what the library
-exports. `tools/compare_native.py` and `tests/test_native_pipeline.py` are working
-consumers, in Python through ctypes.
-
-Deploy `libkrea2.so`, the adjacent `runtime/` directory and
-your executable next to the model files. Native seeds are repeatable within this
-backend but do not reproduce Torch's RNG; pass identical packed initial latents through
-the C API when comparing backends.
-
-**From Python.** `tools/pipeline.py --backend loom` runs the same Loom blocks inside the
-diffusers pipeline (`--backend torch` and `--quant w4a4` remain for comparison,
-`--model raw` with `--guidance` and `--negative` selects the Raw checkpoint and its
-schedule, and `--latents-out` saves latents for `tools/decode_latents.py`'s PSNR).
-`Krea2Blocks` in
-`krea2_loom.py` is the block session behind one ctypes call per forward, on the same
-checkpoint (`KREA2_MODEL` or ComfyUI's Turbo file under `~/comfy-models`); it builds or
-reuses a fingerprinted kernel bundle with `scripts/build_kernels.py`.
-
-## How it works
-
-**Blocks.** Ten launches per block (eleven for long fp16 attention sequences): prepare (RMSNorm, modulation, group-256 Hadamard
-rotation, per-token int8 quantization) -> fused qkv|gate GEMM -> QK norm and RoPE ->
-attention -> gated prepare -> out GEMM with the gated residual -> prepare -> fused
-gate|up GEMM with the SwiGLU product in its epilogue -> prepare -> down GEMM with the
-gated residual. The weights are ComfyUI's int8 ConvRot rows, rotated by the same
-group-256 Hadamard the activations get; at upload the session concatenates wq, wk, wv
-and the attention gate into one operand and interleaves the MLP gate and up rows in
-16-row groups for the fused epilogues, and keeps the checkpoint's f32 norm scales.
-
-**GEMMs.** `tools/gen_gemm.py` generates the 256x128 workgroup tile (4x2 waves of 64x64,
-in-kernel raster-tail shortening) in both widths: the int8 family (64-wide k steps,
-`iu8` WMMA) that the checkpoints run on, and the int4 family; `kernels/gemm_i4*.loom`
-add the 128x128 int4 tile. Operand rows whose byte pitch is a multiple of 8192 alias in
-the cache, so the down projection's rows carry one 64-byte k step of padding
-(`k_stride`); the weights are re-pitched on upload. Every kernel is checked against a
-float64 oracle and the int4 tiles against each other. The prepare kernels
-(`tools/gen_prepare.py`) write either width.
-
-**Attention.** The default is the fp16 WMMA kernel, fp16 QK and PV with fp32 online
-softmax, which is what ComfyUI's bf16 SDPA call is closest to on this part.
-The original kernel is used at every sequence length. The experimental
-`attention_query32` measures 1.76–1.78× faster at 4,115 tokens including V
-transposition, but regresses end-to-end image quality and is not selected by
-either production builder. Its measurements and rejection are recorded in
-[docs/attention-2x.md](docs/attention-2x.md).
-`KREA2_ATTN_QK=4` or `8` selects the SageAttention-style kernels instead at kernel-build
-time: Q centered per 64-token tile and K over the sequence, both int4 (or int8) on the
-WMMA with an fp32 correction GEMM for the means, fp16 PV, fp32 online softmax. Below
-8,192 tokens those use eight waves sharing one K/V tile across two query tiles with
-alternating LDS slots; longer sequences use four waves with explicit prefetch. Codes and
-scales are head-major so a key tile is one contiguous block. The launch metadata records
-the choice.
-[docs/native-attention.md](docs/native-attention.md) has the arithmetic and measurements.
-
-**Sampler.** Flow-matching Euler over diffusers' shifted sigmas, `linspace(1, 1/steps)`
-under an exponential shift of `mu` (Turbo 1.15 fixed; Raw from the image token count,
-0.906 at 1024x1024), with the bf16 delta and product rounding of the CUDA pipeline
-reproduced (`kernels/native/euler.loom`, checked exactly over 5,050 steps). Guidance is
-its own kernel with diffusers' per-operation bf16 rounding (`kernels/native/guidance.loom`).
-
-**Runtime.** Every launch goes through HRX's public C API. The session keeps the bf16
-residual stream and its workspace on the GPU; block weights are one
-resident device allocation shared by sessions of different lengths. Both kernel builders
-(`scripts/build_kernels.py` for Python, `crates/loom/src/blocks.rs` for the runtime)
-derive tile size, raster group and operand pitch from the rules in
-`crates/loom/src/shape.rs` and write them into the bundle's `launch.txt`; a session
-rejects a bundle whose metadata disagrees with its own rules.
-
-**Layout.**
-
-| | |
-| --- | --- |
-| `kernels/` | the Loom kernels (`native/`: the auxiliary kernels); all embedded in the library |
-| `tools/gen_*.py` | their generators; `scripts/test.sh` checks the sources match |
-| `crates/` | the runtime: `hrx` (dispatch), `loom` (kernel caches and launch shapes), `krea2-numerics` (bf16, fp8), `krea2-tokenizer`, `krea2-checkpoint` (the file and its device layout), `krea2-ops`, `krea2-session` (the 28 blocks), `krea2-models` (text encoder, VAE, and the graph), `krea2-pipeline` (the sampler), `krea2-abi` (the cdylib), `krea2-testkit` (the runners the Python tests drive) |
-| `cli/` | the CLI: argument handling and image output over `krea2-pipeline` |
-| `assets/` | the tokenizer (Qwen3-VL's `tokenizer.json`), embedded |
-| `reference/` | diffusers' model transcribed onto the checkpoint names, and the Loom-arithmetic reference |
-| `tests/`, `tools/bench_*.py` | oracles and paired benchmarks |
-| `experiments/` | kernels kept for the record |
-| `docs/` | notes, measurements and the benchmark records under `docs/benchmarks/` |
-
-## Testing and benchmarking
-
-`scripts/test.sh --quick` checks that generated kernels match their generators, builds
-everything, and runs every kernel against its oracle: the prepare kernels against the
-reference quantization, the GEMMs (both tiles, all three epilogues, with and without
-pad columns) against a float64 oracle and each other, the attention kernels against the
-smoothed INT4 and INT8 oracles, plus the runtime, cache and failure-cleanup regressions.
-`scripts/test.sh` adds the block stack on a fixture captured from a real denoising step
-(`build/fixture_step0.pt`), and `--native` compares the standalone tokenizer, text
-encoder, outer transformer layers, tiled VAE and scheduler against the Python
-references. Tests that combine Torch and HRX in one process need `scripts/env.sh`'s
-library path so both load the same HSA provider.
-
-Attention changes also require `--quality`: it runs a fresh eight-step trajectory
-against the archived accepted `KREA2_QUALITY_BASELINE` (default `build/quality`)
-and rejects a loss over 0.1 dB in latent or decoded-image PSNR. Block cosine alone
-missed the query32 image regression. Use `tools/quality_vs_bf16.py regression
---baseline BASELINE --work NEW_DIRECTORY` to retain outputs and the quality report.
-
-Performance changes are adopted by paired, interleaved A/B on an idle GPU with outputs
-compared bit for bit before and after timing: `tools/bench_i4_gemm.py` (any GEMM
-epilogue against a Git revision or another kernel, with an idle check),
-`tools/bench_sage_attention.py` (both attention kernels, or `--against` another
-checkout), `tools/bench_native.py` (whole images with an RGB checksum that must repeat).
-The records live in `docs/benchmarks/`.
-
-`tools/compare_web.py` serves a local page that generates a shared-prompt, shared-noise
-pair with this runtime and a ComfyUI INT8 ConvRot setup for side-by-side inspection
-([docs/comfyui-performance.md](docs/comfyui-performance.md)).
-
-## Weights and license
-
-The runtime reads ComfyUI's model files unchanged: Comfy-Org's Krea 2 int8 ConvRot
-checkpoints (Turbo and Raw), its Qwen3-VL-4B text encoder and its Qwen-Image VAE. Each
-model's own license applies to its weights and to images made with them (Krea 2 is
-under the Krea 2 Community License). The code in this repository is covered by the
-`LICENSE` file.
-
-## Documentation
-
-- [docs/notes.md](docs/notes.md): the engineering log, every decision with its numbers
-- [docs/native-attention.md](docs/native-attention.md): the attention kernels
-- [docs/hrx-runtime.md](docs/hrx-runtime.md): the HRX runtime, caches and deployment
-- [docs/down-gemm-experiment.md](docs/down-gemm-experiment.md): the wide GEMM trial and the softmax race it uncovered
-- [docs/comfyui-performance.md](docs/comfyui-performance.md): the ComfyUI comparison
+Project code is [MIT licensed](LICENSE). The bundled Qwen tokenizer has its
+[own attribution and Apache-2.0 license](assets/README.md). Model weights are
+separate downloads governed by their upstream licenses.

@@ -81,9 +81,7 @@ impl From<krea2_checkpoint::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A 64-bit FNV-1a over the table's bytes. Only equality matters: a collision
-/// would reuse tables the caller replaced, so this is over every byte rather
-/// than a sample.
+/// FNV-1a fingerprint of all RoPE table bytes for upload caching.
 fn fingerprint(values: &[f32]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in bytemuck::cast_slice::<f32, u8>(values) {
@@ -164,10 +162,8 @@ impl Session {
         Session::build(weights, kernels_dir, metadata, tokens, layers, None)
     }
 
-    /// The same, sharing a checkpoint already on the device.
-    /// The same, sharing a checkpoint already on the device. `compiler` is the
-    /// `loom-compile` the smoothed attention's preparation kernels are built
-    /// with, when the bundle asks for them.
+    /// Creates a session sharing resident weights.
+    /// `compiler` overrides compilation of smoothed-attention preparation kernels.
     pub fn with_weights(
         weights: std::sync::Arc<Weights>,
         kernels_dir: &Path,
@@ -334,14 +330,8 @@ impl Session {
         Ok(())
     }
 
-    /// The rope tables, uploaded only when they are not the ones already
-    /// resident. Two uploads per forward is two stream drains, and a 52-step
-    /// guided image is 104 forwards of the same tables.
-    ///
-    /// Every path that fills those buffers goes through here. One that wrote
-    /// them directly would leave the fingerprint describing tables that are no
-    /// longer there, and the next matching call would skip its upload and run
-    /// against someone else's geometry.
+    /// Uploads changed RoPE tables. Both run APIs must use this method so the
+    /// fingerprint stays consistent with the shared device buffers.
     fn upload_rope(&self, cos: &[f32], sin: &[f32]) -> Result<()> {
         let fingerprint = (fingerprint(cos), fingerprint(sin));
         let mut resident = self.rope.lock().unwrap_or_else(|e| e.into_inner());
@@ -702,17 +692,8 @@ impl Session {
 mod tests {
     use super::*;
 
-    /// Every path that fills the rope buffers must leave the fingerprint
-    /// describing what is actually in them.
-    ///
-    /// `run` and `run_device` write the same two buffers. When `run` wrote them
-    /// directly, the fingerprint still named whatever `run_device` had uploaded
-    /// last, so an A -> B -> A sequence skipped A's second upload and ran
-    /// against B's geometry. The numbers cannot see that -- attention's
-    /// contribution rounds away against the residual in bf16 -- but the
-    /// bookkeeping can, and it is the bookkeeping that was wrong.
-    ///
-    /// Needs a checkpoint, a bundle in `KREA2_KERNELS`, and a GPU.
+    /// Host runs must update the RoPE fingerprint when tables change A → B → A.
+    /// Requires a checkpoint, a 4115-token bundle in `KREA2_KERNELS`, and a GPU.
     #[test]
     fn every_path_that_fills_the_rope_buffers_records_what_it_put_there() {
         let Some((checkpoint, bundle, tokens)) = fixture() else {

@@ -1,12 +1,7 @@
-//! `libkrea2.so`: the resident block session and the standalone pipeline,
-//! behind the two C ABIs `krea2_loom.py`, the tools and the CLI call.
+//! C interfaces for resident block sessions and the standalone pipeline.
 //!
-//! One library carries both, so a process using the block API and the pipeline
-//! API cannot end up with two HRX runtimes: there is only one library to load.
-//!
-//! Everything here is the boundary and nothing else — raw pointers into slices,
-//! results into `(code, message)`, and a catch so a panic becomes an error
-//! instead of unwinding into C.
+//! Both APIs share `libkrea2.so`. This module validates buffers, translates errors
+//! into status codes/messages, and catches panics before they cross the C ABI.
 use std::ffi::{c_char, c_int, CStr};
 use std::path::Path;
 use std::sync::Arc;

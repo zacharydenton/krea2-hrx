@@ -1,14 +1,5 @@
-//! ComfyUI's Krea 2 files, and Qwen's tokenizer, from the Hugging Face hub.
-//!
-//! The hub keeps the same cache Python's `huggingface_hub` keeps — `$HF_HOME`
-//! or `~/.cache/huggingface`, blobs shared by hash — so a file some other tool
-//! already pulled is used where it lies, with no copy and no second download.
-//! Transfers go through xet, which deduplicates against what the cache already
-//! holds, so a checkpoint that shares chunks with one already there costs only
-//! the difference.
-//!
-//! The cache is consulted before the network, which is what makes a box with
-//! no route to the internet and a warm cache behave like an online one.
+//! Model and tokenizer downloads through the Hugging Face hub cache.
+//! Cached files are reused before network access; offline mode refuses downloads.
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};

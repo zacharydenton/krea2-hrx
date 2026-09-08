@@ -25,8 +25,7 @@ impl DevicePtr {
         self.0 == 0
     }
 
-    /// The address `bytes` further into the same allocation. Whether it still
-    /// lands inside one is decided when the address is used, as in the C++ host.
+    /// Adds a byte offset without checking allocation bounds.
     pub const fn offset(self, bytes: usize) -> Self {
         DevicePtr(self.0 + bytes)
     }
@@ -189,8 +188,7 @@ impl Device {
         }
     }
 
-    /// Releases an allocation by its base address. Unknown addresses are
-    /// ignored, as they were in the C++ host.
+    /// Releases an allocation by base address; unknown addresses are ignored.
     fn release(&self, pointer: DevicePtr) {
         if pointer.is_null() {
             return;
@@ -360,8 +358,8 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         let mut state = self.lock();
-        // Safety: shutting down in the order the C++ host used, ignoring
-        // failures because there is nowhere to report them from a destructor.
+        // Safety: drain the stream before releasing its allocations and device.
+        // Errors cannot be returned from Drop.
         unsafe {
             sys::hrx_status_ignore(sys::hrx_stream_synchronize(state.stream));
             sys::hrx_stream_release(state.stream);
