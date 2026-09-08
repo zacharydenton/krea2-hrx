@@ -7,6 +7,7 @@
 #![deny(unsafe_code)]
 
 pub mod noise;
+pub mod profile;
 pub mod schedule;
 
 use std::path::{Path, PathBuf};
@@ -17,6 +18,8 @@ use krea2_models::Models;
 use krea2_numerics::{from_f32, to_f32};
 use krea2_ops::Tensor;
 use krea2_session::{Session, Weights};
+
+use crate::profile::Profile;
 
 pub use krea2_models::{hub, Files};
 
@@ -220,6 +223,7 @@ impl Pipeline {
         let image_tokens = width / PATCH * (height / PATCH);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let began = std::time::Instant::now();
+        let mut timing = Profile::new("generate");
 
         let latents = match request.initial_latents {
             Some(values) => self.upload(values, image_tokens, 64)?,
@@ -232,6 +236,7 @@ impl Pipeline {
         let guided = guidance > 0.0;
         let uncond =
             if guided { Some(self.conditioning(request.negative_prompt)?) } else { None };
+        timing.mark("encode and text fusion")?;
 
         // Turbo's shift is fixed; Raw's follows the image's token count.
         let mu = if self.distilled() { 1.15 } else { schedule::dynamic_mu(image_tokens) };
@@ -252,8 +257,10 @@ impl Pipeline {
                 }
             }
         }
+        timing.mark("denoise")?;
         let rgb = self.models.decode(&latents, height, width)?;
         device().synchronize()?;
+        timing.mark("VAE decode")?;
         Ok(rgb)
     }
 
@@ -274,6 +281,7 @@ impl Pipeline {
         width: usize,
         height: usize,
     ) -> Result<Tensor> {
+        let mut timing = Profile::new("forward");
         let image_tokens = width / PATCH * (height / PATCH);
         let tokens = text.rows + image_tokens;
         let (embedding, modulation) = self.models.time(timestep)?;
@@ -288,14 +296,20 @@ impl Pipeline {
             image.size() * 2,
         )?;
 
+        timing.mark("embeddings")?;
         self.prepare(state, tokens)?;
+        timing.mark("prepare session")?;
         let mods = self.models.modulation(&modulation)?;
         self.rope(state, width, height, text.rows);
         let blocks = state.blocks.as_ref().expect("just prepared");
+        timing.mark("modulation and rope")?;
         blocks.session.run_device(x.ptr(), mods.ptr(), &state.rope.cos, &state.rope.sin)?;
+        timing.mark("blocks")?;
 
         let output = x.view(image_tokens, WIDTH, text.rows * WIDTH)?;
-        Ok(self.models.last(&output, &embedding)?)
+        let velocity = self.models.last(&output, &embedding)?;
+        timing.mark("final layer")?;
+        Ok(velocity)
     }
 
     /// The block session for `tokens`, built if the last image had another

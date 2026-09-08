@@ -13,6 +13,7 @@ pub mod sage;
 pub mod weights;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use hrx::{device, Args, Buffer, DevicePtr};
@@ -125,6 +126,9 @@ pub struct Session {
     /// The smoothed attention kernels' preparation pass, when the bundle was
     /// built with one (`KREA2_ATTN_QK` of 4 or 8).
     sage: Option<Sage>,
+    /// Opt-in synchronized wall-clock timing per kernel, off during inference.
+    profile: AtomicBool,
+    stages: Mutex<Vec<(&'static str, f64)>>,
     lock: Mutex<()>,
     _weights: std::sync::Arc<Weights>,
 }
@@ -264,6 +268,8 @@ impl Session {
             blocks,
             buffers,
             sage,
+            profile: AtomicBool::new(false),
+            stages: Mutex::new(Vec::new()),
             lock: Mutex::new(()),
             _weights: weights,
         })
@@ -275,6 +281,82 @@ impl Session {
 
     pub fn layers(&self) -> usize {
         self.layers
+    }
+
+    /// Turns the per-stage timings on stderr on or off, reporting what they
+    /// were. Timing synchronizes after every launch, so it is not free.
+    pub fn set_profile(&self, enable: bool) -> bool {
+        self.profile.swap(enable, Ordering::Relaxed)
+    }
+
+    /// One kernel, timed when profiling is on. The synchronize on either side
+    /// is what makes a stage's number mean anything.
+    fn launch(
+        &self,
+        kernel: &hrx::Kernel,
+        stage: &'static str,
+        grid_x: u32,
+        grid_y: u32,
+        threads: u32,
+        args: &Args,
+    ) -> Result<()> {
+        if !self.profile.load(Ordering::Relaxed) {
+            kernel.launch_2d(grid_x, grid_y, threads, args)?;
+            return Ok(());
+        }
+        device().synchronize()?;
+        let began = std::time::Instant::now();
+        kernel.launch_2d(grid_x, grid_y, threads, args)?;
+        device().synchronize()?;
+        self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
+        Ok(())
+    }
+
+    /// The clock a multi-launch stage is timed against, when profiling is on.
+    fn timed(&self) -> Option<std::time::Instant> {
+        if !self.profile.load(Ordering::Relaxed) {
+            return None;
+        }
+        let _ = device().synchronize();
+        Some(std::time::Instant::now())
+    }
+
+    /// Closes a stage opened by [`Session::timed`].
+    fn record(&self, stage: &'static str, began: Option<std::time::Instant>) -> Result<()> {
+        let Some(began) = began else {
+            return Ok(());
+        };
+        device().synchronize()?;
+        self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
+        Ok(())
+    }
+
+    fn accumulate(&self, stage: &'static str, micros: f64) {
+        let mut stages = self.stages.lock().unwrap_or_else(|e| e.into_inner());
+        match stages.iter_mut().find(|(name, _)| *name == stage) {
+            Some(entry) => entry.1 += micros,
+            None => stages.push((stage, micros)),
+        }
+    }
+
+    /// Prints what the run spent where, longest first, and starts over.
+    fn report(&self, blocks: usize) {
+        if !self.profile.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut stages = self.stages.lock().unwrap_or_else(|e| e.into_inner());
+        let total: f64 = stages.iter().map(|(_, micros)| micros).sum();
+        stages.sort_by(|a, b| b.1.total_cmp(&a.1));
+        eprintln!("stage profile over {blocks} block(s), {} tokens:", self.tokens);
+        for (stage, micros) in stages.iter() {
+            eprintln!(
+                "  {stage:<24} {:9.3} ms  {:5.1}%",
+                micros / 1000.0,
+                100.0 * micros / total
+            );
+        }
+        eprintln!("  {:<24} {:9.3} ms", "total", total / 1000.0);
+        stages.clear();
     }
 
     /// Runs a contiguous range of blocks over the caller's residual stream.
@@ -319,6 +401,7 @@ impl Session {
         }
         device().synchronize()?;
         device().read(x, self.buffers.x.ptr())?;
+        self.report(count);
         Ok(())
     }
 
@@ -353,6 +436,7 @@ impl Session {
             self.block(index, mods)?;
         }
         device().synchronize()?;
+        self.report(self.layers);
         device().copy_device_to_device(
             x,
             self.buffers.x.ptr(),
@@ -368,9 +452,11 @@ impl Session {
         mods.offset(index * stride + part * HIDDEN as usize * 4)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn gemm(
         &self,
         kernel: &hrx::Kernel,
+        stage: &'static str,
         weights: DevicePtr,
         scales: DevicePtr,
         n: i32,
@@ -392,8 +478,7 @@ impl Session {
             self.metadata.gemm_rows as i32,
             self.metadata.m_group as i32,
         );
-        kernel.launch_2d((n / 128) as u32, grid_y as u32, THREADS, &args)?;
-        Ok(())
+        self.launch(kernel, stage, (n / 128) as u32, grid_y as u32, THREADS, &args)
     }
 
     fn block(&self, index: usize, mods: DevicePtr) -> Result<()> {
@@ -409,10 +494,11 @@ impl Session {
             .ptr(self.modulation(mods, index, 1))
             .ptr(b.a_q.ptr())
             .ptr(b.a_s.ptr());
-        self.kernels.prepare_norm.launch_2d(tokens as u32, 1, THREADS, &norm)?;
+        self.launch(&self.kernels.prepare_norm, "prepare", tokens as u32, 1, THREADS, &norm)?;
 
         self.gemm(
             &self.kernels.gemm_qkvg,
+            "gemm qkvg",
             block.qkvg_q,
             block.qkvg_s,
             QKVG,
@@ -430,14 +516,17 @@ impl Session {
             .ptr(b.q.ptr())
             .ptr(b.k.ptr())
             .ptr(b.v.ptr());
-        self.kernels.rope.launch_2d(tokens as u32, 1, THREADS, &rope)?;
+        self.launch(&self.kernels.rope, "qk norm + rope", tokens as u32, 1, THREADS, &rope)?;
 
         match &self.sage {
             // Smoothed int4/int8 QK: the preparation pass quantizes Q and K
             // against their means and works out the correction the kernel adds
             // back to the scores.
             Some(sage) => {
+                // Six launches, so it is timed as one stage rather than each.
+                let preparing = self.timed();
                 sage.run(b.q.ptr(), b.k.ptr(), b.v.ptr())?;
+                self.record("SA2 preprocessing", preparing)?;
                 let mut attention = Args::new();
                 attention
                     .i32(tokens)
@@ -451,7 +540,9 @@ impl Session {
                     .ptr(b.attn.ptr());
                 let waves = self.metadata.attention_waves as i32;
                 let rows = 16 * (waves / 4);
-                self.kernels.attention.launch_2d(
+                self.launch(
+                    &self.kernels.attention,
+                    "SA2 attention",
                     ((tokens + rows - 1) / rows) as u32,
                     KV_HEADS as u32,
                     32 * waves as u32,
@@ -464,7 +555,9 @@ impl Session {
                     (Some(transposed), Some(kernel)) => {
                         let mut args = Args::new();
                         args.i32(tokens).ptr(b.v.ptr()).ptr(transposed.ptr());
-                        kernel.launch_2d(
+                        self.launch(
+                            kernel,
+                            "f16 V transpose",
                             tokens.div_euclid(32) as u32 + u32::from(tokens % 32 != 0),
                             (KV_HEADS * HEAD_DIM / 32) as u32,
                             256,
@@ -482,7 +575,9 @@ impl Session {
                     .ptr(values)
                     .ptr(b.attn.ptr());
                 let rows = 16 * self.metadata.fp16_query_tiles as i32;
-                self.kernels.attention.launch_2d(
+                self.launch(
+                    &self.kernels.attention,
+                    "f16 attention",
                     ((tokens + rows - 1) / rows) as u32,
                     KV_HEADS as u32,
                     128 * self.metadata.fp16_query_tiles,
@@ -498,10 +593,18 @@ impl Session {
             .ptr(b.fused.ptr().offset(GATE_OFFSET as usize * 2))
             .ptr(b.a_q.ptr())
             .ptr(b.a_s.ptr());
-        self.kernels.prepare_gated.launch_2d(tokens as u32, 1, THREADS, &gated)?;
+        self.launch(
+            &self.kernels.prepare_gated,
+            "prepare gated",
+            tokens as u32,
+            1,
+            THREADS,
+            &gated,
+        )?;
 
         self.gemm(
             &self.kernels.gemm_wo,
+            "gemm wo + residual",
             block.wo_q,
             block.wo_s,
             HIDDEN,
@@ -517,16 +620,32 @@ impl Session {
             .ptr(self.modulation(mods, index, 4))
             .ptr(b.a_q.ptr())
             .ptr(b.a_s.ptr());
-        self.kernels.prepare_norm.launch_2d(tokens as u32, 1, THREADS, &post)?;
+        self.launch(&self.kernels.prepare_norm, "prepare", tokens as u32, 1, THREADS, &post)?;
 
-        self.gemm(&self.kernels.gemm_gu, block.gu_q, block.gu_s, 2 * INTER, b.gu.ptr(), None)?;
+        self.gemm(
+            &self.kernels.gemm_gu,
+            "gemm gate|up + swiglu",
+            block.gu_q,
+            block.gu_s,
+            2 * INTER,
+            b.gu.ptr(),
+            None,
+        )?;
 
         let mut swiglu = Args::new();
         swiglu.i32(tokens).ptr(b.gu.ptr()).ptr(b.a_q.ptr()).ptr(b.a_s.ptr());
-        self.kernels.prepare_swiglu.launch_2d(tokens as u32, 1, THREADS, &swiglu)?;
+        self.launch(
+            &self.kernels.prepare_swiglu,
+            "prepare swiglu",
+            tokens as u32,
+            1,
+            THREADS,
+            &swiglu,
+        )?;
 
         self.gemm(
             &self.kernels.gemm_down,
+            "gemm down + residual",
             block.down_q,
             block.down_s,
             HIDDEN,

@@ -15,22 +15,26 @@ use krea2_session::{Session, Weights, HEAD_DIM, HIDDEN};
 
 pub mod pipeline;
 
-/// Must match `KREA2_ABI_VERSION`; `krea2_loom.py` refuses anything else.
-const ABI_VERSION: u32 = 3;
+/// The block ABI's version; `krea2_loom.py` refuses anything else. These carry
+/// the names the header has always had, because C callers use them.
+pub const KREA2_ABI_VERSION: u32 = 3;
 
-pub(crate) const OK: c_int = 0;
-const FAILED: c_int = 1;
-pub(crate) const INVALID_ARGUMENT: c_int = 64;
+pub const KREA2_OK: c_int = 0;
+pub const KREA2_ERROR: c_int = 1;
+pub const KREA2_INVALID_ARGUMENT: c_int = 64;
 
 /// The opaque handle C sees as `krea2_session *`.
+///
+/// Every entry point takes it by shared reference: calls may overlap, the
+/// session serializes them internally, and handing out `&mut` from two threads
+/// at once would be undefined behaviour whatever the lock did afterwards.
 pub struct SessionHandle {
     session: Session,
-    profile: bool,
 }
 
 #[no_mangle]
 pub extern "C" fn krea2_abi_version() -> u32 {
-    ABI_VERSION
+    KREA2_ABI_VERSION
 }
 
 /// Writes a NUL-terminated message into the caller's buffer, truncating it.
@@ -57,13 +61,13 @@ unsafe fn guard(
     body: impl FnOnce() -> krea2_session::Result<()> + std::panic::UnwindSafe,
 ) -> c_int {
     match std::panic::catch_unwind(body) {
-        Ok(Ok(())) => OK,
+        Ok(Ok(())) => KREA2_OK,
         Ok(Err(failure)) => {
             report(error, capacity, &failure.message);
             if failure.invalid_argument {
-                INVALID_ARGUMENT
+                KREA2_INVALID_ARGUMENT
             } else {
-                FAILED
+                KREA2_ERROR
             }
         }
         Err(panic) => {
@@ -73,7 +77,7 @@ unsafe fn guard(
                 .or_else(|| panic.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "panic".to_string());
             report(error, capacity, &message);
-            FAILED
+            KREA2_ERROR
         }
     }
 }
@@ -105,7 +109,7 @@ pub unsafe extern "C" fn krea2_create(
     error_capacity: usize,
 ) -> c_int {
     if out.is_null() {
-        return INVALID_ARGUMENT;
+        return KREA2_INVALID_ARGUMENT;
     }
     *out = std::ptr::null_mut();
     let mut created = None;
@@ -129,7 +133,7 @@ pub unsafe extern "C" fn krea2_create(
         }),
     );
     if let Some(session) = created {
-        *out = Box::into_raw(Box::new(SessionHandle { session, profile: false }));
+        *out = Box::into_raw(Box::new(SessionHandle { session }));
     }
     code
 }
@@ -149,13 +153,9 @@ pub unsafe extern "C" fn krea2_destroy(session: *mut SessionHandle) {
 /// `session` must come from [`krea2_create`].
 #[no_mangle]
 pub unsafe extern "C" fn krea2_profile(session: *mut SessionHandle, enable: c_int) -> c_int {
-    match session.as_mut() {
+    match session.as_ref() {
         None => 0,
-        Some(session) => {
-            let was = session.profile;
-            session.profile = enable != 0;
-            c_int::from(was)
-        }
+        Some(handle) => c_int::from(handle.session.set_profile(enable != 0)),
     }
 }
 
@@ -217,7 +217,7 @@ pub unsafe extern "C" fn krea2_run_range(
         error,
         error_capacity,
         std::panic::AssertUnwindSafe(|| {
-            let Some(session) = session.as_mut() else {
+            let Some(session) = session.as_ref() else {
                 return Err(krea2_session::Error::invalid("a null session"));
             };
             if x.is_null() || mods.is_null() || cos.is_null() || sin.is_null() {
@@ -259,7 +259,7 @@ pub unsafe extern "C" fn krea2_weights_load(
     error_capacity: usize,
 ) -> c_int {
     if out.is_null() {
-        return INVALID_ARGUMENT;
+        return KREA2_INVALID_ARGUMENT;
     }
     *out = std::ptr::null_mut();
     let mut loaded = None;
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn krea2_create_shared(
     error_capacity: usize,
 ) -> c_int {
     if out.is_null() {
-        return INVALID_ARGUMENT;
+        return KREA2_INVALID_ARGUMENT;
     }
     *out = std::ptr::null_mut();
     let mut created = None;
@@ -335,7 +335,7 @@ pub unsafe extern "C" fn krea2_create_shared(
         }),
     );
     if let Some(session) = created {
-        *out = Box::into_raw(Box::new(SessionHandle { session, profile: false }));
+        *out = Box::into_raw(Box::new(SessionHandle { session }));
     }
     code
 }

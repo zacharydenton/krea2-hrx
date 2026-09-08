@@ -31,6 +31,9 @@ fn headers() {
         let generated = cbindgen::Builder::new()
             .with_src(Path::new(env!("CARGO_MANIFEST_DIR")).join(source))
             .with_language(cbindgen::Language::C)
+            // extern "C" guards, so a C++ translation unit including this
+            // header links against the library rather than mangled names.
+            .with_cpp_compat(true)
             .with_documentation(true)
             .with_include_guard(name)
             .with_no_includes()

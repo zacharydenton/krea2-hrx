@@ -8,12 +8,10 @@ use std::path::Path;
 
 use krea2_pipeline::{Files, Pipeline, Request, Result};
 
-use crate::{report, OK};
+use crate::{report, KREA2_ERROR, KREA2_OK};
 
-/// Must match `KREA2_PIPELINE_ABI_VERSION`.
-const ABI_VERSION: u32 = 3;
-
-const FAILED: c_int = 1;
+/// The pipeline ABI's version, under the name the header has always had.
+pub const KREA2_PIPELINE_ABI_VERSION: u32 = 3;
 
 /// Called once per sampling step, after the step, with the seconds spent so
 /// far. Returning nonzero abandons the image.
@@ -27,7 +25,7 @@ pub struct PipelineHandle {
 
 #[no_mangle]
 pub extern "C" fn krea2_pipeline_abi_version() -> u32 {
-    ABI_VERSION
+    KREA2_PIPELINE_ABI_VERSION
 }
 
 /// Runs `body`, turning its failure — or a panic — into a code and a message.
@@ -43,14 +41,14 @@ unsafe fn guard(
         *error = 0;
     }
     match std::panic::catch_unwind(body) {
-        Ok(Ok(())) => OK,
+        Ok(Ok(())) => KREA2_OK,
         Ok(Err(failure)) => {
             report(error, capacity, &failure.0);
-            FAILED
+            KREA2_ERROR
         }
         Err(_) => {
             report(error, capacity, "native inference failed");
-            FAILED
+            KREA2_ERROR
         }
     }
 }
@@ -104,14 +102,14 @@ pub unsafe extern "C" fn krea2_pipeline_create_files(
     }
     if out.is_null() {
         report(error, capacity, "model and output pointer are required");
-        return FAILED;
+        return KREA2_ERROR;
     }
     *out = std::ptr::null_mut();
     let (model, text_encoder, vae, compiler) =
         (text_of(model), text_of(text_encoder), text_of(vae), text_of(compiler));
     let Some(model) = model else {
         report(error, capacity, "model and output pointer are required");
-        return FAILED;
+        return KREA2_ERROR;
     };
     let built = std::panic::catch_unwind(|| {
         let files = Files::of(Path::new(model))
@@ -131,15 +129,15 @@ pub unsafe extern "C" fn krea2_pipeline_create_files(
                 pipeline,
                 progress: std::sync::Mutex::new(None),
             }));
-            OK
+            KREA2_OK
         }
         Ok(Err(failure)) => {
             report(error, capacity, &failure.0);
-            FAILED
+            KREA2_ERROR
         }
         Err(_) => {
             report(error, capacity, "native initialization failed");
-            FAILED
+            KREA2_ERROR
         }
     }
 }
@@ -368,7 +366,7 @@ pub unsafe extern "C" fn krea2_generate(
 ) -> c_int {
     if !(1..=100).contains(&steps) {
         report(error, error_capacity, "invalid generation arguments");
-        return FAILED;
+        return KREA2_ERROR;
     }
     krea2_generate_guided(
         pipeline,
