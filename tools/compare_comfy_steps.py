@@ -54,7 +54,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dumps", type=Path, default=ROOT / "build/comfy_parity")
     ap.add_argument("--model", type=Path, default=Path(DEFAULT_MODEL))
-    ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2_pipeline.so")
+    ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2.so")
     a = ap.parse_args()
     meta = json.loads((a.dumps / "meta.json").read_text())
     sigmas, size = meta["sigmas"], meta["size"]

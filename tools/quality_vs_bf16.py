@@ -80,7 +80,7 @@ def native(a) -> None:
     text = np.ascontiguousarray(np.load(a.work / "text.npy").reshape(-1, 2560), np.float32)
     latents = np.ascontiguousarray(np.load(a.work / "noise.npy"), np.float32)
     size, steps = meta["size"], meta["steps"]
-    lib = C.CDLL(str(ROOT / "build/libkrea2_pipeline.so"))
+    lib = C.CDLL(str(ROOT / "build/libkrea2.so"))
     ptr, usize, char = C.c_void_p, C.c_size_t, C.c_char_p
     lib.krea2_pipeline_create.argtypes = [char, char, C.POINTER(ptr), char, usize]
     lib.krea2_transformer.argtypes = [ptr, ptr, usize, C.c_int, ptr, usize, C.c_int, C.c_int,

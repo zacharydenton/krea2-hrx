@@ -69,7 +69,7 @@ def modulation_check(root, checkpoint):
 
 
 def pipeline_check(root, checkpoint):
-    lib = C.CDLL(str(BIN / "libkrea2_pipeline.so"))
+    lib = C.CDLL(str(BIN / "libkrea2.so"))
     ptr, size, char = C.c_void_p, C.c_size_t, C.c_char_p
     lib.krea2_pipeline_create.argtypes = [char, char, C.POINTER(ptr), char, size]
     lib.krea2_pipeline_destroy.argtypes = [ptr]

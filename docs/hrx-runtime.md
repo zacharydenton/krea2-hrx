@@ -7,10 +7,8 @@ Every dispatch/copy has an execution barrier on the shared ordered stream.
 Host transfers synchronize that stream; tensors and temporary buffers stay on
 the GPU between operations. There is no HIP compatibility layer.
 
-`libkrea2.so` and `libkrea2_pipeline.so` are one cdylib under two names — the
-second is a symlink to the first — so loading the block and pipeline APIs in one
-process cannot create duplicate runtime ownership: the dynamic linker sees one
-soname. Sessions retain
+`libkrea2.so` carries both APIs, so loading the block API and the pipeline API in
+one process cannot create duplicate runtime ownership: there is one library. Sessions retain
 separate pools and buffers. Each weight bundle is validated, mapped read-only,
 uploaded once, and exposed as tensor views into one resident GPU allocation.
 This avoids a separate HRX allocation and synchronization for every tensor.

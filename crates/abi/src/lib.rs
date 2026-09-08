@@ -1,9 +1,8 @@
 //! `libkrea2.so`: the resident block session and the standalone pipeline,
 //! behind the two C ABIs `krea2_loom.py`, the tools and the CLI call.
 //!
-//! One library carries both so that a process loading both APIs cannot end up
-//! with two HRX runtimes; `libkrea2_pipeline.so` is the same file under its
-//! other name.
+//! One library carries both, so a process using the block API and the pipeline
+//! API cannot end up with two HRX runtimes: there is only one library to load.
 //!
 //! Everything here is the boundary and nothing else — raw pointers into slices,
 //! results into `(code, message)`, and a catch so a panic becomes an error

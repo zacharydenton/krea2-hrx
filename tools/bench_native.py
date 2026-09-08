@@ -51,7 +51,7 @@ def save_mismatch(first, current, args, run):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2_pipeline.so")
+    ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2.so")
     ap.add_argument("--bundle", "--model", dest="bundle", type=Path,
                     default=Path(os.environ.get("KREA2_MODEL") or Path.home() / "comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors"),
                     help="ComfyUI's int8 ConvRot checkpoint (text encoder and VAE found beside it)")

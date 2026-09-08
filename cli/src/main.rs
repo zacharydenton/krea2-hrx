@@ -1,17 +1,14 @@
-//! krea2: prompt to image on the Radeon 8060S, over the runtime's C ABI.
+//! krea2: prompt to image on the Radeon 8060S.
 //!
-//! The interesting part for a reader is `pipeline.rs`: this file is argument
+//! Everything interesting is in `krea2-pipeline`; this file is argument
 //! handling, model discovery and file output around it.
-mod pipeline;
-
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-
-use pipeline::{Pipeline, Request};
+use krea2_pipeline::{Files, Pipeline, Request};
 
 /// Exit code for anything the user can fix in the command line (EX_USAGE).
 const USAGE: i32 = 64;
@@ -59,7 +56,8 @@ struct Args {
     /// ComfyUI's models directory, holding diffusion_models/, text_encoders/ and vae/
     #[arg(long, default_value = "~/comfy-models")]
     models: String,
-    /// The int8 ConvRot checkpoint, overriding --models
+    /// The int8 ConvRot checkpoint, overriding --models: a path, or the name of
+    /// one in Comfy-Org/Krea-2 to fetch through the Hugging Face cache
     #[arg(long)]
     model: Option<PathBuf>,
     /// Qwen3-VL-4B text encoder (default: beside the model)
@@ -143,15 +141,21 @@ fn run(args: Args) -> Result<()> {
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
         bail!("--guidance must be between 0 and 100");
     }
+    // An explicit --model may be a path or the name of a checkpoint in
+    // ComfyUI's repository; a --models directory is a layout on disk, so a file
+    // missing from it is worth saying so plainly rather than fetching.
     let model = match &args.model {
         Some(model) => model.clone(),
-        None => expand_home(&args.models)
-            .join("diffusion_models")
-            .join(format!("krea2_{}_int8_convrot.safetensors", args.checkpoint)),
+        None => {
+            let path = expand_home(&args.models)
+                .join("diffusion_models")
+                .join(format!("krea2_{}_int8_convrot.safetensors", args.checkpoint));
+            if !path.is_file() {
+                bail!("{} not found (--models DIR, or --model FILE)", path.display());
+            }
+            path
+        }
     };
-    if !model.is_file() {
-        bail!("{} not found (--models DIR, or --model FILE)", model.display());
-    }
     let directory = args.out.parent().filter(|p| !p.as_os_str().is_empty());
     if let Some(directory) = directory {
         if !directory.is_dir() {
@@ -175,13 +179,13 @@ fn run(args: Args) -> Result<()> {
     }
 
     let loading = Instant::now();
-    let mut pipeline = Pipeline::open(
-        &model,
-        args.text_encoder.as_deref(),
-        args.vae.as_deref(),
-        Some(args.checkpoint == "turbo"),
-        args.compiler.as_deref(),
-    )?;
+    let files = Files::of(&model)
+        .text_encoder(args.text_encoder.as_deref())
+        .vae(args.vae.as_deref())
+        .distilled(Some(args.checkpoint == "turbo"))
+        .resolve()?;
+    let compiler = args.compiler.as_ref().map(|path| path.to_string_lossy().into_owned());
+    let pipeline = Pipeline::open(files, compiler.as_deref())?;
     let load = loading.elapsed().as_secs_f64();
     let steps = args.steps.unwrap_or(if pipeline.distilled() { 8 } else { 52 });
     let guidance = args.guidance.unwrap_or(if pipeline.distilled() { 0.0 } else { 3.5 });
@@ -196,29 +200,35 @@ fn run(args: Args) -> Result<()> {
             args.images,
             if args.images == 1 { "" } else { "s" },
         );
-        pipeline.on_progress(|step, steps, seconds| {
-            let left =
-                if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
-            eprint!("\r  step {step}/{steps}  {seconds:.1} s  ({left:.0} s left)   ");
-            if step == steps {
-                eprintln!();
-            }
-            let _ = std::io::stderr().flush();
-            true
-        });
+    }
+
+    /// One line of progress, redrawn in place, with the time left.
+    fn report(step: usize, steps: usize, seconds: f64) -> bool {
+        let left = if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
+        eprint!("\r  step {step}/{steps}  {seconds:.1} s  ({left:.0} s left)   ");
+        if step == steps {
+            eprintln!();
+        }
+        let _ = std::io::stderr().flush();
+        true
     }
 
     for index in 0..args.images {
         let began = Instant::now();
-        let rgb = pipeline.generate(&Request {
+        let request = Request {
             prompt: &prompt,
-            negative: args.negative.as_deref(),
+            negative_prompt: args.negative.as_deref().unwrap_or(""),
+            width: args.width as usize,
+            height: args.height as usize,
+            steps: args.steps.map(|steps| steps as usize),
             guidance: args.guidance,
-            width: args.width,
-            height: args.height,
-            steps: args.steps,
             seed: args.seed + u64::from(index),
-        })?;
+            initial_latents: None,
+        };
+        let rgb = pipeline.generate(
+            &request,
+            (!args.quiet).then_some(&mut report as krea2_pipeline::Progress),
+        )?;
         let path = numbered(&args.out, index, args.images);
         write_image(&path, &rgb, args.width, args.height)?;
         println!(
@@ -241,9 +251,10 @@ fn main() {
     });
     if let Err(error) = run(args) {
         eprintln!("krea2: {error:#}");
-        // Everything run() rejects itself is a usage error; the library's own
-        // failures arrive as pipeline::Error and are worth a distinct code.
-        let code = if error.downcast_ref::<pipeline::Error>().is_some() { 1 } else { USAGE };
+        // Everything run() rejects itself is a usage error; the runtime's own
+        // failures arrive as krea2_pipeline::Error and take a distinct code.
+        let code =
+            if error.downcast_ref::<krea2_pipeline::Error>().is_some() { 1 } else { USAGE };
         std::process::exit(code);
     }
 }

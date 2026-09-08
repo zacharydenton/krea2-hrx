@@ -1600,6 +1600,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "krea2-pipeline",
  "png",
 ]
 

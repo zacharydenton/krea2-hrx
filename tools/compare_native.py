@@ -30,7 +30,7 @@ def main():
         raise ValueError('Initial noise has the wrong size')
     noise = (C.c_float * (len(raw) // 4)).from_buffer_copy(raw)
     rgb = (C.c_uint8 * (n * n * 3))()
-    lib = C.CDLL(str(ROOT / 'build/libkrea2_pipeline.so'))
+    lib = C.CDLL(str(ROOT / 'build/libkrea2.so'))
     ptr, size, char = C.c_void_p, C.c_size_t, C.c_char_p
     lib.krea2_pipeline_create.argtypes = [char, char, C.POINTER(ptr), char, size]
     lib.krea2_pipeline_destroy.argtypes = [ptr]

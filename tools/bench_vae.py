@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("latents", type=Path, help="packed float32 .npy latents")
-    ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2_pipeline.so")
+    ap.add_argument("--library", type=Path, default=ROOT / "build/libkrea2.so")
     ap.add_argument("--model", type=Path, default=Path.home() / "comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
     ap.add_argument("--width", type=int, default=1024)
     ap.add_argument("--height", type=int, default=1024)
