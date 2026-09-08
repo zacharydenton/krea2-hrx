@@ -1,0 +1,15 @@
+[package]
+name = "krea2-checkpoint"
+version = "0.1.0"
+edition = "2021"
+description = "ComfyUI's int8 ConvRot checkpoint and its device layout"
+license = "MIT"
+publish = false
+
+[lib]
+name = "krea2_checkpoint"
+
+[dependencies]
+loom = { path = "../loom" }
+memmap2 = "0.9"
+serde_json = "1"

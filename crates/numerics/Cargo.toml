@@ -1,0 +1,14 @@
+[package]
+name = "krea2-numerics"
+version = "0.1.0"
+edition = "2021"
+description = "bf16 and fp8 as this runtime's weights and activations use them"
+license = "MIT"
+publish = false
+
+[lib]
+name = "krea2_numerics"
+
+[dev-dependencies]
+# An independent implementation of the same rounding, for the oracle tests only.
+half = "2"

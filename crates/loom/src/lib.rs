@@ -10,6 +10,7 @@
 //! which is the only copy — there is no generated header to keep in step.
 pub mod cache;
 pub mod compile;
+pub mod shape;
 pub mod sources;
 
 pub use cache::{auxiliary_kernel, cache_root, set_compiler};

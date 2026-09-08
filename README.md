@@ -334,7 +334,7 @@ bundle whose metadata disagrees with its own rules.
 | `tools/gen_*.py` | their generators; `scripts/test.sh` checks the sources match |
 | `host/` | the session, native pipeline, safetensors reader, tokenizer, kernel builders and caches |
 | `cli/` | the Rust CLI over the C ABI, and with it the example of using that ABI |
-| `crates/` | the Rust runtime, replacing `host/` a stage at a time: `hrx` (dispatch), `loom` (kernel cache), `krea2-tokenizer` |
+| `crates/` | the Rust runtime, replacing `host/` a stage at a time: `hrx` (dispatch), `loom` (kernel cache and launch shapes), `krea2-numerics` (bf16, fp8), `krea2-tokenizer`, `krea2-checkpoint` (the file and its device layout) |
 | `assets/` | the tokenizer (Qwen3-VL's `tokenizer.json`), embedded |
 | `reference/` | diffusers' model transcribed onto the checkpoint names, and the Loom-arithmetic reference |
 | `tests/`, `tools/bench_*.py` | oracles and paired benchmarks |
