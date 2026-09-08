@@ -78,7 +78,8 @@ seed 0, `a red fox in the snow`. Every run of each backend produced the same RGB
 
 Both run the same int8 ConvRot rows from the same file; this runtime feeds them int8
 per-token activations on the `iu8` WMMA instead of dequantizing to bf16, and is 1.3x
-faster per image. The transformer is where it wins; its tiled VAE decode is the stage
+faster per image. (Both backends were re-measured on 2026-09-08 after the decoder
+work below: 36.31 s against 27.30 s, and the VAE line reverses.) The transformer is where it wins; its tiled VAE decode is the stage
 that loses to ComfyUI's untiled bf16 decoder. Native seed 0 and ComfyUI seed 0 do not
 share initial noise, so this measures speed, not image equivalence. Conditions, raw logs
 and the reproduction commands: [docs/comfyui-performance.md](docs/comfyui-performance.md),
@@ -87,14 +88,23 @@ int4 kernels reached 16.6 s per image from a rotated-and-requantized export of t
 release, at 18.9 dB; that path is retired with the export, and the numbers stay in
 `docs/notes.md`.)
 
-A later idle decoder-only comparison measures **1.294 s → 1.038 s** with
-coalesced convolution patches and fused wave normalization: **1.25× faster VAE
-decoding**, with identical RGB bytes. This replaces the decoder implementation
-behind the historical timings above; see [docs/vae-performance.md](docs/vae-performance.md)
-for the isolated measurements and exact-output checks.
-The updated full pipeline measures **27.54 s/image** warm at 1024×1024 and eight
-steps, with original fp16 attention and exact RGB agreement with the archived
-build—about **1.31×** the recorded ComfyUI throughput.
+Two later changes, both measured idle and recorded in
+[docs/vae-performance.md](docs/vae-performance.md). Coalesced convolution
+patches and fused wave normalization took decoding from **1.294 s to 1.038 s**
+with identical RGB bytes. Then the patch buffer went away entirely: a 3x3
+convolution now addresses the image from inside the GEMM instead of writing and
+re-reading an im2col matrix — 113 MB of it per convolution at the decoder's
+largest stage — which takes decoding to **0.586 s**, another **1.82x**, with the
+same maximum error against a float64 oracle as the path it replaces.
+
+Both backends re-measured on 2026-09-08, idle, same prompt, size, step count and
+seed, prompt to RGB:
+
+| | ComfyUI INT8 ConvRot | this runtime (W8A8) |
+| --- | ---: | ---: |
+| total, warm median | 36.31 s | **27.30 s** (1.33x) |
+| denoise | 34.52 s | about 24 s |
+| VAE decode | 0.652 s | 0.586 s |
 
 ## Against ComfyUI's arithmetic
 

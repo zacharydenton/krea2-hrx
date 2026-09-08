@@ -16,7 +16,9 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--comfy', type=Path, default=Path.home() / 'code/ComfyUI')
 parser.add_argument('--models', type=Path, default=Path.home() / 'comfy-models')
 parser.add_argument('--model', default='krea2_turbo_int8_convrot.safetensors')
-parser.add_argument('--size', type=int, default=1024)
+parser.add_argument('--size', type=int, default=1024, help='square, unless --width/--height are given')
+parser.add_argument('--width', type=int)
+parser.add_argument('--height', type=int)
 parser.add_argument('--steps', type=int, default=8)
 parser.add_argument('--runs', type=int, default=3)
 parser.add_argument('--prompt', default='a red fox in the snow')
@@ -55,6 +57,9 @@ def stamp():
     return time.perf_counter()
 
 
+args.width = args.width or args.size
+args.height = args.height or args.size
+
 with torch.inference_mode():
     start = stamp()
     model = comfy.sd.load_diffusion_model(str(args.models / 'diffusion_models' / args.model))
@@ -63,16 +68,17 @@ with torch.inference_mode():
     vae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(str(args.models / 'vae/qwen_image_vae.safetensors')))
     metadata = dict(load_seconds=stamp() - start, torch=torch.__version__,
                           model=args.model, model_dtype=str(model.model.get_dtype()),
-                          size=args.size, steps=args.steps, cfg=1, sampler='euler',
+                          size=args.size, width=args.width, height=args.height,
+                          steps=args.steps, cfg=1, sampler='euler',
                           scheduler='simple', disable_mmap=True,
                           dynamic_vram=comfy.memory_management.aimdo_enabled)
     print(json.dumps(metadata), flush=True)
-    latent = torch.zeros((1, 16, 1, args.size // 8, args.size // 8))
+    latent = torch.zeros((1, 16, 1, args.height // 8, args.width // 8))
     noise = comfy.sample.prepare_noise(latent, args.seed)
     if args.output_dir:
         args.output_dir.mkdir(parents=True, exist_ok=True)
         # Same [image tokens, channels * 2 * 2] packing as the native C API.
-        packed = noise.reshape(1, 16, args.size // 16, 2, args.size // 16, 2)
+        packed = noise.reshape(1, 16, args.height // 16, 2, args.width // 16, 2)
         packed = packed.permute(0, 2, 4, 1, 3, 5).contiguous().numpy().astype('<f4')
         packed.tofile(args.output_dir / 'noise.bin')
         metadata['noise_sha256'] = hashlib.sha256(packed.tobytes()).hexdigest()

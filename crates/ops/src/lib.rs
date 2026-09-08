@@ -67,6 +67,23 @@ pub enum Norm {
     Group = 2,
 }
 
+/// How a convolution's values are ordered behind its shape.
+///
+/// The shape is `[out][in][ky][kx]` either way; this says whether the values
+/// behind it are in that order or with the input channels innermost. Nothing
+/// about a tensor's dimensions reveals which, so it travels with the weight —
+/// the alternative is a convention shared between the loader and the operation,
+/// which is exactly how three of the decoder's convolutions came to be read in
+/// an order they were never written in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layout {
+    /// The file's order, `[out][in][ky][kx]`. Also every non-convolution.
+    RowMajor,
+    /// `[out][ky][kx][in]`, which is what [`Ops::conv`]'s implicit-GEMM path
+    /// reduces over.
+    ChannelsLast,
+}
+
 /// A weight already on the device: bf16 values, and the shape they came with.
 ///
 /// The norms want their scales in float32. A checkpoint that kept a tensor in
@@ -80,12 +97,15 @@ pub struct Weight {
     /// The allocation `values` points into, held so a tensor over this weight
     /// cannot outlive it.
     storage: Arc<Buffer>,
+    layout: Layout,
     given: Option<DevicePtr>,
     upcast: OnceLock<Buffer>,
 }
 
 impl Weight {
-    /// `f32` is the checkpoint's own float32 copy, when it kept one.
+    /// `f32` is the checkpoint's own float32 copy, when it kept one. The
+    /// values are taken to be in the file's order; a caller that packed them
+    /// says so with [`Weight::in_layout`].
     pub fn new(
         storage: &Arc<Buffer>,
         values: DevicePtr,
@@ -98,9 +118,20 @@ impl Weight {
             shape,
             count,
             storage: Arc::clone(storage),
+            layout: Layout::RowMajor,
             given: f32,
             upcast: OnceLock::new(),
         }
+    }
+
+    /// The same, for values written in `layout`.
+    pub fn in_layout(mut self, layout: Layout) -> Weight {
+        self.layout = layout;
+        self
+    }
+
+    pub fn layout(&self) -> Layout {
+        self.layout
     }
 
     /// These values as a matrix, for the operations that take tensors. The
@@ -441,6 +472,13 @@ impl Ops {
         if kernel == 1 {
             return self.linear(x, w, bias);
         }
+        // The values decide the path, because only they know their order.
+        if w.layout() == Layout::ChannelsLast {
+            if kernel != 3 {
+                return Err(Error("only a 3x3 is packed channels-last".into()));
+            }
+            return self.conv3x3(x, height, width, w, bias);
+        }
         let patches = self.tensor(height * width, x.cols() * kernel * kernel)?;
         let mut args = Args::new();
         args.i32(patches.size() as i32).ptr(x.ptr()).ptr(patches.ptr());
@@ -462,6 +500,67 @@ impl Ops {
             256,
         )?;
         self.linear(&patches, w, bias)
+    }
+
+    /// A 3x3 convolution as a GEMM that addresses the image directly.
+    ///
+    /// The patch matrix im2col would build is the dominant cost of a
+    /// convolution at high resolution -- 113 MB written and read back for one
+    /// 256x256 layer of 96 channels -- and none of it is information the GEMM
+    /// could not work out from the pixel and the tap. This is the same kernel
+    /// with that address substituted, so the tiles, the wave layout and the
+    /// accumulator count are unchanged.
+    fn conv3x3(
+        &self,
+        x: &Tensor,
+        height: usize,
+        width: usize,
+        w: &Weight,
+        bias: Option<DevicePtr>,
+    ) -> Result<Tensor> {
+        let (m, n, k) = (height * width, w.shape[0], x.cols() * 9);
+        if w.count != n * k {
+            return Err(Error("convolution dimensions".into()));
+        }
+        let y = self.tensor(m, n)?;
+        let name =
+            if bias.is_some() { "conv3x3_bf16_bf16_nt_bias" } else { "conv3x3_bf16_bf16_nt" };
+        let mut args = Args::new();
+        args.i32(m as i32).f32(1.0).ptr(x.ptr()).ptr(w.values).ptr(y.ptr());
+        if let Some(bias) = bias {
+            args.ptr(bias);
+        }
+        // The same tile rules the GEMM uses, and the same reason for them.
+        let wide = m >= 128 && n >= 64 && m.div_ceil(64).is_multiple_of(2);
+        let square = wide && n >= 128 && n.div_ceil(64).is_multiple_of(2) && k >= 128;
+        let (tile_m, tile_n) = (if wide { 128 } else { 64 }, if square { 128 } else { 64 });
+        let name = match (square, wide) {
+            (true, _) => format!("{name}_tiled"),
+            (_, true) => format!("{name}_wide"),
+            _ => name.to_string(),
+        };
+        self.launch(
+            &name,
+            config(&[
+                ("m", m),
+                ("n", n),
+                ("k", k),
+                // A is the image, not a patch matrix.
+                ("asize", m * x.cols()),
+                ("bsize", n * k),
+                ("csize", m * n),
+                ("astride", m * x.cols()),
+                ("bstride", n * k),
+                ("channels", x.cols()),
+                ("width", width),
+                ("height", height),
+            ]),
+            &args,
+            n.div_ceil(tile_n),
+            m.div_ceil(tile_m),
+            256,
+        )?;
+        Ok(y)
     }
 
     /// Nearest-neighbour 2x, the VAE's upsampler.
@@ -550,6 +649,18 @@ impl Ops {
         ]);
         self.launch(&name, config, &args, n.div_ceil(tile_n), batches * m.div_ceil(tile_m), 256)
     }
+}
+
+/// Whether a loader should pack 3x3 convolution weights channels-last, and so
+/// whether [`Ops::conv`] takes the implicit-GEMM path for them.
+///
+/// This is the loader's decision alone: the operation reads the layout off the
+/// weight. `KREA2_CONV_IM2COL=1` keeps the file's order and the patch buffer,
+/// which is how the two paths are compared against each other.
+pub fn pack_convolutions() -> bool {
+    static CHOICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CHOICE
+        .get_or_init(|| std::env::var_os("KREA2_CONV_IM2COL").is_none_or(|value| value != "1"))
 }
 
 /// A kernel configuration from shape entries, which is how these kernels take

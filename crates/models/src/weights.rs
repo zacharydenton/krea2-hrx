@@ -6,6 +6,14 @@
 //! per-tensor scale are dequantised to bf16, and the VAE's five-dimensional
 //! causal convolutions are reduced to their last temporal tap, which is the
 //! single-image frame.
+//!
+//! One reordering: a 3x3 convolution's weights are stored `[out][ky][kx][in]`
+//! rather than the file's `[out][in][ky][kx]`. The implicit-GEMM convolution
+//! reduces over `tap * channels + channel`, so channels-last is what makes its
+//! four-element loads contiguous. The shape it reports is unchanged, because
+//! the shape is what the operation checks its dimensions against; only the
+//! order of the values behind it moves. `krea2_ops::Ops::conv` is the only
+//! reader, and it takes the matching path for every 3x3.
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -115,6 +123,21 @@ impl Weights {
             let base = storage.ptr().offset(item.offset);
             let staged = stage(&item.dtype, tensor.bytes, item)?;
             let bytes = staged.as_deref().unwrap_or(&tensor.bytes[..item.bytes]);
+            // Every 3x3 convolution, not only the ones stage() touched: three
+            // of the decoder's are stored four-dimensional, with no temporal
+            // tap to reduce, so they would otherwise reach the device in the
+            // file's order while the kernel read them as channels-last.
+            let element = if item.dtype == "F32" { 4 } else { 2 };
+            let packed = (is_square_convolution(&item.shape, 3)
+                && krea2_ops::pack_convolutions())
+            .then(|| channels_last(bytes, &item.shape, element));
+            let layout = match packed.is_some() {
+                true => krea2_ops::Layout::ChannelsLast,
+                false => krea2_ops::Layout::RowMajor,
+            };
+            // Everything below reads the values as they are on the device, so
+            // it has to be the packed ones where there are any.
+            let bytes = packed.as_deref().unwrap_or(bytes);
             device().copy_from_host(base, bytes)?;
             let (bf16, holder) = if item.dtype == "F32" {
                 // Everything but the norms consumes a float32 tensor as bf16,
@@ -137,7 +160,8 @@ impl Weights {
                     item.shape.clone(),
                     item.count,
                     (item.dtype == "F32").then_some(base),
-                ),
+                )
+                .in_layout(layout),
             );
         }
         float_storage.push(storage);
@@ -192,6 +216,29 @@ fn stage(dtype: &str, source: &[u8], item: &Item) -> Result<Option<Vec<u8>>> {
         }
     }
     Ok(Some(staged))
+}
+
+/// `[out][in][k][k]` with `k` as given.
+fn is_square_convolution(shape: &[usize], k: usize) -> bool {
+    shape.len() == 4 && shape[2] == k && shape[3] == k
+}
+
+/// `[out][in][ky][kx]` to `[out][ky][kx][in]`, so the innermost run is the
+/// input channels the convolution reduces over four at a time.
+fn channels_last(values: &[u8], shape: &[usize], element: usize) -> Vec<u8> {
+    let (outputs, inputs, ky, kx) = (shape[0], shape[1], shape[2], shape[3]);
+    let taps = ky * kx;
+    let mut packed = vec![0u8; values.len()];
+    for o in 0..outputs {
+        for i in 0..inputs {
+            for t in 0..taps {
+                let from = ((o * inputs + i) * taps + t) * element;
+                let to = ((o * taps + t) * inputs + i) * element;
+                packed[to..to + element].copy_from_slice(&values[from..from + element]);
+            }
+        }
+    }
+    packed
 }
 
 fn read_f32(bytes: &[u8], count: usize) -> Vec<f32> {

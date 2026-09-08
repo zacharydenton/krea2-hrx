@@ -4,7 +4,7 @@
 //! they are compared bit for bit rather than within a tolerance. Skipped when
 //! there is no GPU or no compiler.
 use krea2_numerics::{from_f32, to_f32};
-use krea2_ops::{Binary, Ops, Pool, Tensor, Unary};
+use krea2_ops::{Binary, Layout, Ops, Pool, Tensor, Unary, Weight};
 
 fn usable() -> bool {
     let compiler = loom::compiler(None);
@@ -105,4 +105,65 @@ fn the_pointwise_and_broadcast_operations_agree_with_the_host() {
         .map(|(i, &v)| to_f32(from_f32(to_f32(from_f32(v)) * to_f32(from_f32(row[i % 16])))))
         .collect();
     assert_eq!(download(&product), want);
+}
+
+/// A convolution's answer must not depend on which order its values are in.
+///
+/// `Ops::conv` has two implementations and they read the weight differently:
+/// the implicit one reduces over `[out][ky][kx][in]`, the patch one over the
+/// file's `[out][in][ky][kx]`. Only the weight knows which it holds, so this
+/// builds the same convolution both ways and checks they agree. Before the
+/// layout travelled with the weight, a hand-built `Weight` in the file's order
+/// was read as though it were packed.
+#[test]
+fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
+    if !usable() {
+        return;
+    }
+    let ops = Ops::new(Pool::new());
+    let (height, width, inputs, outputs) = (8usize, 8usize, 8usize, 16usize);
+    let image: Vec<f32> =
+        (0..height * width * inputs).map(|i| ((i % 23) as f32 - 11.0) / 16.0).collect();
+    let x = upload(&ops, &image, height * width, inputs);
+
+    // [out][in][ky][kx], and the same values as [out][ky][kx][in].
+    let row_major: Vec<f32> =
+        (0..outputs * inputs * 9).map(|i| ((i % 17) as f32 - 8.0) / 64.0).collect();
+    let mut packed = vec![0.0f32; row_major.len()];
+    for o in 0..outputs {
+        for i in 0..inputs {
+            for t in 0..9 {
+                packed[(o * 9 + t) * inputs + i] = row_major[(o * inputs + i) * 9 + t];
+            }
+        }
+    }
+
+    let weight = |values: &[f32], layout: Layout| {
+        let bits: Vec<u16> = values.iter().map(|&v| from_f32(v)).collect();
+        let buffer = std::sync::Arc::new(
+            hrx::device().allocate(bits.len() * 2).expect("a weight allocation"),
+        );
+        hrx::device().write(buffer.ptr(), &bits).expect("upload");
+        Weight::new(&buffer, buffer.ptr(), vec![outputs, inputs, 3, 3], bits.len(), None)
+            .in_layout(layout)
+    };
+
+    let patches = ops
+        .conv(&x, height, width, &weight(&row_major, Layout::RowMajor), None)
+        .expect("the patch path");
+    let implicit = ops
+        .conv(&x, height, width, &weight(&packed, Layout::ChannelsLast), None)
+        .expect("the implicit path");
+
+    let (a, b) = (download(&patches), download(&implicit));
+    assert_eq!(a.len(), height * width * outputs);
+    let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    let scale = a.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    assert!(
+        worst <= 0.02 * scale.max(1.0),
+        "the two paths disagree by {worst} on values up to {scale}"
+    );
+    // A packed weight that is not 3x3 is a contradiction, not a silent misread.
+    let flat = weight(&row_major, Layout::ChannelsLast);
+    assert!(ops.conv(&x, height, width, &flat, None).is_ok(), "3x3 packed is fine");
 }

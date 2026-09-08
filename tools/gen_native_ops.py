@@ -724,13 +724,79 @@ softmax(False)
 softmax(True)
 
 
+def conv_source(k, row, col):
+    """Where a 3x3 convolution's A element comes from, given its (row, k).
+
+    The row is an output pixel and k is `tap * channels + channel` under the
+    [out][ky][kx][in] weight packing. A four-element load stays inside one tap
+    because every channel count here is a multiple of four, so one bounds check
+    covers the packet and the load stays contiguous.
+    """
+    three = k.c(3)
+    one = k.c(1)
+    tap = k.div(col, "%channels")
+    channel = k.rem(col, "%channels")
+    py = k.div(row, "%width")
+    px = k.rem(row, "%width")
+    # Same padding: the centre tap is (1, 1). A row or column off the edge
+    # underflows, which the unsigned compare rejects.
+    iy = k.op("index.sub", k.add(py, k.div(tap, three)), one)
+    ix = k.op("index.sub", k.add(px, k.rem(tap, three)), one)
+    inside_y = k.cmp(iy, "%height")
+    inside_x = k.cmp(ix, "%width")
+    valid = k.op(
+        "scalar.andi",
+        k.op("scalar.andi", inside_y, inside_x, t="i1"),
+        k.op("scalar.andi", k.cmp(row, "%m"), k.cmp(col, "%k"), t="i1"),
+        t="i1",
+    )
+    # The address is formed from coordinates forced back inside the image. The
+    # guard means the clamped value is never the one that is read; forming it
+    # unclamped would leave an underflowed index the target cannot prove fits
+    # in its 32-bit address arithmetic.
+    zero = k.c(0)
+    safe_y = k.choose(inside_y, iy, zero)
+    safe_x = k.choose(inside_x, ix, zero)
+    # Each step is bounded on its own. The target folds a multiply and an add
+    # into one addressing instruction and checks the result fits 32 bits, which
+    # it cannot see through two chained multiplies of unconstrained config
+    # values -- so the pixel index is pinned before it is scaled by channels.
+    pixel = k.var()
+    raw_pixel = k.add(k.mul(safe_y, "%width"), safe_x)
+    k.emit(
+        f"{pixel} = index.assume {raw_pixel} "
+        f"[range({raw_pixel}, 0, 1073741823), lt({raw_pixel}, %m)] : index"
+    )
+    bounded = k.var()
+    index = k.add(k.mul(pixel, "%channels"), channel)
+    k.emit(
+        f"{bounded} = index.assume {index} "
+        f"[range({index}, 0, 1073741823), lt({index}, %asize)] : index"
+    )
+    return valid, bounded
+
+
 # 64x64, 128x64 and 128x128 WMMA tiles, using a 4x2 wave layout.
 # Larger row tiles reuse B fragments; larger column tiles halve A traffic
 # in the VAE's long reductions. All share the same accumulation order.
 # Scalar predication at the edges handles arbitrary M/N/K, including RGB's N=3.
-def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, tile_n=64):
+def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, tile_n=64,
+         conv=False):
+    """The GEMM, and the same GEMM reading a 3x3 convolution's patches directly.
+
+    `conv` replaces the A operand's address with the pixel it would have been
+    copied from, so no patch buffer is written or read. It needs the weights
+    packed [out][ky][kx][in] rather than [out][in][ky][kx]: with channels last,
+    four consecutive k are four consecutive channels of one tap, which is the
+    same contiguous four-element load the GEMM already does. With channels
+    innermost they would be four taps of one channel, strided by the channel
+    count, and the load would fall apart into four.
+
+    That repack also changes the reduction order from channel-major to
+    tap-major, so a conv kernel does not reproduce im2col's bits.
+    """
     name = (
-        "gemm_"
+        ("conv3x3_" if conv else "gemm_")
         + dtype
         + "_"
         + output
@@ -741,12 +807,11 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, til
     bufs = [("a", dtype, "%asize"), ("b", dtype, "%bsize"), ("out", output, "%csize")]
     if bias:
         bufs.append(("bias", dtype, "%n"))
-    k = Kernel(
-        name,
-        bufs,
-        ["m", "n", "k", "asize", "bsize", "csize", "astride", "bstride"],
-        scalars=[("alpha", "f32")],
-    )
+    configs = ["m", "n", "k", "asize", "bsize", "csize", "astride", "bstride"]
+    if conv:
+        # The image the A rows are pixels of. k is channels * 9.
+        configs += ["channels", "width", "height"]
+    k = Kernel(name, bufs, configs, scalars=[("alpha", "f32")])
     cm = [k.c(i) for i in [0, 1, 2, 4, 8, 16, 32, 40, 64, 256]]
     c0, c1, c2, c4, c8, c16, c32, c40, c64, c256 = cm
     wave = k.var()
@@ -813,10 +878,15 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, til
             ]:
                 if h >= (tile_m if inp == "a" else tile_n) // 32:
                     continue
-                valid = k.op("scalar.andi", k.cmp(rr, limit), k.cmp(col, "%k"), t="i1")
+                if conv and inp == "a":
+                    valid, idx = conv_source(k, rr, col)
+                else:
+                    valid = k.op(
+                        "scalar.andi", k.cmp(rr, limit), k.cmp(col, "%k"), t="i1"
+                    )
+                    idx = k.add(off, k.add(k.mul(rr, "%k"), col))
                 value = k.var()
                 k.emit(f"{value} = scf.if {valid} -> (vector<4x{dtype}>) {{")
-                idx = k.add(off, k.add(k.mul(rr, "%k"), col))
                 bounded = k.var()
                 size = "%asize" if inp == "a" else "%bsize"
                 end = k.op("index.sub", size, c4)
@@ -846,15 +916,20 @@ def gemm(dtype="bf16", output="bf16", transpose=True, bias=False, tile_m=64, til
             ]:
                 if h >= (tile_m if inp == "a" else tile_n) // 32:
                     continue
-                valid = k.op("scalar.andi", k.cmp(rr, limit), k.cmp(col, "%k"), t="i1")
+                if conv and inp == "a":
+                    valid, idx = conv_source(k, rr, col)
+                else:
+                    valid = k.op(
+                        "scalar.andi", k.cmp(rr, limit), k.cmp(col, "%k"), t="i1"
+                    )
+                    idx = k.add(
+                        off,
+                        k.add(k.mul(col, "%n"), rr)
+                        if inp == "b" and not transpose
+                        else k.add(k.mul(rr, "%k"), col),
+                    )
                 value = k.var()
                 k.emit(f"{value} = scf.if {valid} -> ({dtype}) {{")
-                idx = k.add(
-                    off,
-                    k.add(k.mul(col, "%n"), rr)
-                    if inp == "b" and not transpose
-                    else k.add(k.mul(rr, "%k"), col),
-                )
                 val = k.load(inp, idx, False)
                 k.emit(f"scf.yield {val} : {dtype}")
                 k.emit("} else {")
@@ -966,6 +1041,18 @@ gemm(tile_m=128, tile_n=128)
 gemm(bias=True, tile_m=128, tile_n=128)
 gemm(tile_m=128)
 gemm(bias=True, tile_m=128)
+
+# The VAE decoder's 3x3 convolutions, reading the image instead of a patch
+# buffer. The wide tile is what the shape rules pick for these: tall M (one row
+# per pixel), narrow N (96 to 384 channels).
+gemm(conv=True, tile_m=128)
+gemm(conv=True, bias=True, tile_m=128)
+gemm(conv=True, tile_m=128, tile_n=128)
+gemm(conv=True, bias=True, tile_m=128, tile_n=128)
+# A tile whose pixel count is an odd number of 64-row tiles takes the small
+# tile, and edge tiles of the decoder's grid can be exactly that.
+gemm(conv=True)
+gemm(conv=True, bias=True)
 
 for kw in [
     dict(),
