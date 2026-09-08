@@ -1,0 +1,10 @@
+[package]
+name = "krea2-build-support"
+version = "0.1.0"
+edition = "2021"
+description = "Where the Loom runtime lives, for the build scripts that need to link and find it"
+license = "MIT"
+publish = false
+
+[lib]
+name = "krea2_build_support"

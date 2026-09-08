@@ -5,12 +5,34 @@ use std::process::Command;
 
 use crate::{Error, Result, Settings};
 
-/// The compiler to spawn: the caller's choice, else `LOOM_COMPILE`, else PATH.
+/// The compiler to spawn: the caller's choice, else `LOOM_COMPILE`, else the
+/// one an installed build fetched into its cache, else PATH.
+///
+/// The cache entry is what makes `cargo install` work: nothing puts
+/// `loom-compile` on PATH, and it is needed at run time, not only at build
+/// time -- the first image at a new sequence length compiles a bundle.
 pub fn compiler(override_path: Option<&str>) -> String {
-    override_path
-        .map(str::to_string)
-        .or_else(|| std::env::var("LOOM_COMPILE").ok())
-        .unwrap_or_else(|| "loom-compile".to_string())
+    if let Some(path) = override_path {
+        return path.to_string();
+    }
+    if let Ok(named) = std::env::var("LOOM_COMPILE") {
+        return named;
+    }
+    if let Some(cached) = runtime_directory().map(|root| root.join("loom-compile")) {
+        if cached.is_file() {
+            return cached.to_string_lossy().into_owned();
+        }
+    }
+    "loom-compile".to_string()
+}
+
+/// Where an installed build keeps the Loom runtime it fetched: `libhrx.so`
+/// beside `loom-compile`, under the same cache root as the kernel bundles.
+pub fn runtime_directory() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(base.join("krea2-loom/runtime"))
 }
 
 /// One compilation: source text in, HSACO on disk out.

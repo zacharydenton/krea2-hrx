@@ -17,3 +17,6 @@ krea2-checkpoint = { path = "../checkpoint" }
 krea2-numerics = { path = "../numerics" }
 krea2-ops = { path = "../ops" }
 krea2-tokenizer = { path = "../tokenizer" }
+
+[build-dependencies]
+krea2-build-support = { path = "../build-support" }

@@ -201,9 +201,10 @@ correctness. `docs/notes.md` records every decision and measurement.
 ## Quick start
 
 **Dependencies.** A Radeon 8060S (gfx1151) on Linux with the amdgpu/KFD driver, a
-build of [hrx-system](https://github.com/ROCm/hrx-system) (HRX's headers, `libhrx`
-and its HSA provider, and the `loom-compile` tool that compiles kernels for a new
-sequence length), and a Rust toolchain. That is the whole list: no HIP, hipcc, BLAS,
+system ROCm for its HSA runtime, two files from a build of
+[hrx-system](https://github.com/ROCm/hrx-system) -- `libhrx.so` and the
+`loom-compile` tool that compiles kernels for a new sequence length, about 12 MB
+together -- and a Rust toolchain. That is the whole list: no HIP, hipcc, BLAS,
 ICU, OpenSSL, Python — and no C or C++ compiler. Everything in this repository is
 Rust or a Loom kernel; `libhrx` and `loom-compile` underneath it are still C++, and
 what this exports is still a C ABI. `scripts/env.sh` points at the HRX
@@ -227,6 +228,23 @@ download. `HF_HUB_OFFLINE=1` refuses the network outright.
 **Python (tests and the diffusers path only).** A venv at `.venv` with ROCm PyTorch,
 diffusers (a recent checkout that carries the Krea 2 transformer), safetensors, numpy
 and Pillow. Inference never needs it.
+
+`libhrx.so` is looked for in `KREA2_RUNTIME`, then the repository's
+`build/runtime`, then `$XDG_CACHE_HOME/krea2-loom/runtime`, and `loom-compile`
+in `LOOM_COMPILE`, then that same cache, then `PATH`. So putting the two in
+`~/.cache/krea2-loom/runtime` is enough to `cargo install --path cli` and run
+the binary from anywhere, with nothing else set:
+
+```sh
+mkdir -p ~/.cache/krea2-loom/runtime
+cp "$HRX_BUILD/libhrx/src/libhrx/libhrx.so" ~/.cache/krea2-loom/runtime/libhrx.so.0
+ln -sf libhrx.so.0 ~/.cache/krea2-loom/runtime/libhrx.so
+cp "$LOOM_TOOLS/loom-compile/loom-compile" ~/.cache/krea2-loom/runtime/
+cargo install --path cli
+krea2 -p "a red fox in the snow" --out fox.png
+```
+
+For working in the tree, `scripts/build.sh` puts everything under `build/`:
 
 ```sh
 source scripts/env.sh

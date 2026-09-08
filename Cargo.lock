@@ -1219,6 +1219,7 @@ name = "hrx"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "krea2-build-support",
 ]
 
 [[package]]
@@ -1600,6 +1601,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "krea2-build-support",
  "krea2-pipeline",
  "png",
 ]
@@ -1609,9 +1611,14 @@ name = "krea2-abi"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
+ "krea2-build-support",
  "krea2-pipeline",
  "krea2-session",
 ]
+
+[[package]]
+name = "krea2-build-support"
+version = "0.1.0"
 
 [[package]]
 name = "krea2-checkpoint"
@@ -1629,6 +1636,7 @@ dependencies = [
  "bytemuck",
  "hf-hub",
  "hrx",
+ "krea2-build-support",
  "krea2-checkpoint",
  "krea2-numerics",
  "krea2-ops",
@@ -1647,6 +1655,7 @@ name = "krea2-ops"
 version = "0.1.0"
 dependencies = [
  "hrx",
+ "krea2-build-support",
  "krea2-numerics",
  "loom",
 ]
@@ -1683,6 +1692,7 @@ dependencies = [
  "bytemuck",
  "half",
  "hrx",
+ "krea2-build-support",
  "krea2-numerics",
  "krea2-ops",
  "krea2-pipeline",

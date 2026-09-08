@@ -1,17 +1,16 @@
-// Links libhrx from the runtime directory the build scripts publish
-// (build/runtime), which is also where the HSA provider lives.
+// Links libhrx from wherever it is: KREA2_RUNTIME, the repository's
+// build/runtime, or the cache an installed build fetches into. libhrx dlopens
+// the HSA runtime itself and finds the system one, so nothing else is needed
+// here.
 fn main() {
-    let runtime = std::env::var("KREA2_RUNTIME").unwrap_or_else(|_| {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("the crate sits in the repository")
-            .join("build/runtime");
-        root.to_string_lossy().into_owned()
-    });
-    println!("cargo:rerun-if-env-changed=KREA2_RUNTIME");
-    println!("cargo:rustc-link-search=native={runtime}");
+    let Some(runtime) = krea2_build_support::runtime_directory() else {
+        println!(
+            "cargo:warning=no libhrx.so found: set {} to the directory holding it",
+            krea2_build_support::RUNTIME
+        );
+        return;
+    };
+    println!("cargo:rustc-link-search=native={}", runtime.display());
     println!("cargo:rustc-link-lib=dylib=hrx");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{runtime}");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/runtime");
+    krea2_build_support::emit_rpath();
 }

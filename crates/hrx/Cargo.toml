@@ -9,3 +9,6 @@ publish = false
 [dependencies]
 # Reinterpreting a typed slice as bytes, without hand-written unsafe.
 bytemuck = "1"
+
+[build-dependencies]
+krea2-build-support = { path = "../build-support" }

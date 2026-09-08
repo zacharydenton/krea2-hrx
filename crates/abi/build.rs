@@ -3,27 +3,20 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    rpath();
+    krea2_build_support::emit_rpath();
     headers();
 }
 
-/// The cdylib links libhrx, so it needs the same runtime rpath the hrx crate
-/// sets for itself; cargo does not propagate a dependency's link arguments.
-fn rpath() {
-    let runtime = std::env::var("KREA2_RUNTIME")
-        .unwrap_or_else(|_| root().join("build/runtime").to_string_lossy().into_owned());
-    println!("cargo:rerun-if-env-changed=KREA2_RUNTIME");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,{runtime}");
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/runtime");
-}
-
-/// `build/include/krea2.h` and `krea2_pipeline.h`, from the sources that
-/// export them, so the declarations cannot drift from the definitions. They
-/// are build artifacts for third parties: nothing in this repository compiles
-/// C, and no header is committed.
+/// `krea2.h` and `krea2_pipeline.h`, from the sources that export them, so the
+/// declarations cannot drift from the definitions.
+///
+/// They go to OUT_DIR, which is where a build artifact belongs and the only
+/// directory a `cargo install` may write to, and are copied into the
+/// repository's `build/include` as well when there is one -- that is the path
+/// the README and the tools name.
 fn headers() {
-    let include = root().join("build/include");
-    for (source, header, name) in [
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    for (source, header, guard) in [
         ("src/lib.rs", "krea2.h", "KREA2_H"),
         ("src/pipeline.rs", "krea2_pipeline.h", "KREA2_PIPELINE_H"),
     ] {
@@ -35,7 +28,7 @@ fn headers() {
             // header links against the library rather than mangled names.
             .with_cpp_compat(true)
             .with_documentation(true)
-            .with_include_guard(name)
+            .with_include_guard(guard)
             .with_no_includes()
             .with_sys_include("stddef.h")
             .with_sys_include("stdint.h")
@@ -52,8 +45,11 @@ fn headers() {
             // documentation for callers in other languages, not an input.
             Err(error) => println!("cargo:warning=cannot generate {header}: {error}"),
             Ok(bindings) => {
-                let _ = std::fs::create_dir_all(&include);
-                bindings.write_to_file(include.join(header));
+                bindings.write_to_file(out.join(header));
+                if let Some(include) = repository_include() {
+                    let _ = std::fs::create_dir_all(&include);
+                    bindings.write_to_file(include.join(header));
+                }
             }
         }
     }
@@ -61,10 +57,9 @@ fn headers() {
 
 const BANNER: &str = "// Generated from the Rust sources by crates/abi/build.rs. Do not edit.";
 
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("the crate sits in the repository")
-        .to_path_buf()
+/// `<repo>/build/include`, when this is a build inside the checkout.
+fn repository_include() -> Option<PathBuf> {
+    let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
+    let root = Path::new(&manifest).ancestors().find(|path| path.join("kernels").is_dir())?;
+    Some(root.join("build/include"))
 }
