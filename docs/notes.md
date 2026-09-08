@@ -1020,3 +1020,28 @@ Two bugs the port surfaced, both from porting the C++ *tests* rather than the co
 - The `hf-hub` fallback needed a rule, or a missing sibling next to a path the user
   gave would have started an eight-gigabyte download. A path now means that directory;
   naming a checkpoint is what asks for the set to be fetched.
+
+## The seeded anchors after the port (2026-09-08)
+
+The noise generator changed with the Rust port, so the old seed-0 hashes
+describe a build that no longer exists. Re-anchored on an idle box, same tool
+and same prompt as before (`tools/bench_native.py`, "a red fox in the snow",
+1024^2, eight steps, seed 0):
+
+| | was | is |
+| --- | --- | --- |
+| Turbo RGB sha256 | `45f58858c829262af43d65b01292dbb5f5f2e81d31c95ec07c19a63e76eb1253` | `44818d70c629ddbc07e76c86a89ac207f37f6e201a5e669e62c3f4727c438376` |
+| Turbo warm image | 27.7 s median | 27.74 s median (30.17 / 27.51 / 27.74) |
+
+The hash repeated across five runs today, three idle and two while another job
+shared the GPU. **Only the noise moved**: the image changed because
+`krea2_generate(seed)` draws from `rand_chacha` instead of `std::mt19937_64`
+through a hand-written Box-Muller pair, not because any arithmetic did. That is
+what the byte-identical gates recorded above establish -- the same latents in
+give the same pixels out through both builds, and `tools/quality_vs_bf16.py`
+and `tools/compare_native.py` both feed their own latents for exactly this
+reason.
+
+The 27.74 s median against the 27.7 s recorded for the C++ build says the port
+costs nothing on the clock, which is the other thing worth knowing: the host
+was never on the critical path, and moving it to Rust did not put it there.
