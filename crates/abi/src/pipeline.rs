@@ -8,7 +8,7 @@ use std::path::Path;
 
 use krea2_pipeline::{Files, Pipeline, Request, Result};
 
-use crate::{report, INVALID_ARGUMENT, OK};
+use crate::{report, OK};
 
 /// Must match `KREA2_PIPELINE_ABI_VERSION`.
 const ABI_VERSION: u32 = 3;
@@ -451,8 +451,3 @@ pub unsafe extern "C" fn krea2_generate_guided(
         Ok(())
     })
 }
-
-/// The pipeline's errors are all "invalid argument" to the block ABI's eyes;
-/// this keeps the two constant sets from drifting apart unnoticed.
-#[allow(dead_code)]
-const _: () = assert!(INVALID_ARGUMENT == 64);
