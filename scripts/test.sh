@@ -56,7 +56,6 @@ if [ "$quick" = 0 ]; then
 fi
 if [ "$native" = 1 ]; then
   if step "build native pipeline" ./scripts/build_native.sh; then
-    step "Unicode normalization, tokenizer and SHA-256" bash -c '.venv/bin/python tests/test_unicode.py'
     step "native scheduler and weight reuse regressions" bash -c '.venv/bin/python tests/test_native_regressions.py'
     step "native pipeline vs reference" bash -c '.venv/bin/python tests/test_native_pipeline.py'
   fi

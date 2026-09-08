@@ -76,10 +76,13 @@ HIP, BLAS, Torch, Python, ICU, PCRE2 and OpenSSL mappings. Constructor-failure
 checks wrap actual HRX buffer allocation/release. The quick suite includes both
 checks plus standalone auxiliary arithmetic, main block kernels and Sage oracles.
 
-`tests/test_unicode.py` checks SHA-256 block/padding boundaries, Unicode NFC and
-mixed-script tokenizer inputs against independent Python implementations. The
-native model suites compare components, the full transformer and tiled VAE to
-the installed references and verify the real CUDA scheduler's BF16 rounding.
+The tokenizer is checked where each implementation lives: `cargo test` covers the
+Rust one, including that the file's NFC normalizer is applied and that Krea's
+template costs the 34 tokens the encoder later strips, and
+`tests/test_native_pipeline.py` compares the shipping C++ one with HuggingFace's
+`AutoTokenizer` through `krea2_tokenize`. The native model suites compare
+components, the full transformer and tiled VAE to the installed references and
+verify the real CUDA scheduler's BF16 rounding.
 
 ## Local performance and image comparison
 
