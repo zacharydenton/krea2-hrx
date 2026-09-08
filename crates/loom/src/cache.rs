@@ -71,7 +71,9 @@ pub fn auxiliary_kernel(name: &str, config: &Config, grid: (u32, u32)) -> Result
             ]);
             let compiler =
                 compiler(COMPILER.lock().unwrap_or_else(|e| e.into_inner()).as_deref());
-            Compilation { compiler: &compiler, name, source, config: &config }
+            let settings =
+                config.iter().map(|(key, value)| (key.clone(), value.to_string())).collect();
+            Compilation { compiler: &compiler, name, source, config: &settings }
                 .run(&root, &staging)?;
             let compiled = std::fs::read(&staging)
                 .map_err(|e| Error(format!("cannot read {}: {e}", staging.display())))?;

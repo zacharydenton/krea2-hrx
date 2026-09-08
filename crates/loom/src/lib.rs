@@ -46,6 +46,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `std::map` ordered them so cache keys stay byte-identical.
 pub type Config = std::collections::BTreeMap<String, u64>;
 
+/// A compiler invocation's `--config` values, which are not all counts.
+pub type Settings = std::collections::BTreeMap<String, String>;
+
 /// Convenience for the common `[("tokens", 4115), ...]` literal.
 pub fn config<const N: usize>(entries: [(&str, u64); N]) -> Config {
     entries.into_iter().map(|(key, value)| (key.to_string(), value)).collect()

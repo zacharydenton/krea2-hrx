@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{Config, Error, Result};
+use crate::{Error, Result, Settings};
 
 /// The compiler to spawn: the caller's choice, else `LOOM_COMPILE`, else PATH.
 pub fn compiler(override_path: Option<&str>) -> String {
@@ -16,9 +16,13 @@ pub fn compiler(override_path: Option<&str>) -> String {
 /// One compilation: source text in, HSACO on disk out.
 pub struct Compilation<'a> {
     pub compiler: &'a str,
+    /// The source's name, which is also the kernel's symbol and the prefix its
+    /// configuration keys take.
     pub name: &'a str,
     pub source: &'a str,
-    pub config: &'a Config,
+    /// String-valued because block kernels configure floats (`eps`, `scale`)
+    /// as well as counts.
+    pub config: &'a Settings,
 }
 
 impl Compilation<'_> {

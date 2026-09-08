@@ -39,18 +39,28 @@ pub struct Models {
 
 impl Models {
     pub fn open(files: &Files) -> Result<Models> {
-        Models::load(&files.checkpoint, &files.text_encoder, &files.vae)
+        Models::load(
+            &files.checkpoint,
+            &files.text_encoder,
+            &files.vae,
+            files.tokenizer.as_deref(),
+        )
     }
 
+    /// `tokenizer` of `None` uses the copy compiled into `krea2-tokenizer`.
     pub fn load(
         checkpoint: &std::path::Path,
         text_encoder: &std::path::Path,
         vae: &std::path::Path,
+        tokenizer: Option<&std::path::Path>,
     ) -> Result<Models> {
         let pool = Pool::new();
         let models = Models {
             ops: Ops::new(Arc::clone(&pool)),
-            tokenizer: Tokenizer::embedded()?,
+            tokenizer: match tokenizer {
+                Some(path) => Tokenizer::from_file(path)?,
+                None => Tokenizer::embedded()?,
+            },
             text: Weights::load(&Checkpoint::open(text_encoder)?, text_name)?,
             transformer: Weights::load(&Checkpoint::open(checkpoint)?, transformer_name)?,
             vae: Weights::load(&Checkpoint::open(vae)?, vae_name)?,

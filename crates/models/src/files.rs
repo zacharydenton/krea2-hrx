@@ -6,6 +6,11 @@
 //! whose Krea 2 repository has that same layout. So a checkpoint can be named
 //! by path or just by name, and a file another tool already downloaded is used
 //! where it lies.
+//!
+//! The tokenizer comes from the text encoder's own repository rather than
+//! ComfyUI's, which does not carry one. It is seven megabytes, so it is fetched
+//! whenever the network is allowed; the copy compiled into `krea2-tokenizer` is
+//! the fallback, and a test pins the two as identical.
 use std::path::{Path, PathBuf};
 
 use crate::hub;
@@ -17,6 +22,9 @@ pub struct Files {
     pub checkpoint: PathBuf,
     pub text_encoder: PathBuf,
     pub vae: PathBuf,
+    /// Qwen's `tokenizer.json`, when the hub could supply it. `None` means the
+    /// embedded copy, which is the same bytes.
+    pub tokenizer: Option<PathBuf>,
     /// Turbo: a fixed timestep shift and no guidance. Raw: neither.
     pub distilled: bool,
 }
@@ -109,7 +117,10 @@ impl<'a> Request<'a> {
                 .map(|name| name.to_string_lossy().to_lowercase().contains("raw"))
                 .unwrap_or(false)
         });
-        Ok(Files { checkpoint, text_encoder, vae, distilled })
+        // Small, and the same for every checkpoint: worth fetching, and no
+        // loss when it cannot be.
+        let tokenizer = hub::file(hub::TOKENIZER_REPO, "tokenizer.json", self.offline).ok();
+        Ok(Files { checkpoint, text_encoder, vae, tokenizer, distilled })
     }
 
     /// The checkpoint as a path in the repository: a bare name is a diffusion
@@ -157,9 +168,10 @@ impl<'a> Request<'a> {
         Err(Error(format!(
             "the {what} was not found beside {} or in the Hugging Face cache \
              (expected {expected}; pass it explicitly, or name a checkpoint to fetch \
-             the set from {})",
+             the set from {}/{})",
             self.checkpoint.display(),
-            hub::REPO
+            hub::REPO.0,
+            hub::REPO.1
         )))
     }
 }
