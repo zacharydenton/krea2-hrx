@@ -32,7 +32,9 @@ class Krea2Blocks:
         if not 1 <= layers <= 28:
             raise ValueError("layers must be 1..28")
         weights = Path(weights or DEFAULT_MODEL)
-        library = Path(library or ROOT / "build/libkrea2.so")
+        # KREA2_LIB names the block library, so the Rust and C++ builds can be
+        # compared against the same fixture while both exist.
+        library = Path(library or os.environ.get("KREA2_LIB") or ROOT / "build/libkrea2.so")
         native = ctypes.CDLL(str(library))
         native.krea2_abi_version.restype = ctypes.c_uint32
         if native.krea2_abi_version() != _ABI:

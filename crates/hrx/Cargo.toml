@@ -5,3 +5,7 @@ edition = "2021"
 description = "gfx1151 dispatch over the public HRX C API"
 license = "MIT"
 publish = false
+
+[dependencies]
+# Reinterpreting a typed slice as bytes, without hand-written unsafe.
+bytemuck = "1"

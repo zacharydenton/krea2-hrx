@@ -9,4 +9,7 @@ if ! command -v cargo > /dev/null; then
 fi
 cargo build --release --workspace
 install -m 755 target/release/krea2 build/krea2
-printf 'built build/krea2\n'
+# The Rust block library, beside the C++ one it is replacing: KREA2_LIB points
+# krea2_loom.py at either while both exist.
+install -m 644 target/release/libkrea2.so build/libkrea2_rust.so
+printf 'built build/krea2 and build/libkrea2_rust.so\n'

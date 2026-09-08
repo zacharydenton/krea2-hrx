@@ -254,6 +254,22 @@ impl Device {
         }
     }
 
+    /// Uploads a slice of plain data (`u8`, `u16`, `f32`, ...). The element
+    /// type only has to be one the GPU and the host agree on byte for byte,
+    /// which is what `Pod` means.
+    pub fn write<T: bytemuck::Pod>(&self, destination: DevicePtr, source: &[T]) -> Result<()> {
+        self.copy_from_host(destination, bytemuck::cast_slice(source))
+    }
+
+    /// Reads back into a slice of plain data.
+    pub fn read<T: bytemuck::Pod>(
+        &self,
+        destination: &mut [T],
+        source: DevicePtr,
+    ) -> Result<()> {
+        self.copy_to_host(bytemuck::cast_slice_mut(destination), source)
+    }
+
     pub fn copy_from_host(&self, destination: DevicePtr, source: &[u8]) -> Result<()> {
         let state = self.lock();
         let reference = Self::find(&state, destination, source.len())?;

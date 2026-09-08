@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "abi-blocks"
+version = "0.1.0"
+dependencies = [
+ "krea2-session",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -128,6 +135,12 @@ checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
 name = "castaway"
@@ -457,6 +470,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hrx"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+]
 
 [[package]]
 name = "ident_case"
@@ -508,6 +524,15 @@ name = "krea2-numerics"
 version = "0.1.0"
 dependencies = [
  "half",
+]
+
+[[package]]
+name = "krea2-session"
+version = "0.1.0"
+dependencies = [
+ "hrx",
+ "krea2-checkpoint",
+ "loom",
 ]
 
 [[package]]
