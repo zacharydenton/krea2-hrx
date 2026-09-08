@@ -148,7 +148,7 @@ impl Tensor {
     /// An uninitialized tensor. Kernels write every element they read, as they
     /// did in the C++; a tensor that must start at zero is zeroed explicitly.
     pub fn new(pool: &Arc<Pool>, rows: usize, cols: usize) -> Result<Tensor> {
-        let storage = pool.take(elements(rows, cols)? * 2)?;
+        let storage = pool.take(bytes(rows, cols)?)?;
         Ok(Tensor { rows, cols, storage: Arc::new(Storage::Owned(storage)), offset: 0 })
     }
 
@@ -161,9 +161,13 @@ impl Tensor {
         rows: usize,
         cols: usize,
     ) -> Result<Tensor> {
-        let bytes = elements(rows, cols)? * 2;
-        let offset = at.address().checked_sub(buffer.ptr().address());
-        if offset.is_none_or(|offset| offset + bytes > buffer.len()) {
+        let wanted = bytes(rows, cols)?;
+        let inside = at
+            .address()
+            .checked_sub(buffer.ptr().address())
+            .and_then(|offset| offset.checked_add(wanted))
+            .is_some_and(|end| end <= buffer.len());
+        if !inside {
             return Err(Error("a view outside its allocation".into()));
         }
         Ok(Tensor {
@@ -208,10 +212,14 @@ impl Tensor {
     /// A window of `rows * cols` elements, `skip` elements into this tensor.
     pub fn view(&self, rows: usize, cols: usize, skip: usize) -> Result<Tensor> {
         let wanted = elements(rows, cols)?;
+        let offset = skip
+            .checked_mul(2)
+            .and_then(|skipped| self.offset.checked_add(skipped))
+            .ok_or_else(|| Error("tensor view".into()))?;
         if skip.checked_add(wanted).is_none_or(|end| end > self.size()) {
             return Err(Error("tensor view".into()));
         }
-        Ok(Tensor { rows, cols, storage: self.storage.clone(), offset: self.offset + skip * 2 })
+        Ok(Tensor { rows, cols, storage: self.storage.clone(), offset })
     }
 
     pub fn download(&self) -> Result<Vec<u16>> {
@@ -232,6 +240,12 @@ fn elements(rows: usize, cols: usize) -> Result<usize> {
         Some(0) | None => Err(Error("tensor shape".into())),
         Some(count) => Ok(count),
     }
+}
+
+/// The same as bytes. The element count fitting in a `usize` does not mean the
+/// byte count does, and it is the byte count every bound is checked against.
+fn bytes(rows: usize, cols: usize) -> Result<usize> {
+    elements(rows, cols)?.checked_mul(2).ok_or_else(|| Error("tensor shape".into()))
 }
 
 #[cfg(test)]
@@ -273,6 +287,11 @@ mod tests {
         assert!(elements(8, 0).is_err());
         assert!(elements(usize::MAX, 2).is_err(), "rows * cols must not wrap");
         assert_eq!(elements(3, 4).expect("a shape"), 12);
+        // A count that fits in a usize whose byte count does not: the bounds
+        // are checked in bytes, so this has to fail before they are.
+        assert!(elements(1, 1 << 63).is_ok(), "the element count itself fits");
+        assert!(bytes(1, 1 << 63).is_err(), "twice it does not");
+        assert_eq!(bytes(3, 4).expect("a shape"), 24);
     }
 
     #[test]
@@ -289,6 +308,10 @@ mod tests {
             Tensor::shared(&buffer, DevicePtr::from_address(base.address() - 8), 1, 1).is_err(),
             "before the start"
         );
+
+        // The byte count, not the element count, is what the bound is
+        // against: 2^63 elements is a usize but 2^64 bytes is not.
+        assert!(Tensor::shared(&buffer, base, 1, 1 << 63).is_err(), "byte count wraps");
 
         let view = Tensor::shared(&buffer, base.offset(16), 4, 4).expect("a view");
         assert_eq!((view.rows(), view.cols(), view.ptr()), (4, 4, base.offset(16)));

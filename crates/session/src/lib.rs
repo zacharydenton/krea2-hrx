@@ -337,6 +337,11 @@ impl Session {
     /// The rope tables, uploaded only when they are not the ones already
     /// resident. Two uploads per forward is two stream drains, and a 52-step
     /// guided image is 104 forwards of the same tables.
+    ///
+    /// Every path that fills those buffers goes through here. One that wrote
+    /// them directly would leave the fingerprint describing tables that are no
+    /// longer there, and the next matching call would skip its upload and run
+    /// against someone else's geometry.
     fn upload_rope(&self, cos: &[f32], sin: &[f32]) -> Result<()> {
         let fingerprint = (fingerprint(cos), fingerprint(sin));
         let mut resident = self.rope.lock().unwrap_or_else(|e| e.into_inner());
@@ -433,8 +438,7 @@ impl Session {
         }
         device().write(self.buffers.x.ptr(), x)?;
         device().write(self.buffers.mods.ptr(), mods)?;
-        device().write(self.buffers.cos.ptr(), cos)?;
-        device().write(self.buffers.sin.ptr(), sin)?;
+        self.upload_rope(cos, sin)?;
         for index in first_block..first_block + count {
             self.block(index, self.buffers.mods.ptr())?;
         }
@@ -691,5 +695,63 @@ impl Session {
             Some(self.modulation(mods, index, 5)),
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every path that fills the rope buffers must leave the fingerprint
+    /// describing what is actually in them.
+    ///
+    /// `run` and `run_device` write the same two buffers. When `run` wrote them
+    /// directly, the fingerprint still named whatever `run_device` had uploaded
+    /// last, so an A -> B -> A sequence skipped A's second upload and ran
+    /// against B's geometry. The numbers cannot see that -- attention's
+    /// contribution rounds away against the residual in bf16 -- but the
+    /// bookkeeping can, and it is the bookkeeping that was wrong.
+    ///
+    /// Needs a checkpoint, a bundle in `KREA2_KERNELS`, and a GPU.
+    #[test]
+    fn every_path_that_fills_the_rope_buffers_records_what_it_put_there() {
+        let Some((checkpoint, bundle, tokens)) = fixture() else {
+            return;
+        };
+        let session = match Session::open(&checkpoint, &bundle, tokens, 1) {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("skipping: {error}");
+                return;
+            }
+        };
+        let resident = || *session.rope.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(resident(), None, "nothing is resident before the first call");
+
+        let mods = vec![0.01f32; 6 * HIDDEN as usize];
+        let a = (vec![1.0f32; tokens * 128], vec![0.0f32; tokens * 128]);
+        let b = (vec![0.0f32; tokens * 128], vec![1.0f32; tokens * 128]);
+        let mut x = vec![0x3f00u16; tokens * HIDDEN as usize];
+
+        session.run(&mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A");
+        let after_a = resident();
+        assert!(after_a.is_some(), "A left nothing recorded");
+
+        session.run(&mut x, &mods, &b.0, &b.1, 0, Some(1)).expect("B");
+        assert_ne!(resident(), after_a, "B's upload was not recorded, so A looks resident");
+
+        session.run(&mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A again");
+        assert_eq!(resident(), after_a, "A's second upload was not recorded");
+    }
+
+    fn fixture() -> Option<(std::path::PathBuf, std::path::PathBuf, usize)> {
+        use std::path::PathBuf;
+        let checkpoint =
+            std::env::var_os("KREA2_MODEL").map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                    .join("comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
+            });
+        let bundle = std::env::var_os("KREA2_KERNELS").map(PathBuf::from)?;
+        (checkpoint.is_file() && bundle.is_dir()).then_some((checkpoint, bundle, 4115))
     }
 }

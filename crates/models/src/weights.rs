@@ -122,6 +122,7 @@ impl Weights {
                 let floats = read_f32(bytes, item.count);
                 let rounded: Vec<u16> = floats.iter().map(|&v| from_f32_carrying(v)).collect();
                 let buffer = Arc::new(device().allocate(rounded.len() * 2)?);
+                device().write(buffer.ptr(), &rounded)?;
                 let pointer = buffer.ptr();
                 float_storage.push(Arc::clone(&buffer));
                 (pointer, buffer)
