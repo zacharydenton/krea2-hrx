@@ -81,6 +81,18 @@ impl From<krea2_checkpoint::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// A 64-bit FNV-1a over the table's bytes. Only equality matters: a collision
+/// would reuse tables the caller replaced, so this is over every byte rather
+/// than a sample.
+fn fingerprint(values: &[f32]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in bytemuck::cast_slice::<f32, u8>(values) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 /// One block's weights, as device addresses into the resident checkpoint.
 struct Block {
     qkvg_q: DevicePtr,
@@ -126,6 +138,9 @@ pub struct Session {
     /// The smoothed attention kernels' preparation pass, when the bundle was
     /// built with one (`KREA2_ATTN_QK` of 4 or 8).
     sage: Option<Sage>,
+    /// What the resident rope tables were last filled from. Each upload drains
+    /// the stream, and the tables only change when the image geometry does.
+    rope: Mutex<Option<(u64, u64)>>,
     /// Opt-in synchronized wall-clock timing per kernel, off during inference.
     profile: AtomicBool,
     stages: Mutex<Vec<(&'static str, f64)>>,
@@ -268,6 +283,7 @@ impl Session {
             blocks,
             buffers,
             sage,
+            rope: Mutex::new(None),
             profile: AtomicBool::new(false),
             stages: Mutex::new(Vec::new()),
             lock: Mutex::new(()),
@@ -309,6 +325,23 @@ impl Session {
         kernel.launch_2d(grid_x, grid_y, threads, args)?;
         device().synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
+        Ok(())
+    }
+
+    /// The rope tables, uploaded only when they are not the ones already
+    /// resident. Two uploads per forward is two stream drains, and a 52-step
+    /// guided image is 104 forwards of the same tables.
+    fn upload_rope(&self, cos: &[f32], sin: &[f32]) -> Result<()> {
+        let fingerprint = (fingerprint(cos), fingerprint(sin));
+        let mut resident = self.rope.lock().unwrap_or_else(|e| e.into_inner());
+        if *resident == Some(fingerprint) {
+            return Ok(());
+        }
+        // Cleared first: a failed upload must not leave the tables claimed.
+        *resident = None;
+        device().write(self.buffers.cos.ptr(), cos)?;
+        device().write(self.buffers.sin.ptr(), sin)?;
+        *resident = Some(fingerprint);
         Ok(())
     }
 
@@ -430,8 +463,7 @@ impl Session {
             x,
             tokens * HIDDEN as usize * 2,
         )?;
-        device().write(self.buffers.cos.ptr(), cos)?;
-        device().write(self.buffers.sin.ptr(), sin)?;
+        self.upload_rope(cos, sin)?;
         for index in 0..self.layers {
             self.block(index, mods)?;
         }

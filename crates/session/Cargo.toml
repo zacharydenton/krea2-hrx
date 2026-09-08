@@ -10,6 +10,7 @@ publish = false
 name = "krea2_session"
 
 [dependencies]
+bytemuck = "1"
 hrx = { path = "../hrx" }
 loom = { path = "../loom" }
 krea2-checkpoint = { path = "../checkpoint" }

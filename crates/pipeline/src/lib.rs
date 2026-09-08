@@ -201,7 +201,7 @@ impl Pipeline {
         let velocity =
             self.forward(&mut state, &packed, &conditioning, timestep, width, height)?;
         device().synchronize()?;
-        downloaded(&velocity).map(|v| v.to_vec())
+        downloaded(&velocity)
     }
 
     /// One image. `progress` is called after each step and may cancel.
@@ -283,7 +283,7 @@ impl Pipeline {
     ) -> Result<Tensor> {
         let mut timing = Profile::new("forward");
         let image_tokens = width / PATCH * (height / PATCH);
-        let tokens = text.rows + image_tokens;
+        let tokens = text.rows() + image_tokens;
         let (embedding, modulation) = self.models.time(timestep)?;
         let image = self.models.image_in(latents)?;
 
@@ -300,13 +300,13 @@ impl Pipeline {
         self.prepare(state, tokens)?;
         timing.mark("prepare session")?;
         let mods = self.models.modulation(&modulation)?;
-        self.rope(state, width, height, text.rows);
+        self.rope(state, width, height, text.rows());
         let blocks = state.blocks.as_ref().expect("just prepared");
         timing.mark("modulation and rope")?;
         blocks.session.run_device(x.ptr(), mods.ptr(), &state.rope.cos, &state.rope.sin)?;
         timing.mark("blocks")?;
 
-        let output = x.view(image_tokens, WIDTH, text.rows * WIDTH)?;
+        let output = x.view(image_tokens, WIDTH, text.rows() * WIDTH)?;
         let velocity = self.models.last(&output, &embedding)?;
         timing.mark("final layer")?;
         Ok(velocity)

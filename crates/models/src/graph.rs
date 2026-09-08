@@ -203,21 +203,21 @@ impl Models {
         let q = self
             .ops
             .norm(
-                &q.view(q.rows * 20, 128, 0)?,
+                &q.view(q.rows() * 20, 128, 0)?,
                 w.get(&format!("{prefix}.attn.qknorm.qnorm.scale"))?,
                 Norm::OnePlusScale,
                 1e-5,
             )?
-            .view(x.rows, TEXT_WIDTH, 0)?;
+            .view(x.rows(), TEXT_WIDTH, 0)?;
         let k = self
             .ops
             .norm(
-                &k.view(k.rows * 20, 128, 0)?,
+                &k.view(k.rows() * 20, 128, 0)?,
                 w.get(&format!("{prefix}.attn.qknorm.knorm.scale"))?,
                 Norm::OnePlusScale,
                 1e-5,
             )?
-            .view(x.rows, TEXT_WIDTH, 0)?;
+            .view(x.rows(), TEXT_WIDTH, 0)?;
         let attended = self.ops.attention(&q, &k, &v, batch, tokens, 20, 20, 128, false)?;
         let gate = self
             .ops
@@ -253,10 +253,11 @@ impl Models {
     /// 12-way average projects them to one, and two more mix across tokens.
     pub fn text_fusion(&self, taps: &Tensor) -> Result<Tensor> {
         let projector = self.transformer.get("txtfusion.projector.weight")?;
-        if !taps.rows.is_multiple_of(12) || taps.cols != TEXT_WIDTH || projector.count != 12 {
+        if !taps.rows().is_multiple_of(12) || taps.cols() != TEXT_WIDTH || projector.count != 12
+        {
             return Err(Error("text fusion dimensions".into()));
         }
-        let tokens = taps.rows / 12;
+        let tokens = taps.rows() / 12;
         let mut x = taps.clone();
         for index in 0..2 {
             x = self.fusion_block(
@@ -346,11 +347,10 @@ impl Models {
 
     /// The final norm, its modulation, and the projection back to latents.
     pub fn last(&self, x: &Tensor, embedding: &Tensor) -> Result<Tensor> {
-        if embedding.size() != WIDTH || x.cols != WIDTH {
+        if embedding.size() != WIDTH || x.cols() != WIDTH {
             return Err(Error("final layer dimensions".into()));
         }
-        let table = self.transformer.get("last.modulation.lin")?;
-        let table = Tensor::borrowed(table.values, 2, WIDTH)?;
+        let table = self.transformer.get("last.modulation.lin")?.tensor(2, WIDTH)?;
         // The scale and the shift share one embedding, so it goes in twice.
         let expanded = self.ops.tensor(2, WIDTH)?;
         device().copy_device_to_device(expanded.ptr(), embedding.ptr(), WIDTH * 2)?;
@@ -429,7 +429,7 @@ impl Models {
             1e-5,
         )?;
         let qkv = self.conv(&normed, h, w, "decoder.mid_block.attentions.0.to_qkv")?;
-        let d = x.cols;
+        let d = x.cols();
         let attended = self.ops.attention(
             &self.columns(&qkv, 0, d)?,
             &self.columns(&qkv, d, d)?,
@@ -463,7 +463,7 @@ impl Models {
 
     /// A window of columns, for splitting a fused qkv projection.
     fn columns(&self, x: &Tensor, start: usize, count: usize) -> Result<Tensor> {
-        let y = self.ops.tensor(x.rows, count)?;
+        let y = self.ops.tensor(x.rows(), count)?;
         let mut args = Args::new();
         args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
         self.ops.launch(
@@ -471,7 +471,7 @@ impl Models {
             config(&[
                 ("xsize", x.size()),
                 ("cols", count),
-                ("width", x.cols),
+                ("width", x.cols()),
                 ("start1", start + 1),
             ]),
             &args,

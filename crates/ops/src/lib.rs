@@ -77,6 +77,9 @@ pub struct Weight {
     pub values: DevicePtr,
     pub shape: Vec<usize>,
     pub count: usize,
+    /// The allocation `values` points into, held so a tensor over this weight
+    /// cannot outlive it.
+    storage: Arc<Buffer>,
     given: Option<DevicePtr>,
     upcast: OnceLock<Buffer>,
 }
@@ -84,12 +87,26 @@ pub struct Weight {
 impl Weight {
     /// `f32` is the checkpoint's own float32 copy, when it kept one.
     pub fn new(
+        storage: &Arc<Buffer>,
         values: DevicePtr,
         shape: Vec<usize>,
         count: usize,
         f32: Option<DevicePtr>,
     ) -> Weight {
-        Weight { values, shape, count, given: f32, upcast: OnceLock::new() }
+        Weight {
+            values,
+            shape,
+            count,
+            storage: Arc::clone(storage),
+            given: f32,
+            upcast: OnceLock::new(),
+        }
+    }
+
+    /// These values as a matrix, for the operations that take tensors. The
+    /// tensor shares the allocation, so it keeps the weight's memory alive.
+    pub fn tensor(&self, rows: usize, cols: usize) -> Result<Tensor> {
+        Tensor::shared(&self.storage, self.values, rows, cols)
     }
 
     /// The scales as float32, upcast once if the file did not keep them so.
@@ -131,33 +148,33 @@ impl Ops {
     /// `y = x wᵀ (+ bias)`, the shape every linear layer here takes.
     pub fn linear(&self, x: &Tensor, w: &Weight, bias: Option<DevicePtr>) -> Result<Tensor> {
         let n = *w.shape.first().ok_or_else(|| Error("linear dimensions".into()))?;
-        let k = x.cols;
-        if n < 1 || x.rows < 1 || x.cols < 1 || w.count != n * k {
+        let k = x.cols();
+        if n < 1 || x.rows() < 1 || x.cols() < 1 || w.count != n * k {
             return Err(Error("linear dimensions".into()));
         }
-        let y = self.tensor(x.rows, n)?;
+        let y = self.tensor(x.rows(), n)?;
         let name = if bias.is_some() { "gemm_bf16_bf16_nt_bias" } else { "gemm_bf16_bf16_nt" };
-        self.matmul(name, x.ptr(), w.values, y.ptr(), x.rows, n, k, 1, 1.0, bias)?;
+        self.matmul(name, x.ptr(), w.values, y.ptr(), x.rows(), n, k, 1, 1.0, bias)?;
         Ok(y)
     }
 
     /// RMSNorm with float32 scales.
     pub fn norm(&self, x: &Tensor, w: &Weight, mode: Norm, eps: f32) -> Result<Tensor> {
-        if w.count != x.cols {
+        if w.count != x.cols() {
             return Err(Error("norm dimensions".into()));
         }
         let scales = w.f32_values()?;
-        let y = self.tensor(x.rows, x.cols)?;
+        let y = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
-        args.i32(x.rows as i32).f32(eps).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
+        args.i32(x.rows() as i32).f32(eps).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
         // Eight rows per workgroup when a row fits in one wave's registers.
-        let wave = mode == Norm::Group && x.cols <= 1024;
+        let wave = mode == Norm::Group && x.cols() <= 1024;
         let name =
             if wave { "norm_2_wave".to_string() } else { format!("norm_{}", mode as u8) };
-        let grid = if wave { x.rows.div_ceil(8) } else { x.rows };
+        let grid = if wave { x.rows().div_ceil(8) } else { x.rows() };
         self.launch(
             &name,
-            config(&[("xsize", x.size()), ("cols", x.cols)]),
+            config(&[("xsize", x.size()), ("cols", x.cols())]),
             &args,
             grid,
             1,
@@ -168,22 +185,22 @@ impl Ops {
 
     /// GroupNorm and SiLU in one pass, for the VAE's residual blocks.
     pub fn norm_silu(&self, x: &Tensor, w: &Weight) -> Result<Tensor> {
-        if w.count != x.cols {
+        if w.count != x.cols() {
             return Err(Error("normalization dimensions".into()));
         }
-        if x.cols > 1024 {
+        if x.cols() > 1024 {
             let normed = self.norm(x, w, Norm::Group, 1e-5)?;
             return self.unary(&normed, Unary::Silu);
         }
         let scales = w.f32_values()?;
-        let y = self.tensor(x.rows, x.cols)?;
+        let y = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
-        args.i32(x.rows as i32).f32(1e-5).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
+        args.i32(x.rows() as i32).f32(1e-5).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
         self.launch(
             "norm_2_wave_silu",
-            config(&[("xsize", x.size()), ("cols", x.cols)]),
+            config(&[("xsize", x.size()), ("cols", x.cols())]),
             &args,
-            x.rows.div_ceil(8),
+            x.rows().div_ceil(8),
             1,
             256,
         )?;
@@ -191,7 +208,7 @@ impl Ops {
     }
 
     pub fn unary(&self, x: &Tensor, op: Unary) -> Result<Tensor> {
-        let y = self.tensor(x.rows, x.cols)?;
+        let y = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
         args.i32(x.size() as i32).ptr(x.ptr()).ptr(y.ptr());
         let name = match op {
@@ -208,7 +225,7 @@ impl Ops {
         if y.size() == 0 || !x.size().is_multiple_of(y.size()) {
             return Err(Error("binary broadcast".into()));
         }
-        let z = self.tensor(x.rows, x.cols)?;
+        let z = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
         args.i32(x.size() as i32).ptr(x.ptr()).ptr(y.ptr()).ptr(z.ptr());
         let name = match op {
@@ -221,21 +238,21 @@ impl Ops {
 
     /// Split-half rotary embedding over `heads` heads of `cols / heads`.
     pub fn rope(&self, x: &Tensor, tokens: usize, heads: usize, theta: f32) -> Result<Tensor> {
-        if tokens != x.rows
+        if tokens != x.rows()
             || heads < 1
-            || !x.cols.is_multiple_of(heads)
-            || !(x.cols / heads).is_multiple_of(2)
+            || !x.cols().is_multiple_of(heads)
+            || !(x.cols() / heads).is_multiple_of(2)
             || !theta.is_finite()
             || theta <= 0.0
         {
             return Err(Error("split-half rotary dimensions".into()));
         }
-        let y = self.tensor(x.rows, x.cols)?;
+        let y = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
         args.i32(x.size() as i32).f32(theta).ptr(x.ptr()).ptr(y.ptr());
         self.launch(
             "rope",
-            config(&[("dim", x.cols / heads), ("heads", heads)]),
+            config(&[("dim", x.cols() / heads), ("heads", heads)]),
             &args,
             x.size().div_ceil(256),
             1,
@@ -247,7 +264,7 @@ impl Ops {
     /// Euler in place: `sample += delta * velocity`, rounded to bf16 at the
     /// delta, the product and the sum, as the CUDA pipeline rounds it.
     pub fn euler_step(&self, sample: &Tensor, velocity: &Tensor, delta: f32) -> Result<()> {
-        if sample.rows != velocity.rows || sample.cols != velocity.cols {
+        if sample.rows() != velocity.rows() || sample.cols() != velocity.cols() {
             return Err(Error("scheduler tensor dimensions".into()));
         }
         let mut args = Args::new();
@@ -258,7 +275,7 @@ impl Ops {
     /// Krea's guidance in place: `cond += scale * (cond - uncond)`, with
     /// diffusers' bf16 rounding at each of its three operations.
     pub fn guidance(&self, cond: &Tensor, uncond: &Tensor, scale: f32) -> Result<()> {
-        if cond.rows != uncond.rows || cond.cols != uncond.cols {
+        if cond.rows() != uncond.rows() || cond.cols() != uncond.cols() {
             return Err(Error("guidance tensor dimensions".into()));
         }
         let mut args = Args::new();
@@ -398,12 +415,12 @@ impl Ops {
         bias: Option<DevicePtr>,
     ) -> Result<Tensor> {
         if w.shape.len() != 4
-            || w.shape[1] != x.cols
+            || w.shape[1] != x.cols()
             || w.shape[2] != w.shape[3]
             || w.shape[2] % 2 != 1
             || height == 0
             || width == 0
-            || x.rows != height * width
+            || x.rows() != height * width
         {
             return Err(Error("convolution dimensions".into()));
         }
@@ -411,17 +428,17 @@ impl Ops {
         if kernel == 1 {
             return self.linear(x, w, bias);
         }
-        let patches = self.tensor(height * width, x.cols * kernel * kernel)?;
+        let patches = self.tensor(height * width, x.cols() * kernel * kernel)?;
         let mut args = Args::new();
         args.i32(patches.size() as i32).ptr(x.ptr()).ptr(patches.ptr());
         // One workgroup per output pixel when a row of channels is a whole
         // number of 32-lane reads.
-        let coalesced = kernel == 3 && x.cols.is_multiple_of(32) && x.cols <= 1024;
+        let coalesced = kernel == 3 && x.cols().is_multiple_of(32) && x.cols() <= 1024;
         self.launch(
             if coalesced { "im2col_coalesced" } else { "im2col" },
             config(&[
                 ("xsize", x.size()),
-                ("channels", x.cols),
+                ("channels", x.cols()),
                 ("width", width),
                 ("height", height),
                 ("kernel", kernel),
@@ -436,15 +453,15 @@ impl Ops {
 
     /// Nearest-neighbour 2x, the VAE's upsampler.
     pub fn upsample(&self, x: &Tensor, height: usize, width: usize) -> Result<Tensor> {
-        if height == 0 || width == 0 || height * width != x.rows {
+        if height == 0 || width == 0 || height * width != x.rows() {
             return Err(Error("upsampling dimensions".into()));
         }
-        let y = self.tensor(height * width * 4, x.cols)?;
+        let y = self.tensor(height * width * 4, x.cols())?;
         let mut args = Args::new();
         args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
         self.launch(
             "upsample",
-            config(&[("xsize", x.size()), ("channels", x.cols), ("width", width)]),
+            config(&[("xsize", x.size()), ("channels", x.cols()), ("width", width)]),
             &args,
             y.size().div_ceil(256),
             1,

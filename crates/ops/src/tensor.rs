@@ -105,27 +105,41 @@ impl Drop for Pooled {
     }
 }
 
-/// Where a tensor's elements live: its own pooled block, or someone else's.
+/// Where a tensor's elements live: its own pooled block, or a share of an
+/// allocation someone else made.
+///
+/// Either way the tensor keeps the allocation alive, which is the difference
+/// between this and handing out a bare address: a view cannot outlive what it
+/// points into.
 enum Storage {
     Owned(Pooled),
-    Borrowed(DevicePtr),
+    /// The allocation is held only to keep it alive; the address is what the
+    /// kernels get.
+    Shared {
+        _alive: Arc<Buffer>,
+        at: DevicePtr,
+    },
 }
 
 impl Storage {
     fn ptr(&self) -> DevicePtr {
         match self {
             Storage::Owned(pooled) => pooled.ptr(),
-            Storage::Borrowed(pointer) => *pointer,
+            Storage::Shared { at, .. } => *at,
         }
     }
 }
 
 /// A bf16 matrix on the device. Cloning shares the storage; [`Tensor::view`]
 /// makes a window onto it without copying.
+///
+/// The shape is read-only: a kernel is launched for the shape its operands
+/// report, so a caller that could assign `rows` could make a launch read past
+/// the allocation the shape was checked against.
 #[derive(Clone)]
 pub struct Tensor {
-    pub rows: usize,
-    pub cols: usize,
+    rows: usize,
+    cols: usize,
     storage: Arc<Storage>,
     offset: usize,
 }
@@ -134,22 +148,38 @@ impl Tensor {
     /// An uninitialized tensor. Kernels write every element they read, as they
     /// did in the C++; a tensor that must start at zero is zeroed explicitly.
     pub fn new(pool: &Arc<Pool>, rows: usize, cols: usize) -> Result<Tensor> {
-        if rows == 0 || cols == 0 {
-            return Err(Error("empty tensor".into()));
-        }
-        let storage = pool.take(rows * cols * 2)?;
+        let storage = pool.take(elements(rows, cols)? * 2)?;
         Ok(Tensor { rows, cols, storage: Arc::new(Storage::Owned(storage)), offset: 0 })
     }
 
-    /// A matrix over memory this tensor does not own — a weight, read by an
-    /// operation that takes tensors. The caller keeps the memory alive; a
-    /// device address is never dereferenced here, so this stays safe code, in
-    /// the same way the C++ `Tensor::view` over a weight was.
-    pub fn borrowed(values: DevicePtr, rows: usize, cols: usize) -> Result<Tensor> {
-        if rows == 0 || cols == 0 {
-            return Err(Error("empty tensor".into()));
+    /// A matrix over part of an allocation someone else made — a weight, read
+    /// by an operation that takes tensors. The tensor holds a share of the
+    /// allocation, so the view cannot outlive it.
+    pub fn shared(
+        buffer: &Arc<Buffer>,
+        at: DevicePtr,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Tensor> {
+        let bytes = elements(rows, cols)? * 2;
+        let offset = at.address().checked_sub(buffer.ptr().address());
+        if offset.is_none_or(|offset| offset + bytes > buffer.len()) {
+            return Err(Error("a view outside its allocation".into()));
         }
-        Ok(Tensor { rows, cols, storage: Arc::new(Storage::Borrowed(values)), offset: 0 })
+        Ok(Tensor {
+            rows,
+            cols,
+            storage: Arc::new(Storage::Shared { _alive: Arc::clone(buffer), at }),
+            offset: 0,
+        })
+    }
+
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub fn cols(&self) -> usize {
+        self.cols
     }
 
     pub fn from_slice(
@@ -167,6 +197,7 @@ impl Tensor {
     }
 
     pub fn size(&self) -> usize {
+        // Checked when the tensor was made, so this cannot overflow here.
         self.rows * self.cols
     }
 
@@ -174,17 +205,13 @@ impl Tensor {
         self.storage.ptr().offset(self.offset)
     }
 
-    /// A window of `rows * cols` elements, `elements` into this tensor.
-    pub fn view(&self, rows: usize, cols: usize, elements: usize) -> Result<Tensor> {
-        if rows == 0 || cols == 0 || elements + rows * cols > self.size() {
+    /// A window of `rows * cols` elements, `skip` elements into this tensor.
+    pub fn view(&self, rows: usize, cols: usize, skip: usize) -> Result<Tensor> {
+        let wanted = elements(rows, cols)?;
+        if skip.checked_add(wanted).is_none_or(|end| end > self.size()) {
             return Err(Error("tensor view".into()));
         }
-        Ok(Tensor {
-            rows,
-            cols,
-            storage: self.storage.clone(),
-            offset: self.offset + elements * 2,
-        })
+        Ok(Tensor { rows, cols, storage: self.storage.clone(), offset: self.offset + skip * 2 })
     }
 
     pub fn download(&self) -> Result<Vec<u16>> {
@@ -196,6 +223,14 @@ impl Tensor {
     pub fn zero(&self) -> Result<()> {
         device().zero(self.ptr(), self.size() * 2)?;
         Ok(())
+    }
+}
+
+/// A shape's element count, refusing an empty or unrepresentable one.
+fn elements(rows: usize, cols: usize) -> Result<usize> {
+    match rows.checked_mul(cols) {
+        Some(0) | None => Err(Error("tensor shape".into())),
+        Some(count) => Ok(count),
     }
 }
 
@@ -229,6 +264,38 @@ mod tests {
         let second = tensor.view(1, 8, 8).expect("the second row");
         assert_eq!(second.download().expect("download"), &values[8..16]);
         assert!(tensor.view(2, 8, 56).is_err(), "a view past the end is refused");
+    }
+
+    #[test]
+    fn a_shape_that_cannot_be_indexed_is_refused() {
+        // No device needed: these fail on arithmetic.
+        assert!(elements(0, 8).is_err(), "an empty tensor is not a tensor");
+        assert!(elements(8, 0).is_err());
+        assert!(elements(usize::MAX, 2).is_err(), "rows * cols must not wrap");
+        assert_eq!(elements(3, 4).expect("a shape"), 12);
+    }
+
+    #[test]
+    fn a_shared_view_keeps_its_allocation_and_stays_inside_it() {
+        if !usable() {
+            return;
+        }
+        let buffer = std::sync::Arc::new(device().allocate(64 * 2).expect("an allocation"));
+        let base = buffer.ptr();
+        // Past the end, and before the start: both are outside.
+        assert!(Tensor::shared(&buffer, base, 8, 9).is_err(), "past the end");
+        assert!(Tensor::shared(&buffer, base.offset(4), 8, 8).is_err(), "past the end");
+        assert!(
+            Tensor::shared(&buffer, DevicePtr::from_address(base.address() - 8), 1, 1).is_err(),
+            "before the start"
+        );
+
+        let view = Tensor::shared(&buffer, base.offset(16), 4, 4).expect("a view");
+        assert_eq!((view.rows(), view.cols(), view.ptr()), (4, 4, base.offset(16)));
+        // The view owns a share, so dropping the caller's handle keeps the
+        // memory mapped and the address valid.
+        drop(buffer);
+        assert_eq!(view.ptr(), base.offset(16));
     }
 
     #[test]

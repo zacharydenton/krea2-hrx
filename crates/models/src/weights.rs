@@ -7,6 +7,7 @@
 //! causal convolutions are reduced to their last temporal tap, which is the
 //! single-image frame.
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use hrx::{device, Buffer};
 use krea2_checkpoint::Checkpoint;
@@ -18,7 +19,9 @@ use crate::{Error, Result};
 /// A checkpoint's tensors, renamed onto the names this runtime uses.
 pub struct Weights {
     values: BTreeMap<String, Weight>,
-    _storage: Vec<Buffer>,
+    /// Every weight holds a share of whichever of these its values live in, so
+    /// this is only here to keep the set together.
+    _storage: Vec<Arc<Buffer>>,
 }
 
 struct Item {
@@ -104,7 +107,7 @@ impl Weights {
             return Err(Error("the checkpoint has none of the tensors this needs".into()));
         }
 
-        let storage = device().allocate(total)?;
+        let storage = Arc::new(device().allocate(total)?);
         let mut float_storage = Vec::new();
         let mut values = BTreeMap::new();
         for item in &items {
@@ -113,22 +116,22 @@ impl Weights {
             let staged = stage(&item.dtype, tensor.bytes, item)?;
             let bytes = staged.as_deref().unwrap_or(&tensor.bytes[..item.bytes]);
             device().copy_from_host(base, bytes)?;
-            let bf16 = if item.dtype == "F32" {
+            let (bf16, holder) = if item.dtype == "F32" {
                 // Everything but the norms consumes a float32 tensor as bf16,
                 // rounded the way the checkpoint's own conversion rounds.
                 let floats = read_f32(bytes, item.count);
                 let rounded: Vec<u16> = floats.iter().map(|&v| from_f32_carrying(v)).collect();
-                let buffer = device().allocate(rounded.len() * 2)?;
-                device().write(buffer.ptr(), &rounded)?;
+                let buffer = Arc::new(device().allocate(rounded.len() * 2)?);
                 let pointer = buffer.ptr();
-                float_storage.push(buffer);
-                pointer
+                float_storage.push(Arc::clone(&buffer));
+                (pointer, buffer)
             } else {
-                base
+                (base, Arc::clone(&storage))
             };
             values.insert(
                 item.name.clone(),
                 Weight::new(
+                    &holder,
                     bf16,
                     item.shape.clone(),
                     item.count,

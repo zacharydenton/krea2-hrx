@@ -1670,6 +1670,7 @@ dependencies = [
 name = "krea2-session"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "hrx",
  "krea2-checkpoint",
  "loom",
