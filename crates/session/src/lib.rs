@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 pub mod bundle;
+pub mod sage;
 pub mod weights;
 
 use std::path::Path;
@@ -17,6 +18,7 @@ use std::sync::Mutex;
 use hrx::{device, Args, Buffer, DevicePtr};
 
 pub use bundle::{Kernels, Metadata};
+pub use sage::Sage;
 pub use weights::Weights;
 
 /// The model's shape, fixed by the checkpoint.
@@ -58,6 +60,12 @@ impl std::error::Error for Error {}
 
 impl From<hrx::Error> for Error {
     fn from(error: hrx::Error) -> Self {
+        Error::failed(error.0)
+    }
+}
+
+impl From<loom::Error> for Error {
+    fn from(error: loom::Error) -> Self {
         Error::failed(error.0)
     }
 }
@@ -114,6 +122,9 @@ pub struct Session {
     blocks: Vec<Block>,
     buffers: Buffers,
     // Calls on one session are serialized: they share the scratch buffers.
+    /// The smoothed attention kernels' preparation pass, when the bundle was
+    /// built with one (`KREA2_ATTN_QK` of 4 or 8).
+    sage: Option<Sage>,
     lock: Mutex<()>,
     _weights: std::sync::Arc<Weights>,
 }
@@ -156,12 +167,6 @@ impl Session {
                 metadata.gemm_bits,
                 weights.bits()
             )));
-        }
-        if metadata.attention_bits != 16 {
-            return Err(Error::invalid(
-                "this build runs the fp16 attention kernels; rebuild the bundle without \
-                 KREA2_ATTN_QK",
-            ));
         }
         let bits = metadata.gemm_bits as usize;
         let mut blocks = Vec::with_capacity(layers);
@@ -221,6 +226,16 @@ impl Session {
         if let Some(transposed) = &buffers.v_transposed {
             device().zero(transposed.ptr(), kv_bytes)?;
         }
+        let sage = match metadata.attention_bits {
+            16 => None,
+            bits => Some(Sage::new(
+                tokens,
+                capacity,
+                (KV_HEADS * 4) as usize,
+                KV_HEADS as usize,
+                bits,
+            )?),
+        };
         Ok(Session {
             tokens,
             layers,
@@ -228,6 +243,7 @@ impl Session {
             kernels,
             blocks,
             buffers,
+            sage,
             lock: Mutex::new(()),
             _weights: weights,
         })
@@ -357,29 +373,64 @@ impl Session {
             .ptr(b.v.ptr());
         self.kernels.rope.launch_2d(tokens as u32, 1, THREADS, &rope)?;
 
-        let values = match (&b.v_transposed, &self.kernels.attention_transpose) {
-            (Some(transposed), Some(kernel)) => {
-                let mut args = Args::new();
-                args.i32(tokens).ptr(b.v.ptr()).ptr(transposed.ptr());
-                kernel.launch_2d(
-                    tokens.div_euclid(32) as u32 + u32::from(tokens % 32 != 0),
-                    (KV_HEADS * HEAD_DIM / 32) as u32,
-                    256,
-                    &args,
+        match &self.sage {
+            // Smoothed int4/int8 QK: the preparation pass quantizes Q and K
+            // against their means and works out the correction the kernel adds
+            // back to the scores.
+            Some(sage) => {
+                sage.run(b.q.ptr(), b.k.ptr(), b.v.ptr())?;
+                let mut attention = Args::new();
+                attention
+                    .i32(tokens)
+                    .i32(KV_HEADS)
+                    .ptr(sage.q4.ptr())
+                    .ptr(sage.k4.ptr())
+                    .ptr(sage.v_transposed.ptr())
+                    .ptr(sage.q_scale.ptr())
+                    .ptr(sage.k_scale.ptr())
+                    .ptr(sage.correction.ptr())
+                    .ptr(b.attn.ptr());
+                let waves = self.metadata.attention_waves as i32;
+                let rows = 16 * (waves / 4);
+                self.kernels.attention.launch_2d(
+                    ((tokens + rows - 1) / rows) as u32,
+                    KV_HEADS as u32,
+                    32 * waves as u32,
+                    &attention,
                 )?;
-                transposed.ptr()
             }
-            _ => b.v.ptr(),
-        };
-        let mut attention = Args::new();
-        attention.i32(tokens).ptr(b.q.ptr()).ptr(b.k.ptr()).ptr(values).ptr(b.attn.ptr());
-        let rows = 16 * self.metadata.fp16_query_tiles as i32;
-        self.kernels.attention.launch_2d(
-            ((tokens + rows - 1) / rows) as u32,
-            KV_HEADS as u32,
-            128 * self.metadata.fp16_query_tiles,
-            &attention,
-        )?;
+            // fp16 QK and PV straight from the RoPE outputs.
+            None => {
+                let values = match (&b.v_transposed, &self.kernels.attention_transpose) {
+                    (Some(transposed), Some(kernel)) => {
+                        let mut args = Args::new();
+                        args.i32(tokens).ptr(b.v.ptr()).ptr(transposed.ptr());
+                        kernel.launch_2d(
+                            tokens.div_euclid(32) as u32 + u32::from(tokens % 32 != 0),
+                            (KV_HEADS * HEAD_DIM / 32) as u32,
+                            256,
+                            &args,
+                        )?;
+                        transposed.ptr()
+                    }
+                    _ => b.v.ptr(),
+                };
+                let mut attention = Args::new();
+                attention
+                    .i32(tokens)
+                    .ptr(b.q.ptr())
+                    .ptr(b.k.ptr())
+                    .ptr(values)
+                    .ptr(b.attn.ptr());
+                let rows = 16 * self.metadata.fp16_query_tiles as i32;
+                self.kernels.attention.launch_2d(
+                    ((tokens + rows - 1) / rows) as u32,
+                    KV_HEADS as u32,
+                    128 * self.metadata.fp16_query_tiles,
+                    &attention,
+                )?;
+            }
+        }
 
         let mut gated = Args::new();
         gated
