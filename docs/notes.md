@@ -1045,3 +1045,30 @@ reason.
 The 27.74 s median against the 27.7 s recorded for the C++ build says the port
 costs nothing on the clock, which is the other thing worth knowing: the host
 was never on the critical path, and moving it to Rust did not put it there.
+
+The Raw anchor was re-taken the same way, through `build/krea2 --checkpoint raw
+--seed 0` at 1024^2, 52 steps, guidance 3.5, writing PPM so the hash is over the
+RGB payload: `ae951368d1a05d6c73567fcf9cc696868379298f3f74382c37e5b81842558ae3`,
+**383.59 s** on an idle box. The old entry's 722 s was taken while another job
+had the GPU and said so; this is the first honest timing for the guided path.
+
+**The trajectory gate is 0.0 dB.** `tools/quality_vs_bf16.py regression` against
+the archived `build/quality` baseline, on the noise the baseline supplies:
+
+| | baseline | this build | loss |
+| --- | ---: | ---: | ---: |
+| latent PSNR vs bf16 | 24.566571743825673 dB | 24.566571743825673 dB | 0.0 |
+| image PSNR vs bf16 | 33.66731731371588 dB | 33.66731731371588 dB | 0.0 |
+
+Identical to the last digit, which is what the port was accepted on. This is the
+gate that caught the query32 image regression that every per-block cosine
+passed, so an exact match here is worth more than the cosines above it.
+
+One gate in the plan could not be run as written: "`compare_native.py`'s RGB
+hash must match the C++ build" needs the C++ build, and it is deleted. Its
+property -- the same supplied noise in, the same RGB out, one implementation
+against the other -- was measured while both existed, over
+`krea2_generate_guided` at 512^2 for four steps: byte-identical. The saved
+comparison directories under `build/comparison-ui/` all predate the
+bf16-residual arithmetic change, so their recorded hashes would not have matched
+this build either, and are not a substitute.
