@@ -19,7 +19,23 @@ for arg in "$@"; do
 done
 tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT; export tmpdir
 status=0
-step() { local name="$1"; shift; printf '\n=== %s ===\n' "$name"; if "$@"; then printf '  ok\n'; else printf '  FAILED: %s\n' "$name"; status=1; return 1; fi; }
+# Each step's wall time, so "the suite is slow" is answerable from the log.
+timings=()
+step() {
+  local name="$1"; shift
+  printf '\n=== %s ===\n' "$name"
+  local start=$SECONDS result=0
+  "$@" || result=1
+  local elapsed=$((SECONDS - start))
+  timings+=("$elapsed $name")
+  if [ "$result" = 0 ]; then
+    printf '  ok (%d s)\n' "$elapsed"
+  else
+    printf '  FAILED after %d s: %s\n' "$elapsed" "$name"
+    status=1
+  fi
+  return $result
+}
 step "loom sources are canonically formatted" bash -c '"$LOOM_FORMAT" --check kernels/*.loom kernels/native/*.loom'
 step "generated kernels match their generators" bash -c '
   cp -r kernels "$tmpdir/kernels" && mkdir -p "$tmpdir/experiments" && cd "$tmpdir" && mkdir -p tools &&
@@ -38,9 +54,9 @@ step "Rust formatting and lints" bash -c 'cargo fmt --all -- --check && cargo cl
 # regressions, and the softmax shared-memory repeat, all of which were separate
 # C++ programs.
 step "Rust workspace tests" cargo test --quiet --workspace
-step "CPU trajectory quality gate" env OPENBLAS_NUM_THREADS=2 .venv/bin/python tests/test_quality_gate.py
+step "CPU trajectory quality gate" .venv/bin/python tests/test_quality_gate.py
 step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py
-step "CPU fp16 attention lane model and benchmark oracle" env OPENBLAS_NUM_THREADS=2 python3 tests/test_attention_query_cpu.py
+step "CPU fp16 attention lane model and benchmark oracle" python3 tests/test_attention_query_cpu.py
 step "repeat-image failure capture" python3 tests/test_bench_native.py
 step "auxiliary Loom kernel regressions" bash -c 'source .venv/bin/activate && python3 tests/test_native_ops.py'
 step "reference vs diffusers (toy)" bash -c 'source .venv/bin/activate && python3 tests/test_ref_vs_diffusers.py'
@@ -61,5 +77,8 @@ if [ "$quality" = 1 ]; then
   step "eight-step latent and image quality" .venv/bin/python tools/quality_vs_bf16.py regression \
     --baseline "${KREA2_QUALITY_BASELINE:-build/quality}" --work "$tmpdir/quality"
 fi
+printf '\ntotal %d s. Slowest steps:\n' "$SECONDS"
+printf '%s\n' "${timings[@]}" | sort -rn | head -8 |
+  while read -r seconds rest; do printf '  %5d s  %s\n' "$seconds" "$rest"; done
 printf '\n'; [ "$status" = 0 ] && printf 'all checks passed\n' || printf 'SOME CHECKS FAILED\n'
 exit $status

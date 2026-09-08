@@ -77,7 +77,11 @@ def main():
         # Feed identical text states and latents to isolate the full transformer.
         from safetensors.torch import load_file
         import krea2_ref as R
-        weights = load_file(str(Path.home() / "krea2-models/krea2_turbo_bf16.safetensors"), device="cpu")
+        # Straight to the device: on the host these 25 GB are read from disk,
+        # then copied again by Krea2Ref.t() on first use, and they evict the
+        # page cache the rest of the suite is living in. tests/test_blocks.py
+        # has always loaded its reference this way.
+        weights = load_file(str(Path.home() / "krea2-models/krea2_turbo_bf16.safetensors"), device="cuda")
         reference = R.Krea2Ref(weights, quant="none")
         adapter = ReferenceForward(reference, None, "loom")
         with tempfile.TemporaryDirectory() as td, torch.no_grad():
