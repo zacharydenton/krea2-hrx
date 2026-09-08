@@ -57,6 +57,7 @@ def stamp():
     return time.perf_counter()
 
 
+# --size is shorthand for a square; everything below uses width and height.
 args.width = args.width or args.size
 args.height = args.height or args.size
 
@@ -100,5 +101,5 @@ with torch.inference_mode():
         print(json.dumps(result), flush=True)
         if args.output_dir:
             from PIL import Image
-            Image.frombytes('RGB', (args.size, args.size), rgb).save(args.output_dir / 'comfy.png')
+            Image.frombytes('RGB', (args.width, args.height), rgb).save(args.output_dir / 'comfy.png')
             (args.output_dir / 'comfy.json').write_text(json.dumps({**metadata, **result}, indent=2))
