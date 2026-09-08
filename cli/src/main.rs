@@ -47,9 +47,10 @@ struct Args {
     /// Classifier-free guidance, cond + g * (cond - uncond)
     #[arg(long)]
     guidance: Option<f32>,
-    /// Which checkpoint to find under --models
-    #[arg(long, default_value = "turbo", value_parser = ["turbo", "raw"])]
-    checkpoint: String,
+    /// Which checkpoint to find under --models. Given explicitly it also picks
+    /// the sampler; left out, the checkpoint's own name decides.
+    #[arg(long, value_parser = ["turbo", "raw"])]
+    checkpoint: Option<String>,
     /// Attention kernels, chosen when a sequence length is first compiled
     #[arg(long, value_parser = ["f16", "i8", "i4"])]
     attn: Option<String>,
@@ -158,12 +159,13 @@ fn run(args: Args) -> Result<()> {
     // names, and a models directory that does not have it is worth saying so
     // plainly rather than fetching.
     let models = expand_home(&args.models);
+    let named = args.checkpoint.as_deref().unwrap_or("turbo");
     let model = match &args.model {
         Some(model) => model.clone(),
         None => {
             let path = models
                 .join("diffusion_models")
-                .join(format!("krea2_{}_int8_convrot.safetensors", args.checkpoint));
+                .join(format!("krea2_{named}_int8_convrot.safetensors"));
             if !path.is_file() {
                 bail!("{} not found (--models DIR, or --model FILE)", path.display());
             }
@@ -197,7 +199,9 @@ fn run(args: Args) -> Result<()> {
         .models(Some(&models))
         .text_encoder(args.text_encoder.as_deref())
         .vae(args.vae.as_deref())
-        .distilled(Some(args.checkpoint == "turbo"))
+        // Only when asked for: otherwise the file's own name decides, so
+        // --model .../krea2_raw_... is not silently sampled as Turbo.
+        .distilled(args.checkpoint.as_deref().map(|choice| choice == "turbo"))
         .resolve()?;
     let compiler = args.compiler.as_ref().map(|path| path.to_string_lossy().into_owned());
     let pipeline = Pipeline::open(files, compiler.as_deref())?;
@@ -207,7 +211,7 @@ fn run(args: Args) -> Result<()> {
     if !args.quiet {
         eprintln!(
             "{} {}x{}, {steps} steps, guidance {guidance:.2}, seed {}{}: {} image{}, loaded in {load:.1} s",
-            args.checkpoint,
+            if pipeline.distilled() { "turbo" } else { "raw" },
             args.width,
             args.height,
             args.seed,
