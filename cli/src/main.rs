@@ -155,7 +155,11 @@ fn run(args: Args) -> Result<()> {
     let directory = args.out.parent().filter(|p| !p.as_os_str().is_empty());
     if let Some(directory) = directory {
         if !directory.is_dir() {
-            bail!("cannot write {}: {} is not a directory", args.out.display(), directory.display());
+            bail!(
+                "cannot write {}: {} is not a directory",
+                args.out.display(),
+                directory.display()
+            );
         }
     }
     if let Some(width) = &args.attn {
@@ -193,7 +197,8 @@ fn run(args: Args) -> Result<()> {
             if args.images == 1 { "" } else { "s" },
         );
         pipeline.on_progress(|step, steps, seconds| {
-            let left = if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
+            let left =
+                if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
             eprint!("\r  step {step}/{steps}  {seconds:.1} s  ({left:.0} s left)   ");
             if step == steps {
                 eprintln!();
@@ -270,11 +275,11 @@ mod tests {
     fn png_round_trips_and_ppm_carries_its_header() {
         let directory = std::env::temp_dir().join(format!("krea2-cli-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        let (width, height) = (7, 5);
+        let (width, height): (i32, i32) = (7, 5);
         let rgb: Vec<u8> = (0..width * height * 3).map(|i| (i * 7 % 256) as u8).collect();
 
         let png_path = directory.join("image.png");
-        write_image(&png_path, &rgb, width as i32, height as i32).unwrap();
+        write_image(&png_path, &rgb, width, height).unwrap();
         let decoder = png::Decoder::new(std::fs::File::open(&png_path).unwrap());
         let mut reader = decoder.read_info().unwrap();
         let mut decoded = vec![0; reader.output_buffer_size()];
@@ -283,7 +288,7 @@ mod tests {
         assert_eq!(&decoded[..info.buffer_size()], &rgb[..]);
 
         let ppm_path = directory.join("image.ppm");
-        write_image(&ppm_path, &rgb, width as i32, height as i32).unwrap();
+        write_image(&ppm_path, &rgb, width, height).unwrap();
         let bytes = std::fs::read(&ppm_path).unwrap();
         let header = format!("P6\n{width} {height}\n255\n");
         assert!(bytes.starts_with(header.as_bytes()));

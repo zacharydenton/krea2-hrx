@@ -10,6 +10,3 @@ publish = false
 anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 png = "0.17"
-
-[profile.release]
-strip = true

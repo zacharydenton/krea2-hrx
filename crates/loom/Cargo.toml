@@ -1,0 +1,11 @@
+[package]
+name = "loom"
+version = "0.1.0"
+edition = "2021"
+description = "Compiling and caching Loom kernels for gfx1151"
+license = "MIT"
+publish = false
+
+[dependencies]
+hrx = { path = "../hrx" }
+sha2 = "0.10"

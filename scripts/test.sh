@@ -34,7 +34,8 @@ step "generated kernels match their generators" bash -c '
 step "build host"                 ./scripts/build_host.sh
 step "HRX dispatch and dependency audit" env -u LD_LIBRARY_PATH build/test-hrx-runtime
 step "Python runtime regressions" bash -c 'source .venv/bin/activate && python3 tests/test_runtime.py'
-step "CLI unit tests" cargo test --quiet --manifest-path cli/Cargo.toml
+step "Rust formatting and lints" bash -c 'cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings'
+step "Rust workspace tests" cargo test --quiet --workspace
 step "CPU trajectory quality gate" env OPENBLAS_NUM_THREADS=2 .venv/bin/python tests/test_quality_gate.py
 step "CPU Turbo and Raw scheduler regressions" .venv/bin/python tests/test_schedule.py
 step "CPU fp16 attention lane model and benchmark oracle" env OPENBLAS_NUM_THREADS=2 python3 tests/test_attention_query_cpu.py

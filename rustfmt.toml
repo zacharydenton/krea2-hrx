@@ -1,0 +1,4 @@
+# The C++ this replaces was clang-formatted at 80 columns; keep the line length
+# so the two read the same width while both exist.
+max_width = 96
+use_small_heuristics = "Max"

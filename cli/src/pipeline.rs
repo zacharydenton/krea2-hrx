@@ -16,7 +16,8 @@ struct Handle {
     _private: [u8; 0],
 }
 
-type ProgressFn = extern "C" fn(user: *mut c_void, step: c_int, steps: c_int, seconds: f64) -> c_int;
+type ProgressFn =
+    extern "C" fn(user: *mut c_void, step: c_int, steps: c_int, seconds: f64) -> c_int;
 
 #[link(name = "krea2_pipeline")]
 extern "C" {
@@ -95,9 +96,7 @@ unsafe impl Send for Pipeline {}
 
 fn message(buffer: &[c_char]) -> String {
     // Safety: the library always writes a NUL-terminated string into the buffer.
-    unsafe { CStr::from_ptr(buffer.as_ptr()) }
-        .to_string_lossy()
-        .into_owned()
+    unsafe { CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().into_owned()
 }
 
 fn c_string(text: &str) -> Result<CString, Error> {
@@ -130,9 +129,8 @@ impl Pipeline {
         let text_encoder = text_encoder.map(c_path).transpose()?;
         let vae = vae.map(c_path).transpose()?;
         let compiler = compiler.map(c_path).transpose()?;
-        let optional = |value: &Option<CString>| {
-            value.as_ref().map_or(std::ptr::null(), |v| v.as_ptr())
-        };
+        let optional =
+            |value: &Option<CString>| value.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
         let mut handle: *mut Handle = std::ptr::null_mut();
         let mut error = [0 as c_char; 4096];
         // Safety: every pointer is valid for the call, and the error buffer has

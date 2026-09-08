@@ -1,0 +1,7 @@
+[package]
+name = "hrx"
+version = "0.1.0"
+edition = "2021"
+description = "gfx1151 dispatch over the public HRX C API"
+license = "MIT"
+publish = false
