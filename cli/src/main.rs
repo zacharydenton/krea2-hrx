@@ -115,6 +115,18 @@ fn write_image(path: &Path, rgb: &[u8], width: i32, height: i32) -> Result<()> {
     Ok(())
 }
 
+/// One line of sampling progress, redrawn in place, with the time left.
+/// Returning true carries on; the pipeline stops on false.
+fn report(step: usize, steps: usize, seconds: f64) -> bool {
+    let left = if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
+    eprint!("\r  step {step}/{steps}  {seconds:.1} s  ({left:.0} s left)   ");
+    if step == steps {
+        eprintln!();
+    }
+    let _ = std::io::stderr().flush();
+    true
+}
+
 fn prompt_from_stdin() -> Result<String> {
     if std::io::stdin().is_terminal() {
         return Ok(String::new());
@@ -200,17 +212,6 @@ fn run(args: Args) -> Result<()> {
             args.images,
             if args.images == 1 { "" } else { "s" },
         );
-    }
-
-    /// One line of progress, redrawn in place, with the time left.
-    fn report(step: usize, steps: usize, seconds: f64) -> bool {
-        let left = if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
-        eprint!("\r  step {step}/{steps}  {seconds:.1} s  ({left:.0} s left)   ");
-        if step == steps {
-            eprintln!();
-        }
-        let _ = std::io::stderr().flush();
-        true
     }
 
     for index in 0..args.images {
