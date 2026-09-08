@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT / "reference"))
 
 
 def scheduler_sigma(step: int, steps: int, mu: float = 1.15) -> np.float32:
-    """host/native_schedule.h, which the scheduler regression pins against diffusers."""
+    """crates/pipeline/src/schedule.rs, which tests/test_schedule.py pins against diffusers."""
     if step == steps:
         return np.float32(0)
     raw = np.float32(1.0 - step / steps)

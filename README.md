@@ -254,18 +254,18 @@ there by tensor shape. Once the shapes you use are cached, inference needs no co
 Dimensions are multiples of 16 from 64 to 2048 (16 to 16,896 total tokens).
 `KREA2_NATIVE_PROFILE=1` prints stage timings to stderr.
 
-**From C.** [examples/generate.c](examples/generate.c) is the whole API in one file:
-create a session from the checkpoint, `krea2_generate` into a caller-owned RGB8 buffer,
-destroy the session; `krea2_generate_guided` adds the negative prompt and guidance
-scale (pass -1 and 0 for the checkpoint's defaults), `krea2_pipeline_create_files`
-names the text encoder and VAE, and `krea2_pipeline_distilled` reports which checkpoint
-a session holds. Calls on one session are serialized; errors return a status and a
-message. It builds as `build/krea2-c-example`:
-
-```sh
-env -u LD_LIBRARY_PATH build/krea2-c-example \
-  ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors "a red fox" build/c-fox.ppm
-```
+**From C, or any language with FFI.** `build/include/krea2_pipeline.h` is the whole
+API: `krea2_pipeline_create` from the checkpoint, `krea2_generate` into a caller-owned
+RGB8 buffer, `krea2_pipeline_destroy`. `krea2_generate_guided` adds the negative prompt
+and guidance scale (pass -1 and 0 for the checkpoint's defaults),
+`krea2_pipeline_create_files` names the text encoder and VAE, and
+`krea2_pipeline_distilled` reports which checkpoint a session holds; the component
+entry points (`krea2_tokenize`, `krea2_encode`, `krea2_transformer`, `krea2_decode`)
+are there for validating a port stage by stage. Calls on one session are serialized;
+errors return a status and write a message into a caller-supplied buffer. The header is
+generated from the Rust sources by cbindgen, so it cannot drift from what the library
+exports. `tools/compare_native.py` and `tests/test_native_pipeline.py` are working
+consumers, in Python through ctypes.
 
 Deploy `libkrea2.so`, the adjacent `runtime/` directory and
 your executable next to the model files. Native seeds are repeatable within this
