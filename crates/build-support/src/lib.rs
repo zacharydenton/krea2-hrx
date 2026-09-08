@@ -9,6 +9,11 @@ use std::path::{Path, PathBuf};
 /// The environment variable that names the runtime directory outright.
 pub const RUNTIME: &str = "KREA2_RUNTIME";
 
+/// Everything the answer depends on. Cargo reruns a build script only when a
+/// variable it was told about changes, so a cache moved from under a built
+/// binary would otherwise leave a stale RUNPATH pointing at the old one.
+const WATCHED: [&str; 3] = [RUNTIME, "XDG_CACHE_HOME", "HOME"];
+
 /// The directory holding `libhrx.so`, in the order a build should prefer:
 ///
 /// 1. `KREA2_RUNTIME`, which is the answer for a packager or a developer with
@@ -20,7 +25,9 @@ pub const RUNTIME: &str = "KREA2_RUNTIME";
 /// The first that exists wins, and the choice is printed so a build that later
 /// fails to link says where it looked. `None` means none of them is there.
 pub fn runtime_directory() -> Option<PathBuf> {
-    println!("cargo:rerun-if-env-changed={RUNTIME}");
+    for name in WATCHED {
+        println!("cargo:rerun-if-env-changed={name}");
+    }
     for candidate in candidates() {
         if candidate.join("libhrx.so").exists() {
             return Some(candidate);

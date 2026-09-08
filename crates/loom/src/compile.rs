@@ -12,17 +12,33 @@ use crate::{Error, Result, Settings};
 /// `loom-compile` on PATH, and it is needed at run time, not only at build
 /// time -- the first image at a new sequence length compiles a bundle.
 pub fn compiler(override_path: Option<&str>) -> String {
+    resolve_compiler(
+        override_path,
+        std::env::var("LOOM_COMPILE").ok().as_deref(),
+        runtime_directory().as_deref(),
+    )
+}
+
+/// The decision itself, with the environment passed in rather than read, so it
+/// can be tested against a directory the test controls instead of against
+/// whatever this machine happens to have installed.
+fn resolve_compiler(
+    override_path: Option<&str>,
+    environment: Option<&str>,
+    cache: Option<&Path>,
+) -> String {
     if let Some(path) = override_path {
         return path.to_string();
     }
-    if let Ok(named) = std::env::var("LOOM_COMPILE") {
-        return named;
+    if let Some(named) = environment {
+        return named.to_string();
     }
-    if let Some(cached) = runtime_directory().map(|root| root.join("loom-compile")) {
+    if let Some(cached) = cache.map(|root| root.join("loom-compile")) {
         if cached.is_file() {
             return cached.to_string_lossy().into_owned();
         }
     }
+    // Nothing named it and nothing cached it: PATH is the last word.
     "loom-compile".to_string()
 }
 
@@ -168,11 +184,33 @@ mod tests {
     }
 
     #[test]
-    fn the_compiler_follows_the_caller_then_the_environment() {
-        assert_eq!(compiler(Some("/opt/loom-compile")), "/opt/loom-compile");
-        std::env::set_var("LOOM_COMPILE", "/from/env");
-        assert_eq!(compiler(None), "/from/env");
-        std::env::remove_var("LOOM_COMPILE");
-        assert_eq!(compiler(None), "loom-compile");
+    fn the_compiler_follows_the_caller_then_the_environment_then_the_cache() {
+        // A cache with a compiler in it, and one without, both under this
+        // test's control: reading the real environment would make the result
+        // depend on whether this machine has an installed build.
+        let root = std::env::temp_dir().join(format!("krea2-compiler-{}", std::process::id()));
+        let populated = root.join("populated");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&populated).expect("a cache directory");
+        std::fs::create_dir_all(&empty).expect("a cache directory");
+        std::fs::write(populated.join("loom-compile"), b"").expect("a cached compiler");
+
+        // The caller's choice wins over everything.
+        assert_eq!(
+            resolve_compiler(Some("/opt/loom-compile"), Some("/from/env"), Some(&populated)),
+            "/opt/loom-compile"
+        );
+        // Then the environment, over a cache that has one.
+        assert_eq!(resolve_compiler(None, Some("/from/env"), Some(&populated)), "/from/env");
+        // Then the cache: this is what makes an installed build work, since
+        // nothing puts loom-compile on PATH.
+        assert_eq!(
+            resolve_compiler(None, None, Some(&populated)),
+            populated.join("loom-compile").to_string_lossy()
+        );
+        // A cache without one, and no cache at all, both fall through to PATH.
+        assert_eq!(resolve_compiler(None, None, Some(&empty)), "loom-compile");
+        assert_eq!(resolve_compiler(None, None, None), "loom-compile");
+        std::fs::remove_dir_all(root).ok();
     }
 }
