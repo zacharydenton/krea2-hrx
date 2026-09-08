@@ -527,6 +527,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "krea2-ops"
+version = "0.1.0"
+dependencies = [
+ "hrx",
+ "krea2-numerics",
+ "loom",
+]
+
+[[package]]
 name = "krea2-session"
 version = "0.1.0"
 dependencies = [

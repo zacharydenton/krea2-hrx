@@ -27,11 +27,14 @@ pub struct Metadata {
 
 /// Buffer capacity for a sequence: `tokens + 16` of headroom, rounded to whole
 /// 64-key blocks, and wider still when a query tile spans 32 rows.
+#[allow(clippy::manual_div_ceil)] // the first branch floors on purpose
 pub fn capacity(tokens: usize, fp16_query_tiles: u32) -> usize {
     if fp16_query_tiles == 2 {
+        // Deliberately a floor: tokens + 79 rounded *down* to whole 64-key
+        // blocks, which is 16 rows of headroom past the 32-row query tile.
         (tokens + 79) / 64 * 64
     } else {
-        std::cmp::max((tokens + 16 + 31) / 32 * 32, (tokens + 63) / 64 * 64)
+        std::cmp::max((tokens + 16).div_ceil(32) * 32, tokens.div_ceil(64) * 64)
     }
 }
 

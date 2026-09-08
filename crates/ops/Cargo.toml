@@ -1,0 +1,17 @@
+[package]
+name = "krea2-ops"
+version = "0.1.0"
+edition = "2021"
+description = "The auxiliary Loom operations the pipeline is built from"
+license = "MIT"
+publish = false
+
+[lib]
+name = "krea2_ops"
+
+[dependencies]
+hrx = { path = "../hrx" }
+loom = { path = "../loom" }
+
+[dev-dependencies]
+krea2-numerics = { path = "../numerics" }
