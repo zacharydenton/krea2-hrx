@@ -102,26 +102,33 @@ fn the_process_maps_no_hip_torch_or_system_crypto() {
 }
 
 /// The Rust cache must key exactly as the C++ host did, or a port silently
-/// recompiles everything and, worse, could diverge on what it loads. The C++
-/// `Ops::euler_step` launches `euler` with `count_b` and a 256-thread grid;
-/// `tests/test_native_ops.py` runs it at 1000 elements, so after that test the
-/// entry must already be on disk and this must be a pure cache hit.
+/// recompiles everything and, worse, could diverge on what it loads.
+///
+/// The C++ `Ops::euler_step` launched `euler` with no configuration of its own
+/// and a 4x1 grid at 1000 elements, which made the signature `"euler\ngrid_x=4\n
+/// grid_y=1\n"`. Compiling it here and finding the artifact under the key that
+/// signature derives checks the whole chain -- signature, digest, cache path --
+/// without needing an entry some earlier test happened to leave behind.
 #[test]
 fn the_cache_key_matches_the_cpp_host() {
+    if !usable() {
+        return;
+    }
+    // The digest is over source plus signature, and is pure: check it before
+    // anything touches the disk.
     let source = loom::sources::auxiliary("euler").expect("the euler kernel");
     let signature = "euler\ngrid_x=4\ngrid_y=1\n";
     let key = loom::compile::digest(format!("{source}{signature}").as_bytes());
-    let path = match loom::cache_root() {
-        Ok(root) => root.join(format!("{key}.hsaco")),
-        Err(error) => {
-            eprintln!("skipping: no cache directory ({error})");
-            return;
-        }
-    };
+
+    // Compiling through the normal path must land on exactly that key.
+    auxiliary_kernel("euler", &loom::Config::new(), (4, 1)).expect("compiling euler");
+    let root = loom::cache_root().expect("a cache directory");
+    let path = root.join(format!("{key}.hsaco"));
     assert!(
         path.exists(),
-        "{} is missing: the C++ host compiled euler at 1000 elements, so a matching \
-         key must already be cached (run tests/test_native_ops.py first)",
+        "{} is missing: auxiliary_kernel compiled euler for a 4x1 grid, so the C++ \
+         host's key must name the artifact it produced",
         path.display()
     );
+    assert!(root.join(format!("{key}.sha256")).exists(), "the hash beside it");
 }
