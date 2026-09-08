@@ -7,9 +7,17 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define KREA2_PIPELINE_ABI_VERSION 2u
+#define KREA2_PIPELINE_ABI_VERSION 3u
 typedef struct krea2_pipeline krea2_pipeline;
 uint32_t krea2_pipeline_abi_version(void);
+// Called by krea2_generate and krea2_generate_guided once per sampling step,
+// after the step, with the seconds spent generating so far. Returning nonzero
+// abandons the image: the generate call fails with "cancelled".
+typedef int (*krea2_progress)(void *user, int step, int steps, double seconds);
+// NULL clears it. The callback runs on the calling thread, inside the session's
+// lock, so it must not call back into the pipeline.
+void krea2_pipeline_set_progress(krea2_pipeline *pipeline,
+                                 krea2_progress progress, void *user);
 // model is ComfyUI's int8 ConvRot diffusion model checkpoint (for example
 // diffusion_models/krea2_turbo_int8_convrot.safetensors); the text encoder and
 // VAE are found beside it in ComfyUI's models layout. compiler names a native

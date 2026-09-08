@@ -5,6 +5,7 @@
 #include "native_models.h"
 #include "native_profile.h"
 #include "native_schedule.h"
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -24,6 +25,8 @@ struct krea2_pipeline {
   krea2_session *blocks = nullptr;
   int block_tokens = 0;
   bool distilled = true; // Turbo: fixed shift, no guidance; Raw: dynamic shift
+  krea2_progress progress = nullptr;
+  void *progress_user = nullptr;
   krea2_pipeline(ComfyFiles f, std::string c)
       : files(std::move(f)), compiler(std::move(c)),
         kernel_cache(user_cache_directory() + "/blocks-gfx1151-v1"),
@@ -268,6 +271,7 @@ int generate(krea2_pipeline *p, const char *prompt, const char *negative,
       count = elements;
     }
     Profile timing("generate");
+    const auto began = std::chrono::steady_clock::now();
     auto latents = upload_float(initial, count, w / 16 * (h / 16), 64);
     auto text = p->models.text_fusion(
         p->models.encode(p->models.tokenizer.prompt(prompt)));
@@ -286,6 +290,13 @@ int generate(krea2_pipeline *p, const char *prompt, const char *negative,
         p->models.ops.guidance(velocity, unguided, guidance);
       }
       p->models.ops.euler_step(latents, velocity, next - sigma);
+      if (p->progress) {
+        gpu::synchronize();
+        if (p->progress(p->progress_user, step + 1, steps,
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - began).count()))
+          throw std::runtime_error("cancelled");
+      }
     }
     timing.mark("denoise");
     auto result = p->models.decode(latents, h, w);
@@ -305,6 +316,15 @@ extern "C" int krea2_generate(krea2_pipeline *p, const char *prompt, int w,
   }
   return generate(p, prompt, nullptr, 0.f, w, h, steps, seed, initial, count,
                   rgb, cap, e, n);
+}
+extern "C" void krea2_pipeline_set_progress(krea2_pipeline *p,
+                                           krea2_progress progress,
+                                           void *user) {
+  if (!p)
+    return;
+  std::lock_guard<std::mutex> lock(p->mutex);
+  p->progress = progress;
+  p->progress_user = user;
 }
 extern "C" int krea2_generate_guided(krea2_pipeline *p, const char *prompt,
                                      const char *negative, float guidance,

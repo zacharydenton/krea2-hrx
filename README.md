@@ -39,9 +39,14 @@ work.
 
 ## What you get
 
-- **`build/krea2`**: a standalone CLI. Point it at ComfyUI's checkpoint, prompt
-  in, RGB out (PPM), no Python; `--negative` and `--guidance` for Raw, with the
-  checkpoint's defaults when omitted.
+- **`build/krea2`**: the CLI, a small Rust program over the C ABI (`cli/`), which is
+  also the worked example of driving this runtime from another language --
+  `cli/src/pipeline.rs` is the whole binding. `krea2 -p "a red fox in the snow"` finds
+  ComfyUI's files under `~/comfy-models` and writes `image.png`; the prompt can come from
+  stdin instead, `--images N` walks consecutive seeds, `--attn` picks the attention
+  kernels, and `--negative` / `--guidance` drive Raw with the checkpoint's defaults when
+  omitted. It prints per-step progress with an estimate of the time left. `krea2 --help`
+  has the rest.
 - **`libkrea2_pipeline.so`** with [host/krea2_pipeline.h](host/krea2_pipeline.h): the
   same pipeline behind a C ABI for any language with FFI (tokenizer, text encoder,
   transformer, VAE, `krea2_generate` and `krea2_generate_guided`).
@@ -199,7 +204,9 @@ correctness. `docs/notes.md` records every decision and measurement.
 build of [hrx-system](https://github.com/ROCm/hrx-system) (HRX's headers, `libhrx`
 and its HSA provider, and the `loom-compile` tool that compiles kernels for a new
 sequence length), a C++17 compiler, and the nlohmann JSON headers. That is the whole
-list: no HIP, hipcc, BLAS, ICU, OpenSSL or Python. `scripts/env.sh` points at the HRX
+list for the libraries: no HIP, hipcc, BLAS, ICU, OpenSSL or Python. The CLI on top of
+them is Rust, so `build/krea2` also wants cargo; `scripts/build_native.sh` skips it with
+a note when cargo is missing, and the libraries build regardless. `scripts/env.sh` points at the HRX
 build (`HRX_BUILD`, default `~/code/hrx-system/build-cuda`; the provider under
 `~/.local/rocm-hrx`) and the build scripts package the runtime libraries under
 `build/runtime`. Python, PyTorch and diffusers are used only by the tests, the kernel
@@ -219,13 +226,18 @@ and Pillow. Inference never needs it.
 ```sh
 source scripts/env.sh
 scripts/build_native.sh
-env -u LD_LIBRARY_PATH build/krea2 \
-  --model ~/comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors \
-  --prompt "a red fox in the snow" --width 1024 --height 1024 --seed 0 --out build/fox.ppm
+env -u LD_LIBRARY_PATH build/krea2 -p "a red fox in the snow" --out build/fox.png
+# every knob, and a Raw image from a piped prompt:
+echo "a red fox in the snow" | env -u LD_LIBRARY_PATH build/krea2 \
+  --models ~/comfy-models --checkpoint raw --guidance 3.5 --negative "blurry" \
+  --width 1024 --height 1024 --seed 0 --images 4 --out build/fox.png
 ```
 
-The text encoder and VAE are found beside the checkpoint (`--text-encoder` and `--vae`
-name them explicitly). The checkpoint decides the sampler: a Turbo file runs eight
+`--models DIR` (default `~/comfy-models`) holds ComfyUI's `diffusion_models/`,
+`text_encoders/` and `vae/`; `--model`, `--text-encoder` and `--vae` name files
+directly. The output is a PNG or, by any other extension, a binary PPM; `--images N`
+writes `fox-0.png` through `fox-3.png` from consecutive seeds. The checkpoint decides
+the sampler: a Turbo file runs eight
 unguided steps with the fixed timestep shift, a Raw file (detected by its name, or
 `--checkpoint raw`) 52 steps at guidance 3.5 with the resolution-dependent shift;
 `--steps`, `--guidance` and `--negative` override. The first request for a new total
@@ -320,7 +332,8 @@ bundle whose metadata disagrees with its own rules.
 | --- | --- |
 | `kernels/` | the Loom kernels (`native/`: the auxiliary kernels); all embedded in the library |
 | `tools/gen_*.py` | their generators; `scripts/test.sh` checks the sources match |
-| `host/` | the session, native pipeline, safetensors reader, tokenizer, kernel builders and caches, CLI |
+| `host/` | the session, native pipeline, safetensors reader, tokenizer, kernel builders and caches |
+| `cli/` | the Rust CLI over the C ABI, and with it the example of using that ABI |
 | `assets/` | the tokenizer (Qwen3-VL's `tokenizer.json`), embedded |
 | `reference/` | diffusers' model transcribed onto the checkpoint names, and the Loom-arithmetic reference |
 | `tests/`, `tools/bench_*.py` | oracles and paired benchmarks |

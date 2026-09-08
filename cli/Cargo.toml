@@ -1,0 +1,15 @@
+[package]
+name = "krea2"
+version = "0.1.0"
+edition = "2021"
+description = "Prompt to image on the Radeon 8060S, over the runtime's C ABI"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+png = "0.17"
+
+[profile.release]
+strip = true
