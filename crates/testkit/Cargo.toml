@@ -1,0 +1,22 @@
+[package]
+name = "krea2-testkit"
+version = "0.1.0"
+edition = "2021"
+description = "libnative_ops_test.so: individual Loom kernels, for the Python kernel tests"
+license = "MIT"
+publish = false
+
+[lib]
+name = "native_ops_test"
+crate-type = ["cdylib"]
+
+[dependencies]
+bytemuck = "1"
+half = { version = "2", features = ["bytemuck"] }
+hrx = { path = "../hrx" }
+krea2-numerics = { path = "../numerics" }
+krea2-ops = { path = "../ops" }
+krea2-pipeline = { path = "../pipeline" }
+krea2-session = { path = "../session" }
+loom = { path = "../loom" }
+serde_json = "1"

@@ -8,4 +8,5 @@ publish = false
 
 [dependencies]
 hrx = { path = "../hrx" }
+serde_json = "1"
 sha2 = "0.10"

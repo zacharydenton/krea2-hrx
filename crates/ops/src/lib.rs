@@ -10,11 +10,12 @@ pub mod tensor;
 
 use std::sync::{Arc, OnceLock};
 
-use hrx::{device, Args, Buffer, DevicePtr};
+use hrx::{device, Buffer, DevicePtr};
 use loom::auxiliary_kernel;
 
 pub use loom::Config;
 
+pub use hrx::Args;
 pub use tensor::{Pool, Scratch, Tensor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

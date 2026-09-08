@@ -8,13 +8,15 @@
 //!
 //! The kernel sources themselves are embedded by `build.rs` from `kernels/`,
 //! which is the only copy — there is no generated header to keep in step.
+pub mod blocks;
 pub mod cache;
 pub mod compile;
 pub mod shape;
 pub mod sources;
 
+pub use blocks::{prepare, Shape};
 pub use cache::{auxiliary_kernel, cache_root, set_compiler};
-pub use compile::{compiler, Compilation};
+pub use compile::{compiler, user_cache_directory, Compilation};
 
 /// Anything the compiler, the cache or the runtime rejects.
 #[derive(Debug, Clone, PartialEq, Eq)]

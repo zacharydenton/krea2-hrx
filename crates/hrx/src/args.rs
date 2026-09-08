@@ -46,9 +46,26 @@ impl Args {
         self.push(&value.to_ne_bytes(), 4)
     }
 
+    /// An 8-byte Loom index, which is what the attention kernels take for the
+    /// token count.
+    pub fn i64(&mut self, value: i64) -> &mut Self {
+        self.push(&value.to_ne_bytes(), 8)
+    }
+
     /// A device address, as the kernel's `buffer` operand.
     pub fn ptr(&mut self, value: DevicePtr) -> &mut Self {
         self.push(&(value.address() as u64).to_ne_bytes(), 8)
+    }
+
+    /// A kernarg blob a caller already has, for the test bridge that passes
+    /// one straight through from Python.
+    pub fn raw(&mut self, bytes: &[u8]) -> Result<&mut Self, crate::Error> {
+        if bytes.len() > CAPACITY {
+            return Err(crate::Error("kernel argument overflow".into()));
+        }
+        self.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.size = bytes.len();
+        Ok(self)
     }
 
     pub fn as_bytes(&self) -> &[u8] {

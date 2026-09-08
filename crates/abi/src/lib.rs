@@ -1,5 +1,9 @@
-//! `build/libkrea2.so`: the resident block session behind the C ABI that
-//! `krea2_loom.py` and the pipeline call.
+//! `libkrea2.so`: the resident block session and the standalone pipeline,
+//! behind the two C ABIs `krea2_loom.py`, the tools and the CLI call.
+//!
+//! One library carries both so that a process loading both APIs cannot end up
+//! with two HRX runtimes; `libkrea2_pipeline.so` is the same file under its
+//! other name.
 //!
 //! Everything here is the boundary and nothing else — raw pointers into slices,
 //! results into `(code, message)`, and a catch so a panic becomes an error
@@ -10,12 +14,14 @@ use std::sync::Arc;
 
 use krea2_session::{Session, Weights, HEAD_DIM, HIDDEN};
 
+pub mod pipeline;
+
 /// Must match `KREA2_ABI_VERSION`; `krea2_loom.py` refuses anything else.
 const ABI_VERSION: u32 = 3;
 
-const OK: c_int = 0;
+pub(crate) const OK: c_int = 0;
 const FAILED: c_int = 1;
-const INVALID_ARGUMENT: c_int = 64;
+pub(crate) const INVALID_ARGUMENT: c_int = 64;
 
 /// The opaque handle C sees as `krea2_session *`.
 pub struct SessionHandle {
@@ -32,7 +38,7 @@ pub extern "C" fn krea2_abi_version() -> u32 {
 ///
 /// # Safety
 /// `error` must be null or point to `capacity` writable bytes.
-unsafe fn report(error: *mut c_char, capacity: usize, message: &str) {
+pub(crate) unsafe fn report(error: *mut c_char, capacity: usize, message: &str) {
     if error.is_null() || capacity == 0 {
         return;
     }

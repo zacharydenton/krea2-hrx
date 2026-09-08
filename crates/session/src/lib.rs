@@ -131,14 +131,18 @@ pub struct Session {
 
 impl Session {
     /// Loads a checkpoint and a kernel bundle compiled for exactly `tokens`.
+    ///
+    /// The bundle is validated first: a checkpoint is thirteen gigabytes, and
+    /// nothing should read it to then reject the metadata beside it.
     pub fn open(
         checkpoint: &Path,
         kernels_dir: &Path,
         tokens: usize,
         layers: usize,
     ) -> Result<Session> {
+        let metadata = Session::metadata(kernels_dir, tokens, layers)?;
         let weights = std::sync::Arc::new(Weights::load(checkpoint)?);
-        Session::with_weights(weights, kernels_dir, tokens, layers)
+        Session::build(weights, kernels_dir, metadata, tokens, layers)
     }
 
     /// The same, sharing a checkpoint already on the device.
@@ -148,6 +152,13 @@ impl Session {
         tokens: usize,
         layers: usize,
     ) -> Result<Session> {
+        let metadata = Session::metadata(kernels_dir, tokens, layers)?;
+        Session::build(weights, kernels_dir, metadata, tokens, layers)
+    }
+
+    /// The bundle's `launch.txt`, checked against the shape rules for `tokens`.
+    /// Nothing here touches the device.
+    fn metadata(kernels_dir: &Path, tokens: usize, layers: usize) -> Result<Metadata> {
         if !(16..=16896).contains(&tokens) {
             return Err(Error::invalid("tokens must be 16..16896"));
         }
@@ -160,7 +171,16 @@ impl Session {
                 "invalid kernel launch metadata; rebuild with scripts/build_kernels.py",
             )
         })?;
-        let metadata = Metadata::parse(&text, tokens)?;
+        Metadata::parse(&text, tokens)
+    }
+
+    fn build(
+        weights: std::sync::Arc<Weights>,
+        kernels_dir: &Path,
+        metadata: Metadata,
+        tokens: usize,
+        layers: usize,
+    ) -> Result<Session> {
         if weights.bits() != metadata.gemm_bits {
             return Err(Error::invalid(format!(
                 "kernel bundle built for int{} GEMM operands but the weights are int{}",
@@ -295,18 +315,57 @@ impl Session {
         device().write(self.buffers.cos.ptr(), cos)?;
         device().write(self.buffers.sin.ptr(), sin)?;
         for index in first_block..first_block + count {
-            self.block(index)?;
+            self.block(index, self.buffers.mods.ptr())?;
         }
         device().synchronize()?;
         device().read(x, self.buffers.x.ptr())?;
         Ok(())
     }
 
+    /// The same over a residual stream and modulation tables already on the
+    /// device, which is what the pipeline has: 50 MB of x and 4 MB of mods per
+    /// step never leave the GPU.
+    ///
+    /// `x` is bf16 `[tokens][6144]`, read and written in place; `mods` is f32
+    /// `[layers][6][6144]`. The rope tables stay host-side because they change
+    /// only when the image geometry does.
+    pub fn run_device(
+        &self,
+        x: DevicePtr,
+        mods: DevicePtr,
+        cos: &[f32],
+        sin: &[f32],
+    ) -> Result<()> {
+        let _serialized = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let tokens = self.tokens;
+        if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
+            return Err(Error::invalid("cos/sin have the wrong element count"));
+        }
+        // Into the session's own buffer, whose headroom rows are already zero.
+        device().copy_device_to_device(
+            self.buffers.x.ptr(),
+            x,
+            tokens * HIDDEN as usize * 2,
+        )?;
+        device().write(self.buffers.cos.ptr(), cos)?;
+        device().write(self.buffers.sin.ptr(), sin)?;
+        for index in 0..self.layers {
+            self.block(index, mods)?;
+        }
+        device().synchronize()?;
+        device().copy_device_to_device(
+            x,
+            self.buffers.x.ptr(),
+            tokens * HIDDEN as usize * 2,
+        )?;
+        Ok(())
+    }
+
     /// This block's slice of the modulation tables: prescale, preshift,
     /// pregate, postscale, postshift, postgate, each 6144 floats.
-    fn modulation(&self, index: usize, part: usize) -> DevicePtr {
+    fn modulation(&self, mods: DevicePtr, index: usize, part: usize) -> DevicePtr {
         let stride = 6 * HIDDEN as usize * 4;
-        self.buffers.mods.ptr().offset(index * stride + part * HIDDEN as usize * 4)
+        mods.offset(index * stride + part * HIDDEN as usize * 4)
     }
 
     fn gemm(
@@ -337,7 +396,7 @@ impl Session {
         Ok(())
     }
 
-    fn block(&self, index: usize) -> Result<()> {
+    fn block(&self, index: usize, mods: DevicePtr) -> Result<()> {
         let block = &self.blocks[index];
         let tokens = self.tokens as i32;
         let b = &self.buffers;
@@ -346,8 +405,8 @@ impl Session {
         norm.i32(tokens)
             .ptr(b.x.ptr())
             .ptr(block.prenorm)
-            .ptr(self.modulation(index, 0))
-            .ptr(self.modulation(index, 1))
+            .ptr(self.modulation(mods, index, 0))
+            .ptr(self.modulation(mods, index, 1))
             .ptr(b.a_q.ptr())
             .ptr(b.a_s.ptr());
         self.kernels.prepare_norm.launch_2d(tokens as u32, 1, THREADS, &norm)?;
@@ -447,15 +506,15 @@ impl Session {
             block.wo_s,
             HIDDEN,
             b.x.ptr(),
-            Some(self.modulation(index, 2)),
+            Some(self.modulation(mods, index, 2)),
         )?;
 
         let mut post = Args::new();
         post.i32(tokens)
             .ptr(b.x.ptr())
             .ptr(block.postnorm)
-            .ptr(self.modulation(index, 3))
-            .ptr(self.modulation(index, 4))
+            .ptr(self.modulation(mods, index, 3))
+            .ptr(self.modulation(mods, index, 4))
             .ptr(b.a_q.ptr())
             .ptr(b.a_s.ptr());
         self.kernels.prepare_norm.launch_2d(tokens as u32, 1, THREADS, &post)?;
@@ -472,7 +531,7 @@ impl Session {
             block.down_s,
             HIDDEN,
             b.x.ptr(),
-            Some(self.modulation(index, 5)),
+            Some(self.modulation(mods, index, 5)),
         )?;
         Ok(())
     }

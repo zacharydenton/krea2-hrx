@@ -1,0 +1,21 @@
+[package]
+name = "krea2-pipeline"
+version = "0.1.0"
+edition = "2021"
+description = "Krea 2 end to end: prompt in, RGB out"
+license = "MIT"
+publish = false
+
+[lib]
+name = "krea2_pipeline"
+
+[dependencies]
+hrx = { path = "../hrx" }
+krea2-models = { path = "../models" }
+krea2-numerics = { path = "../numerics" }
+krea2-ops = { path = "../ops" }
+krea2-session = { path = "../session" }
+loom = { path = "../loom" }
+rand = "0.9"
+rand_chacha = "0.9"
+rand_distr = "0.5"
