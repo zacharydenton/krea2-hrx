@@ -1,3 +1,4 @@
+// Preserve the BF16 model's rounding boundaries; FP16 buffers remain the WMMA transport format.
 // Krea 2's gate|up GEMM with the SwiGLU product in the epilogue: the weight rows are
 // interleaved in 16-row groups [gate o..o+15 | up o..o+15], so every wave holds the gate
 // and up fragments of the same 16 outputs side by side (fj = 0,1 and 2,3) and writes
@@ -272,14 +273,22 @@ kernel.def target(@krea2_gemm_i4_swiglu_gfx11) export("krea2_gemm_i4_swiglu") @k
         %bounded = index.assume %out_row [lt(%out_row, %m_bounded)] : index
         %a_scale_value = view.load %a_scale_view[%bounded] : view<[%m_bounded]xf32> -> f32
         %a_scale_vector = vector.splat %a_scale_value : vector<4xf32>
-        %g = vector.mulf %gate_scaled0, %a_scale_vector : vector<4xf32>
-        %u = vector.mulf %up_scaled0, %a_scale_vector : vector<4xf32>
+        %g_wide = vector.mulf %gate_scaled0, %a_scale_vector : vector<4xf32>
+        %g_bf = vector.fptrunc %g_wide : vector<4xf32> to vector<4xbf16>
+        %g = vector.extf %g_bf : vector<4xbf16> to vector<4xf32>
+        %u_wide = vector.mulf %up_scaled0, %a_scale_vector : vector<4xf32>
+        %u_bf = vector.fptrunc %u_wide : vector<4xf32> to vector<4xbf16>
+        %u = vector.extf %u_bf : vector<4xbf16> to vector<4xf32>
         %neg_g = vector.subf %zero4, %g : vector<4xf32>
         %e = vector.expf<afn> %neg_g : vector<4xf32>
         %den = vector.addf %one4, %e : vector<4xf32>
         %sig = vector.divf %one4, %den : vector<4xf32>
-        %silu = vector.mulf %g, %sig : vector<4xf32>
-        %prod = vector.mulf %silu, %u : vector<4xf32>
+        %silu_wide = vector.mulf %g, %sig : vector<4xf32>
+        %silu_bf = vector.fptrunc %silu_wide : vector<4xf32> to vector<4xbf16>
+        %silu = vector.extf %silu_bf : vector<4xbf16> to vector<4xf32>
+        %prod_wide = vector.mulf %silu, %u : vector<4xf32>
+        %prod_bf = vector.fptrunc %prod_wide : vector<4xf32> to vector<4xbf16>
+        %prod = vector.extf %prod_bf : vector<4xbf16> to vector<4xf32>
         %narrow = vector.fptrunc %prod : vector<4xf32> to vector<4xf16>
         vector.store %narrow, %c_view[%bounded, %out_col] : vector<4xf16>, view<[%m_bounded]x[%n_half]xf16>
       }

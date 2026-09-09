@@ -97,6 +97,85 @@ fn cfg(v: &[(&'static str, usize)]) -> Vec<(&'static str, String)> {
 
 #[test]
 #[ignore = "requires gfx1151 and provisioned HRX"]
+fn rotary_rounds_normalized_and_rotated_values_to_bf16() {
+    let mut h = Harness::new();
+    let (tokens, q_heads, kv_heads, dim) = (3, 9, 2, 128);
+    let stride = (q_heads + 2 * kv_heads) * dim;
+    let input: Vec<_> = values(tokens * stride, 0.7)
+        .into_iter()
+        .map(|x| f16::from_f32(bf16::from_f32(x).to_f32()))
+        .collect();
+    let qs = values(dim, 0.3);
+    let ks = values(dim, -0.2);
+    let cos: Vec<_> = (0..tokens * dim).map(|i| ((i / 2) as f32 * 0.03).cos()).collect();
+    let sin: Vec<_> = (0..tokens * dim).map(|i| ((i / 2) as f32 * 0.03).sin()).collect();
+    let mut config = cfg(&[
+        ("row_stride", stride),
+        ("q_heads", q_heads),
+        ("kv_heads", kv_heads),
+        ("k_offset", q_heads * dim),
+    ]);
+    config.push(("eps", "0.00001".into()));
+    let data = [
+        bytes(&input),
+        bytes(&qs),
+        bytes(&ks),
+        bytes(&cos),
+        bytes(&sin),
+        vec![0; tokens * q_heads * dim * 2],
+        vec![0; tokens * kv_heads * dim * 2],
+        vec![0; tokens * kv_heads * dim * 2],
+    ];
+    let out =
+        h.run("rope_qknorm_f16", &config, [tokens as u32, 1, 1], 256, &[tokens as u64], &data);
+    for (slot, heads, offset, scale) in
+        [(5, q_heads, 0, &qs), (6, kv_heads, q_heads * dim, &ks)]
+    {
+        let actual = halves(&out[slot], false);
+        let mut expected = Vec::new();
+        for t in 0..tokens {
+            for head in 0..heads {
+                let row = &input[t * stride + offset + head * dim..][..dim];
+                let rms = (row.iter().map(|x| x.to_f64().powi(2)).sum::<f64>() / dim as f64
+                    + 1e-5)
+                    .sqrt();
+                let norm: Vec<_> = row
+                    .iter()
+                    .enumerate()
+                    .map(|(c, x)| {
+                        bf16::from_f64(x.to_f64() / rms * (1. + scale[c] as f64)).to_f64()
+                    })
+                    .collect();
+                for c in 0..dim {
+                    let partner = if c % 2 == 0 { -norm[c + 1] } else { norm[c - 1] };
+                    // The reference RoPE multiplies and adds in float32 before
+                    // its BF16 cast; evaluating a midpoint in f64 changes ties.
+                    expected.push(
+                        bf16::from_f32(
+                            norm[c] as f32 * cos[t * dim + c]
+                                + partner as f32 * sin[t * dim + c],
+                        )
+                        .to_f64(),
+                    );
+                }
+            }
+        }
+        assert!(actual.iter().all(|&v| bf16::from_f64(v).to_f64() == v));
+        close(&actual, &expected, 1e-3, 4e-3);
+    }
+    let v = halves(&out[7], false);
+    for t in 0..tokens {
+        for c in 0..kv_heads * dim {
+            assert_eq!(
+                v[t * kv_heads * dim + c],
+                input[t * stride + (q_heads + kv_heads) * dim + c].to_f64()
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires gfx1151 and provisioned HRX"]
 fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
     let mut h = Harness::new();
     for bits in [4usize, 8] {
@@ -178,14 +257,20 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
                         (0..m * n / 2)
                             .map(|i| {
                                 let (r, c) = (i / (n / 2), i % (n / 2));
-                                let a = full[r * n + (c / 16) * 32 + c % 16];
-                                let b = full[r * n + (c / 16) * 32 + c % 16 + 16];
-                                a / (1. + (-a).exp()) * b
+                                let a = bf16::from_f64(full[r * n + (c / 16) * 32 + c % 16])
+                                    .to_f64();
+                                let b =
+                                    bf16::from_f64(full[r * n + (c / 16) * 32 + c % 16 + 16])
+                                        .to_f64();
+                                bf16::from_f64(
+                                    bf16::from_f64(a / (1. + (-a).exp())).to_f64() * b,
+                                )
+                                .to_f64()
                             })
                             .collect()
                     } else {
                         data.push(vec![0; m * n * 2]);
-                        full
+                        full.into_iter().map(|x| bf16::from_f64(x).to_f64()).collect()
                     };
                     let out = h.run(
                         &stem,
@@ -195,7 +280,12 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
                         &[m as u64],
                         &data,
                     );
-                    close(&halves(&out[4], mode == "resid"), &want, 2e-3, 4e-3);
+                    let actual = halves(&out[4], mode == "resid");
+                    assert!(
+                        actual.iter().all(|&v| bf16::from_f64(v).to_f64() == v),
+                        "{stem} must preserve the model's BF16 output boundary"
+                    );
+                    close(&actual, &want, 2e-3, 4e-3);
                 }
             }
         }
@@ -309,14 +399,25 @@ fn quantized_preparation_matches_the_kronecker_hadamard_and_preserves_padding() 
                 for c in 0..width {
                     formed.push(match kind {
                         "norm" => {
-                            (1. + modulation[c] as f64) * norm_input[t * width + c].to_f64()
-                                / (mean_square + 1e-5).sqrt()
-                                * (1. + norm[c] as f64)
-                                + shift[c] as f64
+                            let rounded = |x: f64| bf16::from_f64(x).to_f64();
+                            let normalized = rounded(
+                                norm_input[t * width + c].to_f64()
+                                    / (mean_square + 1e-5).sqrt()
+                                    * (1. + norm[c] as f64),
+                            );
+                            rounded(
+                                rounded(rounded(1. + modulation[c] as f64) * normalized)
+                                    + shift[c] as f64,
+                            )
                         }
                         "gated" => {
-                            half_input[t * width + c].to_f64()
-                                / (1. + (-gate[t * stride + c].to_f64()).exp())
+                            let attention =
+                                bf16::from_f64(half_input[t * width + c].to_f64()).to_f64();
+                            let sigmoid = bf16::from_f64(
+                                1. / (1. + (-gate[t * stride + c].to_f64()).exp()),
+                            )
+                            .to_f64();
+                            bf16::from_f64(attention * sigmoid).to_f64()
                         }
                         _ => half_input[t * width + c].to_f64(),
                     });

@@ -24,7 +24,7 @@ transformer using identical noise, conditioning, scheduler and VAE:
 | Smoothed int4 QK | 21.62 dB | 31.57 dB |
 
 These are fixture results, not a quality sweep. The fp16 default preserves the
-best measured trajectory agreement. `scripts/test.sh --quick --quality` checks
+best measured trajectory agreement. `scripts/parity.sh` checks
 an accepted reference trajectory; see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Smoothed attention

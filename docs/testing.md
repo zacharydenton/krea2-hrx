@@ -25,31 +25,47 @@ The GPU oracles compute independent CPU arithmetic; they do not reproduce kernel
 implementations line for line. The scheduler fixture is captured from Diffusers,
 not generated from the Rust scheduler.
 
-Full-checkpoint comparisons against ComfyUI/Diffusers and image-trajectory quality
-runs formerly driven by Python are not equivalent to these operation tests and
-are not claimed as migrated. Existing historical image and latency results are
-unchanged by this test migration.
-
-## Parity against ComfyUI
-
-Everything above checks that the model agrees with its own earlier output.
-`scripts/parity.py` is the only check against something outside itself, so it is
-worth keeping even though it cannot run unattended: it needs the checkpoint, a
-GPU, and a directory of dumps that `scripts/comfy_dump.py` produces inside the
-ComfyUI environment. It is deliberately not part of `scripts/test.sh`; run it
-before a release.
+The parity gate uses the **original, unquantized BF16 checkpoint** as ground truth,
+not another quantized implementation. Run it explicitly:
 
 ```sh
-/opt/venv/bin/python scripts/comfy_dump.py --dump-steps --out build/comfy_parity  # in ComfyUI
-python3 scripts/parity.py gate --require    # the release gate
-python3 scripts/parity.py steps             # every evaluation, to localize a failure
-python3 scripts/parity.py image             # our run and ComfyUI's latent, both to PNG
+scripts/parity.sh
 ```
 
-The gate asserts the final latent from a full run on ComfyUI's noise. It does not
-pass today: the last recorded measurement puts that latent at cosine 0.806 while
-the per-evaluation velocity agrees at 0.9981–0.9999, because the Euler step at the
-low sigmas subtracts two large terms and amplifies a 1.4% velocity difference into
-a 55% latent one. The velocity is reported beside the gate to localize a failure,
-never in place of it — the threshold stays on the number that says whether this
-host produces ComfyUI's image.
+This invokes `crates/pipeline/tests/unquantized_parity.rs`. The saved reference
+uses the original `krea2_turbo_bf16.safetensors` through the Diffusers pipeline at
+1024×1024, seed 0, eight steps. Both implementations receive identical packed
+noise, tapped text states and scheduler settings. The Rust test executes the
+transformer trajectory with the production GPU Euler kernel, then decodes
+its final latent with the native VAE. It checks latent error and RGB PSNR against
+the unquantized reference, allowing at most the existing 0.1 dB loss from the
+accepted baseline in either metric. Agreement with quantized ComfyUI is not a
+release criterion.
+
+The default fixture directory is `build/quality`; `KREA2_QUALITY_FIXTURE` can point
+to another copy of the same frozen fixture. `KREA2_CHECKPOINT` selects the native
+candidate's checkpoint. Missing fixtures or weights fail explicitly. Reference
+file hashes are pinned in `tests/fixtures/unquantized.json`; the runner never
+creates or updates its own ground truth. The test needs no Python, NumPy or Torch.
+
+The fixture contains `job.json`, `noise.npy` (`[4096,64]`), `text.npy`
+(`[19,12,2560]`), `bf16.npy` and accepted `w8a8.npy` (`[1,4096,64]`), plus
+`bf16.png` and accepted `w8a8.png`. NPY tensors are little-endian float32 in C order;
+the two latent NPY files are lossless exports of the original saved PT tensors.
+New prompts, seeds or resolutions require independently captured unquantized
+outputs and explicit fixture review. This single fixture is not a quality sweep
+and uses saved conditioning rather than testing the text encoder.
+
+The original BF16 timestep embedding and Euler arithmetic are retained. Kernel
+rounding changes are accepted only if their error against the original model
+does not increase. The quantized ComfyUI parity scripts have been removed.
+
+The verified 1024×1024 fixture improves as follows:
+
+| Against the unquantized BF16 reference | Previous native implementation | Updated kernels |
+| --- | ---: | ---: |
+| Final-latent cosine | 0.998254 | 0.999717 |
+| Relative latent RMS error | 0.059111 | 0.023806 |
+| Image PSNR | 33.6673 dB | 36.9982 dB |
+
+These measurements include the actual GPU Euler kernel and native VAE decoder.

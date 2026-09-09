@@ -1,3 +1,4 @@
+// Preserve the BF16 model's rounding boundaries; FP16 buffers remain the WMMA transport format.
 // GEMM input preparation (norm), one workgroup of 256 lanes per token: form the
 // row with f32 arithmetic and f32 LDS storage, rotate it by the group-256 Hadamard
 // (H4 (x) H4 (x) H4 (x) H4 as four
@@ -115,12 +116,20 @@ kernel.def target(@krea2_prepare_norm_i8_gfx11) export("krea2_prepare_norm_i8") 
     %m_n = vector.mulf %m_x, %rms_inv8 : vector<8xf32>
     %m_ns = vector.load %ns_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
     %m_ns1 = vector.addf %m_ns, %one8 : vector<8xf32>
-    %m_normed = vector.mulf %m_n, %m_ns1 : vector<8xf32>
+    %m_normed_wide = vector.mulf %m_n, %m_ns1 : vector<8xf32>
+    %m_normed_bf = vector.fptrunc %m_normed_wide : vector<8xf32> to vector<8xbf16>
+    %m_normed = vector.extf %m_normed_bf : vector<8xbf16> to vector<8xf32>
     %m_ms = vector.load %ms_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
-    %m_ms1 = vector.addf %m_ms, %one8 : vector<8xf32>
+    %m_ms1_wide = vector.addf %m_ms, %one8 : vector<8xf32>
+    %m_ms1_bf = vector.fptrunc %m_ms1_wide : vector<8xf32> to vector<8xbf16>
+    %m_ms1 = vector.extf %m_ms1_bf : vector<8xbf16> to vector<8xf32>
     %m_sh = vector.load %sh_view[%m_i] : view<[%width]xf32> -> vector<8xf32>
-    %m_scaled = vector.mulf %m_normed, %m_ms1 : vector<8xf32>
-    %m_out = vector.addf %m_scaled, %m_sh : vector<8xf32>
+    %m_scaled_wide = vector.mulf %m_normed, %m_ms1 : vector<8xf32>
+    %m_scaled_bf = vector.fptrunc %m_scaled_wide : vector<8xf32> to vector<8xbf16>
+    %m_scaled = vector.extf %m_scaled_bf : vector<8xbf16> to vector<8xf32>
+    %m_out_wide = vector.addf %m_scaled, %m_sh : vector<8xf32>
+    %m_out_bf = vector.fptrunc %m_out_wide : vector<8xf32> to vector<8xbf16>
+    %m_out = vector.extf %m_out_bf : vector<8xbf16> to vector<8xf32>
     vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)

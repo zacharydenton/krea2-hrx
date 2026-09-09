@@ -1696,9 +1696,11 @@ dependencies = [
  "krea2-ops",
  "krea2-session",
  "loom",
+ "png",
  "rand 0.9.5",
  "rand_chacha",
  "rand_distr",
+ "serde_json",
 ]
 
 [[package]]

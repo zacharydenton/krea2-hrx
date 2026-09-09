@@ -1,3 +1,4 @@
+// Preserve the BF16 model's rounding boundaries; FP16 buffers remain the WMMA transport format.
 // GEMM input preparation (gated), one workgroup of 256 lanes per token: form the
 // row with f32 arithmetic and f32 LDS storage, rotate it by the group-256 Hadamard
 // (H4 (x) H4 (x) H4 (x) H4 as four
@@ -90,13 +91,19 @@ kernel.def target(@krea2_prepare_gated_i8_gfx11) export("krea2_prepare_gated_i8"
     %m_a16 = vector.load %a_view[%row, %m_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
     %m_ig = index.assume %m_i [le(%m_i, %gate_last), mul(%m_i, 8)] : index
     %m_g16 = vector.load %g_view[%row, %m_ig] : view<[%tokens_b]x[%gate_stride]xf16> -> vector<8xf16>
-    %m_a = vector.extf %m_a16 : vector<8xf16> to vector<8xf32>
+    %m_a_wide = vector.extf %m_a16 : vector<8xf16> to vector<8xf32>
+    %m_a_bf = vector.fptrunc %m_a_wide : vector<8xf32> to vector<8xbf16>
+    %m_a = vector.extf %m_a_bf : vector<8xbf16> to vector<8xf32>
     %m_g = vector.extf %m_g16 : vector<8xf16> to vector<8xf32>
     %m_neg_g = vector.subf %zero8, %m_g : vector<8xf32>
     %m_e = vector.expf<afn> %m_neg_g : vector<8xf32>
     %m_den = vector.addf %one8, %m_e : vector<8xf32>
-    %m_sig = vector.divf %one8, %m_den : vector<8xf32>
-    %m_out = vector.mulf %m_a, %m_sig : vector<8xf32>
+    %m_sig_wide = vector.divf %one8, %m_den : vector<8xf32>
+    %m_sig_bf = vector.fptrunc %m_sig_wide : vector<8xf32> to vector<8xbf16>
+    %m_sig = vector.extf %m_sig_bf : vector<8xbf16> to vector<8xf32>
+    %m_out_wide = vector.mulf %m_a, %m_sig : vector<8xf32>
+    %m_out_bf = vector.fptrunc %m_out_wide : vector<8xf32> to vector<8xbf16>
+    %m_out = vector.extf %m_out_bf : vector<8xbf16> to vector<8xf32>
     vector.store %m_out, %x_view[%m_i] : vector<8xf32>, view<[%width]xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)

@@ -1,3 +1,4 @@
+// Preserve the BF16 model's rounding boundaries; FP16 buffers remain the WMMA transport format.
 // Per-head RMSNorm (zero-centred scale, multiplier 1 + scale[c]) and rotary embedding
 // on q and k read from the fused projection buffer [tokens][row_stride] (q at column 0,
 // k at column k_offset) and written to contiguous q_out [tokens][q_heads*128] and
@@ -122,7 +123,9 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
         }
         %one_v = vector.splat %one : vector<4xf32>
         %sc1 = vector.addf %sc, %one_v : vector<4xf32>
-        %x = vector.mulf %normed, %sc1 : vector<4xf32>
+        %x_wide = vector.mulf %normed, %sc1 : vector<4xf32>
+        %x_bf = vector.fptrunc %x_wide : vector<4xf32> to vector<4xbf16>
+        %x = vector.extf %x_bf : vector<4xbf16> to vector<4xf32>
         %c = vector.load %cos_view[%row, %lane_col] : view<[%tokens_b]x128xf32> -> vector<4xf32>
         %s = vector.load %sin_view[%row, %lane_col] : view<[%tokens_b]x128xf32> -> vector<4xf32>
         // interleaved pairs: rotated = (-x1, x0, -x3, x2)
@@ -136,7 +139,9 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
         %rot = vector.from_elements %n1, %x0, %n3, %x2 : vector<4xf32>
         %xc = vector.mulf %x, %c : vector<4xf32>
         %rs = vector.mulf %rot, %s : vector<4xf32>
-        %out = vector.addf %xc, %rs : vector<4xf32>
+        %out_wide = vector.addf %xc, %rs : vector<4xf32>
+        %out_bf = vector.fptrunc %out_wide : vector<4xf32> to vector<4xbf16>
+        %out = vector.extf %out_bf : vector<4xbf16> to vector<4xf32>
         %out16 = vector.fptrunc %out : vector<4xf32> to vector<4xf16>
         scf.if %is_q {
           %qc0 = index.add %q_base, %lane_col : index

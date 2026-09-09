@@ -19,3 +19,7 @@ loom = { path = "../loom" }
 rand = "0.9"
 rand_chacha = "0.9"
 rand_distr = "0.5"
+
+[dev-dependencies]
+serde_json = "1"
+png = "0.17"
