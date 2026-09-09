@@ -33,7 +33,7 @@ pub struct Models {
 
 impl Models {
     /// `compiler` is the `loom-compile` this graph's auxiliary kernels are
-    /// built with; `None` takes `LOOM_COMPILE`, else PATH.
+    /// built with; `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(files: &Files, compiler: Option<&str>) -> Result<Models> {
         Models::load(
             &files.checkpoint,

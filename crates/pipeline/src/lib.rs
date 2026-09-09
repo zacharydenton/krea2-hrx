@@ -7,7 +7,7 @@ pub mod noise;
 pub mod profile;
 pub mod schedule;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hrx::device;
@@ -142,7 +142,6 @@ pub struct Pipeline {
     stream: Arc<hrx::Device>,
     files: Files,
     compiler: Option<String>,
-    cache: PathBuf,
     models: Models,
     /// Calls are serialized: they share the models' buffer pool.
     state: Mutex<State>,
@@ -155,7 +154,7 @@ struct State {
 }
 
 impl Pipeline {
-    /// `compiler` of `None` takes `LOOM_COMPILE`, else `loom-compile` on PATH.
+    /// `compiler` of `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
         let stream = hrx::Device::open()?;
         let _scope = stream.enter();
@@ -164,7 +163,6 @@ impl Pipeline {
             models: Models::open(&files, compiler)?,
             files,
             compiler: compiler.map(str::to_string),
-            cache: loom::user_cache_directory("blocks-gfx1151-v1")?,
             state: Mutex::new(State::default()),
         })
     }
@@ -370,10 +368,7 @@ impl Pipeline {
             }
         };
         state.blocks.get_or_try_insert_with(tokens, || {
-            let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
-            let bundle = loom::prepare(&self.cache, self.compiler.as_deref(), &shape)?;
-            let session =
-                Session::with_weights(weights, &bundle, tokens, 28, self.compiler.as_deref())?;
+            let session = Session::with_weights(weights, tokens, 28, self.compiler.as_deref())?;
             Ok(Blocks { session, rope: Rope::default() })
         })
     }

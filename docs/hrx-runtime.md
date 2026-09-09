@@ -16,15 +16,17 @@ referenced allocations through synchronization, so buffer Drop does not wait
 for GPU execution. Allocations use the native device allocator without draining
 pending commands. Native operations already insert their own ordering barriers.
 
-The default runtime/ compiler is a pinned prebuilt bundle in the shared HRX
-cache. The initial local candidate has been prepared and tested, but the public
-release URL has not been uploaded yet. Until publication, prepare it explicitly:
+The default runtime and in-process compiler come from HRX's pinned native bundle.
+The HRX repository is currently private, so download with an authenticated GitHub
+CLI and prepare the verified cache:
 
 ```sh
-cargo install --locked --git https://github.com/zacharydenton/hrx.rs --features runner hrx
-hrx prepare hrx-linux-x86_64-gfx1151.tar.gz   # from an hrx.rs checkout's artifacts/
+cargo install --locked --git https://github.com/zacharydenton/hrx.rs --rev be89b44652af6adf17c5c950d0759f92c2e88582 --features runner hrx
+mkdir -p build
+gh release download native-ecaaf7376f7d-loomc --repo zacharydenton/hrx.rs \
+  --pattern hrx-linux-x86_64-gfx1151.tar.gz --dir build
+hrx prepare build/hrx-linux-x86_64-gfx1151.tar.gz
 cargo build --release --workspace
-# Or install the model CLI directly:
 cargo install --locked --path cli
 ```
 
@@ -41,7 +43,7 @@ The override rewrites `Cargo.lock` to the path source, so remove the file and
 
 `HRX_RUNTIME_DIR` chooses a trusted native directory (`KREA2_RUNTIME` remains an
 alias). `HRX_CACHE_DIR` controls the shared cache. `HRX_OFFLINE=1` refuses network
-provisioning. `LOOM_COMPILE` or an explicit model compiler argument overrides
+provisioning. `HRX_LOOM_LIBRARY` or an explicit model compiler argument overrides
 the compiler. Normal builds do not require `scripts/runtime.sh`; that script
 remains available to stage a developer's native build for an override.
 The shared crate README documents provisioning, native lifetime and bundle format.
@@ -49,14 +51,16 @@ The shared crate README documents provisioning, native lifetime and bundle forma
 Krea's shape/bundle metadata and model-specific operation builders remain here.
 Both auxiliary and block compilation delegate to `hrx::loom`. Cache identity now
 includes the compiler's content hash as well as source, symbol, target and
-configuration. Old compiled bundles can still be loaded explicitly, while newly
-prepared bundles use the corrected identity.
+configuration. Sessions receive typed prepared artifacts and load their owned
+executable bytes directly. There is no precompiled-directory interface or
+compiler subprocess.
 
 Kernel sources live in `crates/loom/kernels`; tokenizer assets live in
 `crates/tokenizer/assets`. Generators and tests use these paths directly.
 Package builds carry the same assets without depending on files outside the package.
 
-`libkrea2.so` retains both ABI 3 interfaces and their generated headers. cbindgen
+`libkrea2.so` exposes block ABI 4 and pipeline ABI 3. Block constructors no
+longer accept kernel directories; rebuild clients against the generated headers. cbindgen
 runs during the Cargo build and errors are fatal. Shared FFI helpers validate
 slice arithmetic and alignment and contain panics. H3, Krea and kernel test
 libraries can coexist: HRX initializes under an OS lock across Rust crate copies,

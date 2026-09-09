@@ -1,18 +1,14 @@
 //! The compiled kernel bundle a session runs on, and the metadata contract
 //! that says it was built by the same rules this host derives.
-use std::path::Path;
 
 use hrx::Kernel;
-use loom::shape;
+use loom::{shape, Shape};
 
 use crate::{Error, Result, HIDDEN, INTER};
 
-/// What `launch.txt` records. Version 4 is the bf16 residual stream; version 5
-/// adds the fp16 query tile count. Version 3 and earlier expect an fp16 stream
-/// and are rejected.
+/// Launch dimensions derived from the prepared artifact shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Metadata {
-    pub version: u32,
     pub tokens: u32,
     pub gemm_rows: u32,
     pub m_group: u32,
@@ -38,57 +34,24 @@ pub fn capacity(tokens: usize, fp16_query_tiles: u32) -> usize {
     }
 }
 
-impl Metadata {
-    /// Parses the single line and checks every field against what this host
-    /// derives for the same sequence, so a bundle from other rules is refused
-    /// before any weights are read.
-    pub fn parse(text: &str, tokens: usize) -> Result<Metadata> {
-        let bad =
-            || Error::invalid("invalid kernel launch metadata; rebuild with loom::prepare");
-        let mut fields = text.split_whitespace().map(str::parse::<u64>);
-        let mut next =
-            || -> Result<u64> { fields.next().transpose().ok().flatten().ok_or_else(bad) };
-        let metadata = Metadata {
-            version: next()? as u32,
-            tokens: next()? as u32,
-            gemm_rows: next()? as u32,
-            m_group: next()? as u32,
-            capacity: next()? as usize,
-            attention_waves: next()? as u32,
-            pitch_hidden: next()? as u32,
-            pitch_inter: next()? as u32,
-            attention_bits: next()? as u32,
-            gemm_bits: next()? as u32,
-            fp16_query_tiles: 1,
-        };
-        let metadata = match metadata.version {
-            4 => metadata,
-            5 => Metadata { fp16_query_tiles: next()? as u32, ..metadata },
-            _ => return Err(bad()),
-        };
-        let expected_tiles = if metadata.version == 5 && metadata.attention_bits == 16 {
-            shape::fp16_query_tiles(tokens as i32) as u32
-        } else {
-            1
-        };
-        let bits = metadata.gemm_bits as i32;
-        let derived = metadata.tokens == tokens as u32
-            && metadata.fp16_query_tiles == expected_tiles
-            && matches!(metadata.attention_bits, 4 | 8 | 16)
-            && matches!(metadata.gemm_bits, 4 | 8)
-            && metadata.capacity == capacity(tokens, metadata.fp16_query_tiles)
-            && metadata.gemm_rows == shape::gemm_rows(tokens as i32, bits) as u32
-            && metadata.m_group
-                == shape::gemm_m_group(tokens as i32, metadata.gemm_rows as i32) as u32
-            && metadata.attention_waves == if tokens < 8192 { 8 } else { 4 }
-            && metadata.pitch_hidden == shape::gemm_pitch(HIDDEN, bits) as u32
-            && metadata.pitch_inter == shape::gemm_pitch(INTER, bits) as u32;
-        if !derived {
-            return Err(bad());
+impl From<&Shape> for Metadata {
+    fn from(shape: &Shape) -> Self {
+        Self {
+            tokens: shape.tokens as u32,
+            gemm_rows: shape.rows as u32,
+            m_group: shape.m_group as u32,
+            capacity: shape.capacity as usize,
+            attention_waves: shape.attention_waves as u32,
+            pitch_hidden: shape::gemm_pitch(HIDDEN, shape.gemm_bits) as u32,
+            pitch_inter: shape::gemm_pitch(INTER, shape.gemm_bits) as u32,
+            attention_bits: shape.attention_bits as u32,
+            gemm_bits: shape.gemm_bits as u32,
+            fp16_query_tiles: shape.query_tiles as u32,
         }
-        Ok(metadata)
     }
+}
 
+impl Metadata {
     /// The GEMM operand width as a suffix: `i4` or `i8`.
     pub fn width(&self) -> String {
         format!("i{}", self.gemm_bits)
@@ -120,7 +83,7 @@ impl Metadata {
     }
 }
 
-/// Every kernel one block needs, loaded from a bundle directory.
+/// Every kernel one block needs, loaded from verified artifact bytes.
 pub struct Kernels {
     pub prepare_norm: Kernel,
     pub prepare_gated: Kernel,
@@ -135,11 +98,23 @@ pub struct Kernels {
 }
 
 impl Kernels {
-    pub fn load(directory: &Path, metadata: &Metadata) -> Result<Kernels> {
-        let load = |stem: &str, symbol: &str| -> Result<Kernel> {
-            unsafe { Kernel::load(&directory.join(format!("{stem}.hsaco")), symbol) }
-                .map_err(Error::from)
-        };
+    pub fn load(bundle: &loom::PreparedBundle, metadata: &Metadata) -> Result<Kernels> {
+        Self::load_with(metadata, |stem, symbol| {
+            let artifact = bundle
+                .artifact(stem)
+                .ok_or_else(|| Error::invalid(format!("missing prepared kernel: {stem}")))?;
+            if artifact.symbol() != symbol {
+                return Err(Error::invalid(format!("unexpected export for {stem}")));
+            }
+            // Safety: prepare compiles the embedded model sources for this shape.
+            unsafe { Kernel::load_artifact(artifact) }.map_err(Error::from)
+        })
+    }
+
+    fn load_with(
+        metadata: &Metadata,
+        load: impl Fn(&str, &str) -> Result<Kernel>,
+    ) -> Result<Kernels> {
         let width = metadata.width();
         let tile = metadata.tile();
         Ok(Kernels {
@@ -172,41 +147,6 @@ impl Kernels {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The line the Rust metadata tests pins for 4115 tokens of int8 weights.
-    const PINNED: &str = "5 4115 256 4 4160 8 6144 16448 16 8 1\n";
-
-    #[test]
-    fn the_pinned_line_parses_and_agrees_with_the_derived_shapes() {
-        let metadata = Metadata::parse(PINNED, 4115).expect("the pinned metadata");
-        assert_eq!(metadata.version, 5);
-        assert_eq!(metadata.capacity, 4160);
-        assert_eq!(metadata.gemm_rows, 256);
-        assert_eq!(metadata.width(), "i8");
-        assert_eq!(metadata.tile(), "_256");
-        assert_eq!(metadata.attention_symbol(), "krea2_attention_gqa_lds_f16_wmma");
-    }
-
-    #[test]
-    fn a_bundle_for_another_sequence_or_another_rule_is_refused() {
-        for (line, why) in [
-            ("3 4115 256 4 4160 8 6144 16448 16 8 1", "version 3 expects an fp16 stream"),
-            ("5 4096 256 4 4160 8 6144 16448 16 8 1", "compiled for other tokens"),
-            ("5 4115 128 4 4160 8 6144 16448 16 8 1", "wrong tile rows"),
-            ("5 4115 256 3 4160 8 6144 16448 16 8 1", "wrong raster group"),
-            ("5 4115 256 4 4128 8 6144 16448 16 8 1", "wrong capacity"),
-            ("5 4115 256 4 4160 4 6144 16448 16 8 1", "wrong wave count"),
-            ("5 4115 256 4 4160 8 6144 16512 16 8 1", "int4 pitch with int8 weights"),
-            ("5 4115 256 4 4160 8 6144 16448 12 8 1", "no such attention width"),
-            ("5 4115 256 4 4160 8 6144 16448 16 6 1", "no such operand width"),
-            ("5 4115 256 4 4160 8 6144 16448 16 8 2", "query tiles the host does not use"),
-            ("5 4115 256 4 4160 8 6144 16448 16 8", "version 5 without its tile count"),
-            ("", "no metadata at all"),
-        ] {
-            let error = Metadata::parse(line, 4115).unwrap_err();
-            assert!(error.message.contains("invalid kernel launch metadata"), "{why}: {error}");
-        }
-    }
 
     #[test]
     fn capacity_leaves_headroom_and_whole_key_blocks() {

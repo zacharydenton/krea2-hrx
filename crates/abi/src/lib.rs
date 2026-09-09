@@ -12,7 +12,7 @@ pub mod pipeline;
 
 /// The block ABI's version. Foreign callers check this before using handles. These carry
 /// the names the header has always had, because C callers use them.
-pub const KREA2_ABI_VERSION: u32 = 3;
+pub const KREA2_ABI_VERSION: u32 = 4;
 
 pub const KREA2_OK: c_int = 0;
 pub const KREA2_ERROR: c_int = 1;
@@ -71,14 +71,13 @@ unsafe fn path_of<'a>(path: *const c_char) -> krea2_session::Result<&'a Path> {
         .map_err(|_| krea2_session::Error::invalid("a path that is not UTF-8"))
 }
 
-/// Opens a session on a checkpoint and a bundle compiled for `tokens`.
+/// Opens a checkpoint and compiles the kernel specializations for `tokens`.
 ///
 /// # Safety
-/// The paths must be NUL-terminated; `out` must be writable.
+/// The checkpoint path must be NUL-terminated; `out` must be writable.
 #[no_mangle]
 pub unsafe extern "C" fn krea2_create(
     weights: *const c_char,
-    kernels: *const c_char,
     tokens: c_int,
     layers: c_int,
     out: *mut *mut SessionHandle,
@@ -99,12 +98,7 @@ pub unsafe extern "C" fn krea2_create(
                     "tokens and layers must be positive",
                 ));
             }
-            let session = Session::open(
-                path_of(weights)?,
-                path_of(kernels)?,
-                tokens as usize,
-                layers as usize,
-            )?;
+            let session = Session::open(path_of(weights)?, tokens as usize, layers as usize)?;
             created = Some(session);
             Ok(())
         }),
@@ -287,7 +281,6 @@ pub unsafe extern "C" fn krea2_weights_bits(weights: *const WeightsHandle) -> c_
 #[no_mangle]
 pub unsafe extern "C" fn krea2_create_shared(
     weights: *const WeightsHandle,
-    kernels: *const c_char,
     tokens: c_int,
     layers: c_int,
     out: *mut *mut SessionHandle,
@@ -308,12 +301,8 @@ pub unsafe extern "C" fn krea2_create_shared(
             };
             created = Some(Session::with_weights(
                 weights.0.clone(),
-                path_of(kernels)?,
                 tokens as usize,
                 layers as usize,
-                // The bundle is already compiled by the time a session shares
-                // it; only the smoothed attention's preparation kernels could
-                // still need a compiler, and they take LOOM_COMPILE or PATH.
                 None,
             )?);
             Ok(())
@@ -348,15 +337,7 @@ mod native_contracts {
             let mut error = [0x55u8; 128];
             let mut output = std::ptr::dangling_mut::<SessionHandle>();
             let status = unsafe {
-                krea2_create(
-                    null(),
-                    null(),
-                    -1,
-                    1,
-                    &mut output,
-                    error.as_mut_ptr().cast(),
-                    capacity,
-                )
+                krea2_create(null(), -1, 1, &mut output, error.as_mut_ptr().cast(), capacity)
             };
             assert_eq!(status, KREA2_INVALID_ARGUMENT);
             assert!(output.is_null());
@@ -386,15 +367,7 @@ mod native_contracts {
         assert_ne!(error[0], 0);
         let mut output = std::ptr::dangling_mut::<SessionHandle>();
         let status = unsafe {
-            krea2_create_shared(
-                null(),
-                null(),
-                16,
-                1,
-                &mut output,
-                error.as_mut_ptr(),
-                error.len(),
-            )
+            krea2_create_shared(null(), 16, 1, &mut output, error.as_mut_ptr(), error.len())
         };
         assert_eq!(status, KREA2_INVALID_ARGUMENT);
         assert!(output.is_null());

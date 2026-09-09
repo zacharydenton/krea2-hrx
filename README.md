@@ -54,18 +54,14 @@ From this checkout. The shared runtime is a pinned dependency, so no sibling
 checkout is needed to build; the `hrx` runner is what stages the native bundle:
 
 ```sh
-cargo install --locked --git https://github.com/zacharydenton/hrx.rs --features runner hrx
+cargo install --locked --git https://github.com/zacharydenton/hrx.rs --rev be89b44652af6adf17c5c950d0759f92c2e88582 --features runner hrx
 hrx prepare hrx-linux-x86_64-gfx1151.tar.gz
 cargo install --locked --path cli
 ```
 
-The native bundle is currently a local, tested release candidate: automatic
-first-use download is implemented, but its public release URL has not been
-uploaded yet, so `hrx prepare` needs the archive from an `hrx.rs` checkout
-(`artifacts/`) until then. See the [runtime guide](docs/hrx-runtime.md) for
-overrides, offline setup and developing against a local `hrx.rs`.
-The first request at a new tensor shape compiles and caches kernels, so it is
-slower than subsequent requests.
+The native bundle is pinned by hash. The HRX repository is currently private;
+follow the [runtime guide](docs/hrx-runtime.md) to download its release with
+GitHub credentials before `hrx prepare`.
 
 ## Models
 

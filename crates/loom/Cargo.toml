@@ -8,8 +8,6 @@ publish = false
 
 [dependencies]
 hrx = { package = "krea2-hrx", path = "../hrx" }
-serde_json = "1"
-tempfile = "3"
 
 [dev-dependencies]
 hrx-core.workspace = true

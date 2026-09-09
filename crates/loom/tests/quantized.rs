@@ -34,18 +34,19 @@ impl Harness {
         };
         let source = std::fs::read_to_string(path).unwrap();
         let symbol = format!("krea2_{stem}");
-        let mut request = hrx::loom::Request::new(&source, &symbol);
+        let mut request = hrx::loom::Specialization::new(&symbol);
         request.config = cfg
             .iter()
             .map(|(key, value)| (format!("krea2.{stem}.{key}"), value.clone()))
             .collect();
         let path = self
             .compiler
+            .module(&source)
             .compile(&request, &hrx::bundle::cache_root().unwrap().join("kernels"))
             .unwrap();
         // Safety: trusted checked-in source compiled through HRX. Every test below
         // sizes the bindings from the same dimensions passed as kernel configuration.
-        let kernel = unsafe { self.stream.load(&path, &symbol).unwrap() };
+        let kernel = unsafe { self.stream.load_artifact(&path).unwrap() };
         let buffers: Vec<Buffer> =
             data.iter().map(|bytes| self.stream.allocate(bytes.len()).unwrap()).collect();
         for (buffer, bytes) in buffers.iter().zip(data) {

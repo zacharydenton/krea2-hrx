@@ -9,9 +9,9 @@ pub mod compile;
 pub mod shape;
 pub mod sources;
 
-pub use blocks::{prepare, Shape};
+pub use blocks::{prepare, PreparedBundle, Shape};
 pub use cache::{auxiliary_kernel, cache_root};
-pub use compile::{compiler, user_cache_directory};
+pub use compile::compiler;
 
 /// Anything the compiler, the cache or the runtime rejects.
 #[derive(Debug, Clone, PartialEq, Eq)]

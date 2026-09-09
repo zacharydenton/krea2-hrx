@@ -10,8 +10,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 shipped=$(mktemp) && allowed=$(mktemp) && trap 'rm -f "$shipped" "$allowed"' EXIT
 { cargo tree -p krea2 --edges normal --prefix none
   cargo tree -p krea2-abi --edges normal --prefix none; } |
-  cut -d' ' -f1 | grep -v '^$' | sort -u > "$shipped"
-grep -v '^#' docs/dependencies.txt | grep -v '^$' > "$allowed"
+  cut -d' ' -f1 | grep -v '^$' | LC_ALL=C sort -u > "$shipped"
+grep -v '^#' docs/dependencies.txt | grep -v '^$' | LC_ALL=C sort -u > "$allowed"
 diff -u "$allowed" "$shipped"
 cargo test --workspace
 if [ "$gpu" = 1 ]; then

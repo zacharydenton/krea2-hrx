@@ -64,9 +64,9 @@ struct Args {
     /// Qwen-Image VAE (default: beside the model)
     #[arg(long)]
     vae: Option<PathBuf>,
-    /// Loom compiler override (default: LOOM_COMPILE, runtime cache, then PATH)
+    /// Loom shared library override (default: HRX_LOOM_LIBRARY or the pinned bundle)
     #[arg(long)]
-    compiler: Option<PathBuf>,
+    compiler_library: Option<PathBuf>,
     /// Only the output lines
     #[arg(short, long)]
     quiet: bool,
@@ -197,7 +197,8 @@ fn run(args: Args) -> Result<()> {
         // --model .../krea2_raw_... is not silently sampled as Turbo.
         .distilled(args.checkpoint.as_deref().map(|choice| choice == "turbo"))
         .resolve()?;
-    let compiler = args.compiler.as_ref().map(|path| path.to_string_lossy().into_owned());
+    let compiler =
+        args.compiler_library.as_ref().map(|path| path.to_string_lossy().into_owned());
     let pipeline = Pipeline::open(files, compiler.as_deref())?;
     let load = loading.elapsed().as_secs_f64();
     let steps = args.steps.unwrap_or(if pipeline.distilled() { 8 } else { 52 });

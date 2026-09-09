@@ -159,7 +159,7 @@ impl Ops {
         Ops { pool, compiler: None, kernels: PreparedKernels::default() }
     }
 
-    /// The same, with an explicit compiler instead of `LOOM_COMPILE`/PATH.
+    /// The same, with an explicit compiler instead of `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn with_compiler(pool: Arc<Pool>, compiler: Option<&str>) -> Ops {
         Ops {
             pool,

@@ -1,6 +1,6 @@
 //! The GEMM launch-shape rules, shared by the kernel builder and the session.
 //!
-//! //! bundle's `launch.txt` records what they produced, so a session rejects a
+//! The prepared artifact shape carries these rules. A session rejects a
 //! bundle built under different rules.
 
 /// The fp16 attention kernel's query tiles per workgroup.

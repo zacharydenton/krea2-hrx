@@ -103,12 +103,16 @@ fn the_process_maps_no_hip_torch_or_system_crypto() {
 fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
     let source = loom::sources::auxiliary("euler").unwrap();
     let compiler = loom::compiler(None).unwrap();
-    let mut request = hrx::loom::Request::new(source, "krea2_euler");
+    let mut request = hrx::loom::Specialization::new("krea2_euler");
     request.config.insert("krea2.euler.grid_x".into(), "4".into());
     request.config.insert("krea2.euler.grid_y".into(), "1".into());
     auxiliary_kernel("euler", &loom::Config::new(), (4, 1), None).unwrap();
-    let directory = loom::cache_root().unwrap().join(compiler.key(&request).unwrap());
+    let directory =
+        loom::cache_root().unwrap().join(compiler.module(source).key(&request).unwrap());
     let artifact = directory.join("kernel.hsaco");
     assert!(artifact.is_file());
-    assert_eq!(compiler.compile(&request, &loom::cache_root().unwrap()).unwrap(), artifact);
+    assert_eq!(
+        compiler.module(source).compile(&request, &loom::cache_root().unwrap()).unwrap().path(),
+        artifact
+    );
 }

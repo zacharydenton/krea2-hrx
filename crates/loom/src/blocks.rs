@@ -1,17 +1,7 @@
-//! Transformer kernel bundles with launch metadata and artifact hashes.
-//!
-//! Each bundle is keyed by its sources, configurations and compiler identity.
-//! Launch metadata stays model-specific; compilation and artifact integrity use HRX.
+//! Typed transformer artifacts. HRX owns compilation, caching and integrity.
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
 
-use crate::compile::digest;
 use crate::{compiler, shape, sources, Error, Result, Settings};
-use hrx::bundle::Lock;
-
-/// The metadata version and the shape knobs that are not in `launch.txt`.
-/// Changing any of it must change every bundle's name.
-const SIGNATURE_PREFIX: &str = "native-kernels-v5:gfx1151:sage-prep-v3:64:vt\n";
 
 /// One kernel to compile: a source, and the file name it takes in the bundle.
 struct Job {
@@ -20,7 +10,7 @@ struct Job {
     config: Settings,
 }
 
-/// The bundle's shape, which `launch.txt` records and the session re-derives.
+/// Transformer dimensions and launch rules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
     pub tokens: i32,
@@ -76,23 +66,6 @@ impl Shape {
             _ => 16,
         };
         Shape::new(tokens, gemm_bits, bits)
-    }
-
-    /// The eleven fields of `launch.txt`, version 5.
-    pub fn launch_text(&self) -> String {
-        format!(
-            "5 {} {} {} {} {} {} {} {} {} {}\n",
-            self.tokens,
-            self.rows,
-            self.m_group,
-            self.capacity,
-            self.attention_waves,
-            shape::gemm_pitch(6144, self.gemm_bits),
-            shape::gemm_pitch(16384, self.gemm_bits),
-            self.attention_bits,
-            self.gemm_bits,
-            self.query_tiles,
-        )
     }
 
     fn jobs(&self) -> Vec<Job> {
@@ -218,110 +191,44 @@ impl Shape {
     }
 }
 
-/// The bundle for `shape`, compiled into `parent` if it is not already there.
-///
-/// Several processes may call this at once: the winner publishes by renaming a
-/// staging directory into place, and the losers find it and verify it.
-pub fn prepare(parent: &Path, compiler_path: Option<&str>, shape: &Shape) -> Result<PathBuf> {
-    let jobs = shape.jobs();
-    let launch = shape.launch_text();
+/// Verified compiler artifacts and the shape they were specialized for.
+#[derive(Debug)]
+pub struct PreparedBundle {
+    shape: Shape,
+    artifacts: BTreeMap<String, hrx::loom::Artifact>,
+}
+
+impl PreparedBundle {
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+    pub fn artifact(&self, stem: &str) -> Option<&hrx::loom::Artifact> {
+        self.artifacts.get(stem)
+    }
+}
+
+/// Prepare all block exports, reusing HRX's indexed modules and verified cache.
+pub fn prepare(compiler_path: Option<&str>, shape: &Shape) -> Result<PreparedBundle> {
     let shared = compiler(compiler_path)?;
-    let mut signature = format!("{SIGNATURE_PREFIX}compiler={}\n{launch}", shared.identity());
-    for job in &jobs {
+    let cache = crate::cache_root()?;
+    let mut artifacts = BTreeMap::new();
+    for job in shape.jobs() {
         let source = sources::block(&job.source)
             .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
-        signature.push_str(source);
-        signature.push_str(&job.source);
-        signature.push_str(&format!("krea2_{}", job.source));
-        signature.push_str(&job.stem);
-        for (key, value) in &job.config {
-            signature.push_str(&format!("{key}={value}\n"));
-        }
-    }
-    let out = parent.join(format!("T{}-{}", shape.tokens, digest(signature.as_bytes())));
-    if out.exists() {
-        verify(&out, &jobs, &launch)?;
-        return Ok(out);
-    }
-    std::fs::create_dir_all(parent)
-        .map_err(|e| Error(format!("cannot create {}: {e}", parent.display())))?;
-    let _lock = Lock::acquire(&parent.join(".lock"))?;
-    if out.exists() {
-        verify(&out, &jobs, &launch)?;
-        return Ok(out);
-    }
-
-    let temporary = tempfile::tempdir_in(parent).map_err(|e| Error(e.to_string()))?;
-    let staging = temporary.path();
-    let mut hashes = BTreeMap::new();
-    for job in &jobs {
-        let source = sources::block(&job.source).expect("checked above");
-        let artifact = staging.join(format!("{}.hsaco", job.stem));
-        let symbol = format!("krea2_{}", job.source);
-        let mut request = hrx::loom::Request::new(source, &symbol);
+        let mut request = hrx::loom::Specialization::new(format!("krea2_{}", job.source));
         request.config = job
             .config
             .iter()
             .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
             .collect();
-        let compiled = shared.compile(&request, &crate::cache_root()?)?;
-        std::fs::copy(compiled, &artifact).map_err(|e| Error(e.to_string()))?;
-        hashes.insert(format!("{}.hsaco", job.stem), digest(&read(&artifact)?));
+        artifacts.insert(job.stem, shared.module(source).compile(&request, &cache)?);
     }
-    write(&staging.join("launch.txt"), launch.as_bytes())?;
-    write(&staging.join("signature"), signature.as_bytes())?;
-    write(&staging.join("compiler.txt"), format!("{}\n", shared.path().display()).as_bytes())?;
-    write(&staging.join("manifest.json"), manifest(&hashes).as_bytes())?;
-    std::fs::rename(staging, &out)
-        .map_err(|e| Error(format!("cannot publish {}: {e}", out.display())))?;
-    Ok(out)
-}
-
-/// The launch metadata and every artifact's hash, before anything is loaded.
-fn verify(out: &Path, jobs: &[Job], launch: &str) -> Result<()> {
-    let recorded = read(&out.join("manifest.json"))?;
-    let recorded: BTreeMap<String, String> = serde_json::from_slice(&recorded)
-        .map_err(|e| Error(format!("corrupt kernel manifest in {}: {e}", out.display())))?;
-    if read(&out.join("launch.txt"))? != launch.as_bytes() {
-        return Err(Error("invalid native launch metadata".into()));
-    }
-    for job in jobs {
-        let name = format!("{}.hsaco", job.stem);
-        let want = recorded
-            .get(&name)
-            .ok_or_else(|| Error(format!("corrupt native kernel: {name}")))?;
-        if &digest(&read(&out.join(&name))?) != want {
-            return Err(Error(format!("corrupt native kernel: {name}")));
-        }
-    }
-    Ok(())
-}
-
-/// The manifest as `nlohmann::json::dump` writes it, so a bundle prepared by
-/// either implementation reads the same.
-fn manifest(hashes: &BTreeMap<String, String>) -> String {
-    serde_json::to_string(hashes).expect("a map of strings is always valid JSON")
-}
-
-fn read(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|e| Error(format!("cannot read {}: {e}", path.display())))
-}
-
-fn write(path: &Path, bytes: &[u8]) -> Result<()> {
-    std::fs::write(path, bytes)
-        .map_err(|e| Error(format!("cannot write {}: {e}", path.display())))
+    Ok(PreparedBundle { shape: shape.clone(), artifacts })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_launch_text_is_the_line_the_session_pins() {
-        // The metadata regression fixture: 4115 tokens of int8 weights.
-        let shape = Shape::new(4115, 8, 16).expect("a shape");
-        assert_eq!(shape.launch_text(), "5 4115 256 4 4160 8 6144 16448 16 8 1\n");
-    }
 
     #[test]
     fn the_smoothed_kernels_take_the_prefetch_variant_only_past_eight_thousand() {

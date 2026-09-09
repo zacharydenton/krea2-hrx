@@ -89,12 +89,12 @@ pub fn auxiliary_kernel(
         }
     }
     let symbol = format!("krea2_{name}");
-    let mut request = hrx::loom::Request::new(source, &symbol);
+    let mut request = hrx::loom::Specialization::new(&symbol);
     request.config =
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
-    let path = compiler.compile(&request, &cache_root()?)?;
+    let path = compiler.module(source).compile(&request, &cache_root()?)?;
     // Safety: the shared compiler produced this export from embedded model source.
-    let kernel = unsafe { Kernel::load(&path, &symbol)? };
+    let kernel = unsafe { Kernel::load_artifact(&path)? };
     let mut loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;
     Ok(loaded.get_or_insert_with(HashMap::new).entry(signature).or_insert(kernel).clone())
 }

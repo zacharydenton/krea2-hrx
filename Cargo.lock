@@ -1233,7 +1233,7 @@ dependencies = [
 [[package]]
 name = "hrx"
 version = "0.1.0"
-source = "git+https://github.com/zacharydenton/hrx.rs?rev=a440e8b23586b1ae88e0f4cb616f8d6755d766dc#a440e8b23586b1ae88e0f4cb616f8d6755d766dc"
+source = "git+https://github.com/zacharydenton/hrx.rs?rev=be89b44652af6adf17c5c950d0759f92c2e88582#be89b44652af6adf17c5c950d0759f92c2e88582"
 dependencies = [
  "bytemuck",
  "flate2",
@@ -1797,8 +1797,6 @@ dependencies = [
  "half",
  "hrx",
  "krea2-hrx",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

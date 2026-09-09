@@ -148,58 +148,42 @@ pub struct Session {
 }
 
 impl Session {
-    /// Loads a checkpoint and a kernel bundle compiled for exactly `tokens`.
-    ///
-    /// The bundle is validated first: a checkpoint is thirteen gigabytes, and
-    /// nothing should read it to then reject the metadata beside it.
-    pub fn open(
-        checkpoint: &Path,
-        kernels_dir: &Path,
-        tokens: usize,
-        layers: usize,
-    ) -> Result<Session> {
-        let metadata = Session::metadata(kernels_dir, tokens, layers)?;
+    /// Load a checkpoint and prepare its kernel specializations through HRX.
+    pub fn open(checkpoint: &Path, tokens: usize, layers: usize) -> Result<Session> {
+        Self::validate_dimensions(tokens, layers)?;
         let weights = std::sync::Arc::new(Weights::load(checkpoint)?);
-        Session::build(weights, kernels_dir, metadata, tokens, layers, None)
+        Self::with_weights(weights, tokens, layers, None)
     }
 
-    /// Creates a session sharing resident weights.
-    /// `compiler` overrides compilation of smoothed-attention preparation kernels.
+    /// Share resident weights and prepare artifacts for this sequence length.
+    /// `compiler` selects a Loom shared library for all session kernels.
     pub fn with_weights(
         weights: std::sync::Arc<Weights>,
-        kernels_dir: &Path,
         tokens: usize,
         layers: usize,
         compiler: Option<&str>,
     ) -> Result<Session> {
-        let metadata = Session::metadata(kernels_dir, tokens, layers)?;
-        Session::build(weights, kernels_dir, metadata, tokens, layers, compiler)
+        Self::validate_dimensions(tokens, layers)?;
+        let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
+        let bundle = loom::prepare(compiler, &shape)?;
+        Self::build(weights, &bundle, tokens, layers, compiler)
     }
 
-    /// The bundle's `launch.txt`, checked against the shape rules for `tokens`.
-    /// Nothing here touches the device.
-    fn metadata(kernels_dir: &Path, tokens: usize, layers: usize) -> Result<Metadata> {
-        if !(16..=16896).contains(&tokens) {
-            return Err(Error::invalid("tokens must be 16..16896"));
+    fn validate_dimensions(tokens: usize, layers: usize) -> Result<()> {
+        if !(16..=16896).contains(&tokens) || !(1..=28).contains(&layers) {
+            return Err(Error::invalid("tokens must be 16..16896 and layers must be 1..28"));
         }
-        if !(1..=28).contains(&layers) {
-            return Err(Error::invalid("layers must be 1..28"));
-        }
-        let path = kernels_dir.join("launch.txt");
-        let text = std::fs::read_to_string(&path).map_err(|_| {
-            Error::invalid("invalid kernel launch metadata; rebuild with loom::prepare")
-        })?;
-        Metadata::parse(&text, tokens)
+        Ok(())
     }
 
     fn build(
         weights: std::sync::Arc<Weights>,
-        kernels_dir: &Path,
-        metadata: Metadata,
+        bundle: &loom::PreparedBundle,
         tokens: usize,
         layers: usize,
         compiler: Option<&str>,
     ) -> Result<Session> {
+        let metadata = Metadata::from(bundle.shape());
         let stream = weights.stream.clone();
         let _scope = stream.enter();
         if weights.bits() != metadata.gemm_bits {
@@ -229,7 +213,7 @@ impl Session {
                 knorm: at("knorm", HEAD_DIM as usize * 4)?,
             });
         }
-        let kernels = Kernels::load(kernels_dir, &metadata)?;
+        let kernels = Kernels::load(bundle, &metadata)?;
         let capacity = metadata.capacity;
         let kv_bytes = KV_HEADS as usize * HEAD_DIM as usize * capacity * 2;
         let allocate = |bytes: usize| device().allocate(bytes).map_err(Error::from);
@@ -717,8 +701,8 @@ mod tests {
     #[test]
     #[ignore = "requires Krea checkpoint and gfx1151"]
     fn every_path_that_fills_the_rope_buffers_records_what_it_put_there() {
-        let (checkpoint, bundle, tokens) = fixture();
-        let session = Session::open(&checkpoint, &bundle, tokens, 1).expect("resident session");
+        let (checkpoint, tokens) = fixture();
+        let session = Session::open(&checkpoint, tokens, 1).expect("resident session");
         let resident = || *session.rope.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(resident(), None, "nothing is resident before the first call");
 
@@ -738,7 +722,7 @@ mod tests {
         assert_eq!(resident(), after_a, "A's second upload was not recorded");
     }
 
-    fn fixture() -> (std::path::PathBuf, std::path::PathBuf, usize) {
+    fn fixture() -> (std::path::PathBuf, usize) {
         use std::path::PathBuf;
         let checkpoint =
             std::env::var_os("KREA2_MODEL").map(PathBuf::from).unwrap_or_else(|| {
@@ -747,15 +731,6 @@ mod tests {
             });
         assert!(checkpoint.is_file(), "set KREA2_MODEL to a local checkpoint");
         let tokens = 4115;
-        let bundle =
-            std::env::var_os("KREA2_KERNELS").map(PathBuf::from).unwrap_or_else(|| {
-                loom::prepare(
-                    &loom::user_cache_directory("blocks-gfx1151-v1").unwrap(),
-                    None,
-                    &loom::Shape::new(tokens as i32, 8, 16).unwrap(),
-                )
-                .expect("HRX kernel bundle")
-            });
-        (checkpoint, bundle, tokens)
+        (checkpoint, tokens)
     }
 }
