@@ -109,7 +109,7 @@ def diffusers_state(comfy, layers: int = 28):
     out["final_layer.linear.weight"], out["final_layer.linear.bias"] = comfy["last.linear.weight"], comfy["last.linear.bias"]
     return out
 
-def cast_transformer_bf16(transformer):
+def cast_transformer(transformer, dtype):
     """Honor diffusers' fp32 parameter exceptions when loading with assign=True."""
     import torch
 
@@ -118,14 +118,14 @@ def cast_transformer_bf16(transformer):
              if keep.intersection(name.split(".")[:-1])}
     # ModelMixin.to warns because it cannot preserve these exceptions itself, so apply the
     # base cast and restore the saved fp32 tensors immediately afterward.
-    torch.nn.Module.to(transformer, dtype=torch.bfloat16)
+    torch.nn.Module.to(transformer, dtype=dtype)
     with torch.no_grad():
         for name, value in norms.items():
             transformer.get_parameter(name).data = value
     return transformer
 
 
-def build(models: Path, checkpoint: Path, device: str = "cuda"):
+def build(models: Path, checkpoint: Path, device: str = "cpu", dtype=None):
     """The official Krea 2 modules with the unquantized ComfyUI-format weights mapped on."""
     import torch
     from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Pipeline
@@ -133,8 +133,10 @@ def build(models: Path, checkpoint: Path, device: str = "cuda"):
     from safetensors.torch import load_file
     from transformers import AutoTokenizer, Qwen3VLModel
 
-    # The checkpoint goes straight to the GPU (unified memory, one copy) and the module is
-    # built on the meta device, so no f32 copy of 12.9B parameters is ever materialised.
+    import torch as _t
+    dtype = dtype or _t.bfloat16
+    # The checkpoint is loaded in one copy and the module is built on the meta device, so no
+    # f32 copy of 12.9B parameters is ever materialised.
     comfy = load_file(str(checkpoint), device=device)
     with torch.device("meta"):
         transformer = Krea2Transformer2DModel()
@@ -142,14 +144,14 @@ def build(models: Path, checkpoint: Path, device: str = "cuda"):
                                                       assign=True)
     assert not unexpected, unexpected[:5]
     assert not missing, missing[:5]
-    transformer = cast_transformer_bf16(transformer)
+    transformer = cast_transformer(transformer, dtype)
     vae = AutoencoderKLQwenImage.from_pretrained(str(models / "qwen-image" / "vae"),
-                                                 torch_dtype=torch.bfloat16).to(device)
+                                                 torch_dtype=dtype).to(device)
     vae.enable_tiling()
     return Krea2Pipeline(
         scheduler=FlowMatchEulerDiscreteScheduler(**SCHEDULER), vae=vae,
         text_encoder=Qwen3VLModel.from_pretrained(str(models / "qwen3-vl-4b"),
-                                                  torch_dtype=torch.bfloat16).to(device),
+                                                  torch_dtype=dtype).to(device),
         tokenizer=AutoTokenizer.from_pretrained(str(models / "qwen3-vl-4b")),
         transformer=transformer, is_distilled=True)
 
@@ -167,9 +169,11 @@ def decode(pipe, latents, size, path):
     import torch
     from PIL import Image
     vae = pipe.vae
-    mean = torch.tensor(vae.config.latents_mean).view(1, vae.config.z_dim, 1, 1, 1).cuda().bfloat16()
-    std = 1.0 / torch.tensor(vae.config.latents_std).view(1, vae.config.z_dim, 1, 1, 1).cuda().bfloat16()
-    z = unpack(latents.cuda().bfloat16(), size, size) / std + mean
+    where, dtype = vae.device, vae.dtype
+    shape = (1, vae.config.z_dim, 1, 1, 1)
+    mean = torch.tensor(vae.config.latents_mean).view(shape).to(where, dtype)
+    std = 1.0 / torch.tensor(vae.config.latents_std).view(shape).to(where, dtype)
+    z = unpack(latents.to(where, dtype), size, size) / std + mean
     with torch.no_grad():
         image = vae.decode(z, return_dict=False)[0][:, :, 0]
     rgb = ((image.float().clamp(-1, 1) + 1) * 127.5).round().to(torch.uint8)[0]
@@ -196,11 +200,18 @@ def command_reference(a) -> int:
     checkpoint = a.checkpoint or a.models / "krea2_turbo_bf16.safetensors"
     if not Path(checkpoint).is_file():
         raise SystemExit(f"{checkpoint} does not exist: the unquantized checkpoint is the truth here")
-    pipe = build(a.models, Path(checkpoint))
+    dtype = getattr(torch, a.dtype)
+    pipe = build(a.models, Path(checkpoint), a.device, dtype)
     with torch.no_grad():
-        embeds, mask = pipe.encode_prompt(a.prompt, device="cuda")
-        noise = pipe.prepare_latents(1, 16, a.size, a.size, torch.bfloat16, "cuda",
-                                     torch.Generator("cuda").manual_seed(a.seed))
+        embeds, mask = pipe.encode_prompt(a.prompt, device=a.device)
+        # The noise is always drawn on the CPU, whatever the model runs on. A CUDA
+        # generator and a CPU generator produce entirely different streams from the same
+        # seed -- measured here at cosine 0.002, i.e. unrelated -- so tying the noise to
+        # the compute device would make a CPU capture and a GPU capture incomparable
+        # rather than merely differently rounded.
+        noise = pipe.prepare_latents(1, 16, a.size, a.size, dtype, "cpu",
+                                     torch.Generator("cpu").manual_seed(a.seed))
+        noise = noise.to(a.device)
         a.work.mkdir(parents=True, exist_ok=True)
         # The native transformer takes the valid text rows only; the reference masks the rest.
         text = embeds[0][mask[0].bool()].float().cpu().numpy()
@@ -212,9 +223,19 @@ def command_reference(a) -> int:
     latents = out.images.float().cpu()
     np.save(a.work / "bf16.npy", np.ascontiguousarray(latents.numpy(), np.float32))
     decode(pipe, latents, a.size, a.work / "bf16.png")
+    # Why the CPU is the default: not GPU nondeterminism -- two GPU captures back to back
+    # on one stack are bit-identical, as are two CPU captures. What moved was the stack.
+    # Recapturing the archived fixture on today's Torch/Diffusers/ROCm shifted the latent
+    # by relative RMS 0.019, about 80% of the W8A8 error the gate exists to measure, and
+    # the archived job.json recorded no versions to attribute that to. A CPU reference
+    # depends on far less -- no ROCm, no GPU, no vendor kernels -- so it can be reproduced
+    # on a machine that has none of this hardware. The stack is recorded either way.
+    import diffusers
     (a.work / "job.json").write_text(json.dumps(
         dict(prompt=a.prompt, seed=a.seed, size=a.size, steps=a.steps,
-             checkpoint=str(checkpoint), text_tokens=int(text.shape[0]), shift=SHIFT),
+             checkpoint=str(checkpoint), text_tokens=int(text.shape[0]), shift=SHIFT,
+             device=a.device, dtype=a.dtype, torch=torch.__version__,
+             diffusers=diffusers.__version__),
         indent=1) + "\n")
     print(f"reference: {text.shape[0]} text tokens, latents {tuple(latents.shape)} -> {a.work}")
     print("the accepted W8A8 baseline is not ground truth and is not written here; "
@@ -235,7 +256,8 @@ def command_accept(a) -> int:
         raise SystemExit(f"{a.latents} holds {raw.size} floats, expected {tokens * 64}")
     latents = torch.from_numpy(raw.reshape(1, tokens, 64).copy())
     np.save(a.work / "w8a8.npy", np.ascontiguousarray(latents.numpy(), np.float32))
-    pipe = build(a.models, Path(meta["checkpoint"]))
+    pipe = build(a.models, Path(meta["checkpoint"]), meta.get("device", "cpu"),
+                 getattr(torch, meta.get("dtype", "bfloat16")))
     decode(pipe, latents, size, a.work / "w8a8.png")
     truth = np.load(a.work / "bf16.npy").astype(np.float64).ravel()
     got = latents.numpy().astype(np.float64).ravel()
@@ -284,6 +306,10 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--size", type=int, default=1024)
     ap.add_argument("--steps", type=int, default=8)
+    ap.add_argument("--device", default="cpu",
+                    help="reference: where to compute the truth (default cpu, so the "
+                         "reference can be reproduced without this vendor's GPU stack)")
+    ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
     ap.add_argument("--force", action="store_true", help="reference: replace an existing fixture")
     ap.add_argument("--write", action="store_true", help="manifest: write the pinned file in place")
     ap.add_argument("--note", default=None,
