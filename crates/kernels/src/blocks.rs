@@ -211,19 +211,93 @@ impl PreparedBundle {
 pub fn prepare(compiler_path: Option<&str>, shape: &Shape) -> Result<PreparedBundle> {
     let shared = compiler(compiler_path)?;
     let cache = crate::cache_root()?;
-    let mut artifacts = BTreeMap::new();
-    for job in shape.jobs() {
-        let source = sources::block(&job.source)
-            .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
-        let mut request = hrx::loom::Specialization::new(format!("krea2_{}", job.source));
-        request.config = job
-            .config
-            .iter()
-            .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
+    let jobs = shape.jobs();
+
+    // A cold shape compiles every block kernel, and the compiler is built for
+    // concurrency: distinct specializations take distinct cache locks and the
+    // per-module index lock is only for the one-time index build. Compiling one
+    // at a time left that idle and made a new resolution wait seconds it did
+    // not need to. Workers pull from a shared queue so a slow kernel does not
+    // strand a thread with an empty share.
+    let queue = std::sync::Mutex::new(jobs.into_iter());
+    let width = match std::env::var("KREA2_COMPILE_WORKERS").ok().and_then(|v| v.parse().ok()) {
+        Some(n) if n > 0 => n,
+        _ => std::thread::available_parallelism().map_or(1, |n| n.get()).min(8),
+    };
+    let compiled = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..width)
+            .map(|_| {
+                let (queue, shared, cache) = (&queue, &shared, &cache);
+                scope.spawn(move || -> Result<Vec<(String, hrx::loom::Artifact)>> {
+                    let mut done = Vec::new();
+                    loop {
+                        let job = {
+                            let mut queue =
+                                queue.lock().map_err(|_| Error("job queue poisoned".into()))?;
+                            match queue.next() {
+                                Some(job) => job,
+                                None => break,
+                            }
+                        };
+                        done.push((job.stem.clone(), compile_one(shared, cache, &job)?));
+                    }
+                    Ok(done)
+                })
+            })
             .collect();
-        artifacts.insert(job.stem, shared.module(source).compile(&request, &cache)?);
-    }
+        workers
+            .into_iter()
+            .map(|worker| {
+                worker.join().map_err(|_| Error("a compile worker panicked".into()))?
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
+
+    let artifacts: BTreeMap<String, hrx::loom::Artifact> =
+        compiled.into_iter().flatten().collect();
+    // The compiler retains parsed sources; a resolution needs them only while it
+    // is being built.
+    shared.trim();
     Ok(PreparedBundle { shape: shape.clone(), artifacts })
+}
+
+/// One kernel, with whatever the compiler had to say about it.
+fn compile_one(
+    shared: &hrx::loom::Compiler,
+    cache: &std::path::Path,
+    job: &Job,
+) -> Result<hrx::loom::Artifact> {
+    let source = sources::block(&job.source)
+        .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
+    let mut request = hrx::loom::Specialization::new(format!("krea2_{}", job.source));
+    request.config = job
+        .config
+        .iter()
+        .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
+        .collect();
+    request.report = crate::kernel_reports();
+    let artifact = shared.module(source).compile(&request, cache)?;
+    report(&job.stem, &artifact);
+    Ok(artifact)
+}
+
+/// Loom's own diagnostics and, when asked for, its compilation report. Both
+/// were discarded before: only the message of a *failed* compile survived, and
+/// a warning on a kernel that still built was never seen at all.
+fn report(stem: &str, artifact: &hrx::loom::Artifact) {
+    for diagnostic in artifact.diagnostics() {
+        eprintln!(
+            "krea2 kernel {stem}: {} {} at {}:{}: {}",
+            diagnostic.severity,
+            diagnostic.code,
+            diagnostic.line,
+            diagnostic.column,
+            diagnostic.message
+        );
+    }
+    if let Some(report) = artifact.report() {
+        eprintln!("krea2 kernel {stem} report: {report}");
+    }
 }
 
 #[cfg(test)]

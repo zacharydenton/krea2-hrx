@@ -2,7 +2,7 @@
 //! that says it was built by the same rules this host derives.
 
 use hrx::Kernel;
-use loom::{shape, Shape};
+use kernels::{shape, Shape};
 
 use crate::{Error, Result, HIDDEN, INTER};
 
@@ -98,7 +98,11 @@ pub struct Kernels {
 }
 
 impl Kernels {
-    pub fn load(bundle: &loom::PreparedBundle, metadata: &Metadata) -> Result<Kernels> {
+    pub fn load(
+        stream: &hrx::Stream,
+        bundle: &kernels::PreparedBundle,
+        metadata: &Metadata,
+    ) -> Result<Kernels> {
         Self::load_with(metadata, |stem, symbol| {
             let artifact = bundle
                 .artifact(stem)
@@ -107,7 +111,7 @@ impl Kernels {
                 return Err(Error::invalid(format!("unexpected export for {stem}")));
             }
             // Safety: prepare compiles the embedded model sources for this shape.
-            unsafe { Kernel::load_artifact(artifact) }.map_err(Error::from)
+            unsafe { stream.load_artifact(artifact) }.map_err(Error::from)
         })
     }
 

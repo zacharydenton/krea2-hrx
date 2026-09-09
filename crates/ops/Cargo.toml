@@ -10,6 +10,9 @@ publish = false
 name = "krea2_ops"
 
 [dependencies]
-hrx = { package = "krea2-hrx", path = "../hrx" }
+hrx.workspace = true
+# Reinterpreting bf16 element slices as bytes for the runtime's transfers,
+# which take &[u8] rather than a Pod element type.
+bytemuck = "1"
 krea2-numerics = { path = "../numerics" }
-loom = { path = "../loom" }
+krea2-kernels = { path = "../kernels" }

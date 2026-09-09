@@ -11,6 +11,6 @@ name = "krea2_session"
 
 [dependencies]
 bytemuck = "1"
-hrx = { package = "krea2-hrx", path = "../hrx" }
-loom = { path = "../loom" }
+hrx.workspace = true
+krea2-kernels = { path = "../kernels" }
 krea2-checkpoint = { path = "../checkpoint" }

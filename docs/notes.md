@@ -10,7 +10,7 @@ Qwen3-VL-4B encodes the prompt; Qwen-Image VAE decodes the resulting latents.
 | Crate | Responsibility |
 | --- | --- |
 | `hrx` | Device, allocations, argument packing and dispatch |
-| `loom` | Embedded kernel sources, compiler, caches and launch shapes |
+| `krea2-kernels` | Embedded kernel sources, the specializations they compile to and the launch shapes |
 | `krea2-checkpoint` | Safetensors mapping and block-weight upload plans |
 | `krea2-numerics` | bf16 and fp8 conversions |
 | `krea2-tokenizer` | Hugging Face tokenization and Krea's prompt template |
@@ -19,7 +19,7 @@ Qwen3-VL-4B encodes the prompt; Qwen-Image VAE decodes the resulting latents.
 | `krea2-models` | Model discovery, text encoder, outer transformer graph and VAE |
 | `krea2-pipeline` | Conditioning, noise, scheduling and image generation |
 
-`cli/` provides argument handling and image output. `crates/loom/kernels/`
+`cli/` provides argument handling and image output. `crates/kernels/kernels/`
 contains the checked-in Loom sources, which are authoritative since their
 generators were retired. `crates/tokenizer/assets/tokenizer.json` is embedded
 and read by the Rust `tokenizers` crate.
@@ -39,7 +39,7 @@ The int4 kernel family remains available for experiments.
 
 Operand rows with an 8192-byte pitch receive padding to avoid cache aliasing.
 The upload plan, kernel configuration and launch metadata must agree on the
-pitch. Shape rules live in `crates/loom/src/shape.rs`, pinned by its own tests. The
+pitch. Shape rules live in `crates/kernels/src/shape.rs`, pinned by its own tests. The
 Python kernel builder that once mirrored them, and the parity test between the
 two, were retired with that layer.
 

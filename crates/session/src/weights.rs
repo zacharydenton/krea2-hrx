@@ -6,7 +6,7 @@
 //! kernels never read it.
 use std::path::Path;
 
-use hrx::{device, Buffer, DevicePtr};
+use hrx::{Buffer, Stream, View};
 use krea2_checkpoint::{Checkpoint, Plan};
 
 use crate::{Error, Result};
@@ -17,22 +17,40 @@ const STAGING_BYTES: usize = 16 << 20;
 pub struct Weights {
     plan: Plan,
     storage: Buffer,
-    pub(crate) stream: std::sync::Arc<hrx::Device>,
+}
+
+/// Where one operand sits in the resident checkpoint. Resolved once, when a
+/// session is built, and turned into a binding at each dispatch.
+#[derive(Clone, Copy)]
+pub struct At {
+    offset: usize,
+    bytes: usize,
 }
 
 impl Weights {
-    /// Reads the checkpoint and uploads it.
-    pub fn load(path: &Path) -> Result<Weights> {
+    /// Reads the checkpoint's header and derives the layout, which is every
+    /// check a malformed checkpoint fails. No device is touched, so a rejection
+    /// costs nothing and can be tested without a GPU.
+    pub fn plan(path: &Path) -> Result<(Checkpoint, Plan)> {
         let file = Checkpoint::open(path)?;
         let plan = Plan::for_checkpoint(&file)?;
-        let stream = hrx::Device::current_or_new()?;
-        let _scope = stream.enter();
+        Ok((file, plan))
+    }
+
+    /// Reads the checkpoint and uploads it.
+    pub fn load(stream: &mut Stream, path: &Path) -> Result<Weights> {
+        let (file, plan) = Self::plan(path)?;
+        Self::upload(stream, &file, plan)
+    }
+
+    /// Walks a derived plan, filling one allocation row by row.
+    pub fn upload(stream: &mut Stream, file: &Checkpoint, plan: Plan) -> Result<Weights> {
         let storage = stream.allocate(plan.total_bytes)?;
         let mut staging = Vec::new();
         for span in plan.spans.values() {
-            let base = storage.ptr().offset(span.device_offset);
+            let base = storage.slice(span.device_offset, span.device_bytes);
             if !span.host.is_empty() {
-                device().copy_from_host(base, &span.host)?;
+                stream.upload(base.slice(0, span.host.len())?, &span.host)?;
                 continue;
             }
             let pitch = if span.rows > 0 { span.device_row_bytes } else { span.row_bytes };
@@ -49,21 +67,24 @@ impl Weights {
                     staging[staged * pitch..staged * pitch + width].copy_from_slice(source);
                     staged += 1;
                     if staged == rows_per_chunk {
-                        device().copy_from_host(
-                            base.offset(written * pitch),
-                            &staging[..staged * pitch],
-                        )?;
+                        let chunk = base.slice(written * pitch, staged * pitch)?;
+                        stream.upload(chunk, &staging[..staged * pitch])?;
                         written += staged;
                         staged = 0;
                     }
                 }
             }
             if staged > 0 {
-                device()
-                    .copy_from_host(base.offset(written * pitch), &staging[..staged * pitch])?;
+                let chunk = base.slice(written * pitch, staged * pitch)?;
+                stream.upload(chunk, &staging[..staged * pitch])?;
             }
         }
-        Ok(Weights { plan, storage, stream: stream.clone() })
+        // Not what bounds host memory: Stream::upload copies into runtime
+        // staging and stops referencing the caller's slice, and it submits and
+        // waits on its own once staging passes 64 MB. Draining here is so a
+        // failed upload surfaces at load rather than at the first dispatch.
+        stream.synchronize()?;
+        Ok(Weights { plan, storage })
     }
 
     pub fn layers(&self) -> usize {
@@ -76,7 +97,15 @@ impl Weights {
 
     /// The device address of one span, checked against the size the session
     /// expects so a mismatched checkpoint is caught before any launch.
-    pub fn at(&self, name: &str, bytes: usize) -> Result<DevicePtr> {
+    /// The device span of an operand located earlier. `locate` did the checking.
+    pub fn view(&self, at: At) -> View<'_> {
+        self.storage.slice(at.offset, at.bytes)
+    }
+
+    /// Where `name` lives, checked against the size the caller expects. The
+    /// span covers the operand's *device* bytes, which for a padded operand is
+    /// wider than the file's: that padding is what the kernels stride over.
+    pub fn locate(&self, name: &str, bytes: usize) -> Result<At> {
         let span = self
             .plan
             .spans
@@ -88,6 +117,6 @@ impl Weights {
                 span.file_bytes()
             )));
         }
-        Ok(self.storage.ptr().offset(span.device_offset))
+        Ok(At { offset: span.device_offset, bytes: span.device_bytes })
     }
 }

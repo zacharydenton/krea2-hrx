@@ -1,18 +1,49 @@
-//! Auxiliary kernel cache, keyed by source and configuration.
-//! Compilation is locked across processes; artifact hashes are verified on load.
+//! Auxiliary kernel cache, keyed by source and configuration, and the compiler
+//! selection it caches behind. HRX owns hashing, locking and artifact
+//! publication; this owns which kernel is wanted at which shape.
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use hrx::Kernel;
+use hrx::{Kernel, Stream};
+use std::sync::Arc;
 
-use crate::compile::compiler;
 use crate::{sources, Config, Error, Result};
 
-static LOADED: Mutex<Option<HashMap<String, Kernel>>> = Mutex::new(None);
+/// Reuse each selected compiler's pinned identity across model configurations.
+/// Failed resolution is retryable and retains HRX's provisioning diagnostic.
+pub fn compiler(override_path: Option<&str>) -> Result<hrx::loom::Compiler> {
+    static COMPILERS: Mutex<Option<HashMap<Option<String>, hrx::loom::Compiler>>> =
+        Mutex::new(None);
+    let selected =
+        override_path.map(str::to_owned).or_else(|| std::env::var("HRX_LOOM_LIBRARY").ok());
+    let mut cache = COMPILERS.lock().map_err(|_| Error("compiler cache poisoned".into()))?;
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(compiler) = cache.get(&selected) {
+        return Ok(compiler.clone());
+    }
+    // The defaults are tuned for a small consumer: four workers, and room for
+    // 64 source modules with arbitrary eviction. One shape needs about fifty
+    // modules and guided sampling prepares two shapes, so raise the cache above
+    // what a run can hold and let the compiler use the cores this box has.
+    let options = hrx::loom::CompilerOptions {
+        workers: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
+        module_cache_capacity: 256,
+        ..Default::default()
+    };
+    let compiler =
+        hrx::loom::Compiler::with_options(selected.as_deref().map(Path::new), options)?;
+    cache.insert(selected, compiler.clone());
+    Ok(compiler)
+}
 
-type Shapes = BTreeMap<Config, Kernel>;
+pub use hrx::bundle::digest;
+
+static LOADED: Mutex<Option<HashMap<String, Arc<Kernel>>>> = Mutex::new(None);
+
+type Shapes = BTreeMap<Config, Arc<Kernel>>;
 type Grids = BTreeMap<(u32, u32), Shapes>;
 
 /// Loaded operations owned by one model instance. Cache hits compare the
@@ -28,7 +59,13 @@ impl PreparedKernels {
         Self { loaded: Mutex::default(), compiler: compiler.map(str::to_owned) }
     }
 
-    pub fn get(&self, name: &str, config: Config, grid: (u32, u32)) -> Result<Kernel> {
+    pub fn get(
+        &self,
+        stream: &Stream,
+        name: &str,
+        config: Config,
+        grid: (u32, u32),
+    ) -> Result<Arc<Kernel>> {
         let mut loaded =
             self.loaded.lock().map_err(|_| Error("operation cache poisoned".into()))?;
         if let Some(kernel) = loaded
@@ -38,7 +75,7 @@ impl PreparedKernels {
         {
             return Ok(kernel.clone());
         }
-        let kernel = auxiliary_kernel(name, &config, grid, self.compiler.as_deref())?;
+        let kernel = auxiliary_kernel(stream, name, &config, grid, self.compiler.as_deref())?;
         loaded
             .entry(name.into())
             .or_default()
@@ -63,23 +100,30 @@ fn signature(name: &str, config: &Config) -> String {
     text
 }
 
+/// The embedded source for an auxiliary kernel, named in the error when there
+/// is none. Separate from the compile so the lookup can be tested without a
+/// device: naming a kernel now takes a stream, resolving it does not.
+fn auxiliary_source(name: &str) -> Result<&'static str> {
+    sources::auxiliary(name).ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))
+}
+
 /// Compiles `name` for `config` if needed and returns the loaded kernel.
 ///
 /// `grid_x` and `grid_y` join the configuration for every kernel but
 /// `sage_transpose`, which is written for any grid.
 pub fn auxiliary_kernel(
+    stream: &Stream,
     name: &str,
     config: &Config,
     grid: (u32, u32),
     compiler_path: Option<&str>,
-) -> Result<Kernel> {
+) -> Result<Arc<Kernel>> {
     let mut config = config.clone();
     if name != "sage_transpose" {
         config.insert("grid_x".into(), u64::from(grid.0));
         config.insert("grid_y".into(), u64::from(grid.1));
     }
-    let source = sources::auxiliary(name)
-        .ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))?;
+    let source = auxiliary_source(name)?;
     let compiler = compiler(compiler_path)?;
     let signature = format!("{}\n{}", compiler.identity(), signature(name, &config));
     {
@@ -92,9 +136,19 @@ pub fn auxiliary_kernel(
     let mut request = hrx::loom::Specialization::new(&symbol);
     request.config =
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
-    let path = compiler.module(source).compile(&request, &cache_root()?)?;
+    request.report = crate::kernel_reports();
+    let artifact = compiler.module(source).compile(&request, &cache_root()?)?;
+    for diagnostic in artifact.diagnostics() {
+        eprintln!(
+            "krea2 kernel {name}: {} {}: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+    }
+    if let Some(report) = artifact.report() {
+        eprintln!("krea2 kernel {name} report: {report}");
+    }
     // Safety: the shared compiler produced this export from embedded model source.
-    let kernel = unsafe { Kernel::load_artifact(&path)? };
+    let kernel = Arc::new(unsafe { stream.load_artifact(&artifact)? });
     let mut loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;
     Ok(loaded.get_or_insert_with(HashMap::new).entry(signature).or_insert(kernel).clone())
 }
@@ -111,8 +165,7 @@ mod tests {
 
     #[test]
     fn an_unknown_kernel_is_named_in_the_error() {
-        let error =
-            auxiliary_kernel("no_such_kernel", &Config::new(), (1, 1), None).unwrap_err();
+        let error = auxiliary_source("no_such_kernel").unwrap_err();
         assert_eq!(error.0, "no auxiliary kernel named no_such_kernel");
     }
 }

@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use hrx::{device, Buffer};
+use hrx::{Buffer, Stream};
 use krea2_checkpoint::Checkpoint;
 use krea2_numerics::{fp8_e4m3_to_f32, from_f32_carrying};
 use krea2_ops::Weight;
@@ -37,7 +37,11 @@ struct Item {
 
 impl Weights {
     /// Loads every tensor `rename` maps to a non-empty name.
-    pub fn load(file: &Checkpoint, rename: impl Fn(&str) -> String) -> Result<Weights> {
+    pub fn load(
+        stream: &mut Stream,
+        file: &Checkpoint,
+        rename: impl Fn(&str) -> String,
+    ) -> Result<Weights> {
         let mut items = Vec::new();
         let mut total = 0;
         for key in file.names() {
@@ -105,12 +109,12 @@ impl Weights {
             return Err(Error("the checkpoint has none of the tensors this needs".into()));
         }
 
-        let storage = Arc::new(device().allocate(total)?);
+        let storage = Arc::new(stream.allocate(total)?);
         let mut float_storage = Vec::new();
         let mut values = BTreeMap::new();
         for item in &items {
             let tensor = file.get(&item.key)?;
-            let base = storage.ptr().offset(item.offset);
+            let base = item.offset;
             let staged = stage(&item.dtype, tensor.bytes, item)?;
             let bytes = staged.as_deref().unwrap_or(&tensor.bytes[..item.bytes]);
             // Repack both ordinary 4D and reduced causal 5D convolutions.
@@ -124,17 +128,16 @@ impl Weights {
             };
             // The F32 and BF16 copies must use the same packed layout.
             let bytes = packed.as_deref().unwrap_or(bytes);
-            device().copy_from_host(base, bytes)?;
+            stream.upload(storage.slice(base, bytes.len()), bytes)?;
             let (bf16, holder) = if item.dtype == "F32" {
                 // Everything but the norms consumes a float32 tensor as bf16,
                 // rounded the way the checkpoint's own conversion rounds.
                 let floats = read_f32(bytes, item.count);
                 let rounded: Vec<u16> = floats.iter().map(|&v| from_f32_carrying(v)).collect();
-                let buffer = Arc::new(device().allocate(rounded.len() * 2)?);
-                device().write(buffer.ptr(), &rounded)?;
-                let pointer = buffer.ptr();
+                let buffer = Arc::new(stream.allocate(rounded.len() * 2)?);
+                stream.upload(buffer.binding(), bytemuck::cast_slice(&rounded))?;
                 float_storage.push(Arc::clone(&buffer));
-                (pointer, buffer)
+                (0, buffer)
             } else {
                 (base, Arc::clone(&storage))
             };
@@ -145,7 +148,7 @@ impl Weights {
                     bf16,
                     item.shape.clone(),
                     item.count,
-                    (item.dtype == "F32").then_some(base),
+                    (item.dtype == "F32").then(|| (Arc::clone(&storage), item.offset)),
                 )
                 .in_layout(layout),
             );

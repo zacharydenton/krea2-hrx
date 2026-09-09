@@ -3,7 +3,8 @@
 //! blending preserve the reference's bf16 rounding boundaries.
 use std::sync::Arc;
 
-use hrx::{device, Args};
+use hrx::Stream;
+use kernels::Scalars;
 use krea2_checkpoint::Checkpoint;
 use krea2_numerics::{from_f32, to_f32};
 use krea2_ops::{config, Binary, Config, Norm, Ops, Pool, Scratch, Tensor, Unary};
@@ -34,8 +35,9 @@ pub struct Models {
 impl Models {
     /// `compiler` is the `loom-compile` this graph's auxiliary kernels are
     /// built with; `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
-    pub fn open(files: &Files, compiler: Option<&str>) -> Result<Models> {
+    pub fn open(stream: &mut Stream, files: &Files, compiler: Option<&str>) -> Result<Models> {
         Models::load(
+            stream,
             &files.checkpoint,
             &files.text_encoder,
             &files.vae,
@@ -46,6 +48,7 @@ impl Models {
 
     /// `tokenizer` of `None` uses the copy compiled into `krea2-tokenizer`.
     pub fn load(
+        stream: &mut Stream,
         checkpoint: &std::path::Path,
         text_encoder: &std::path::Path,
         vae: &std::path::Path,
@@ -59,29 +62,39 @@ impl Models {
                 Some(path) => Tokenizer::from_file(path)?,
                 None => Tokenizer::embedded()?,
             },
-            text: Weights::load(&Checkpoint::open(text_encoder)?, text_name)?,
-            transformer: Weights::load(&Checkpoint::open(checkpoint)?, transformer_name)?,
-            vae: Weights::load(&Checkpoint::open(vae)?, vae_name)?,
-            block_tables: Tensor::new(&pool, 28 * 6, WIDTH)?,
+            text: Weights::load(stream, &Checkpoint::open(text_encoder)?, text_name)?,
+            transformer: Weights::load(
+                stream,
+                &Checkpoint::open(checkpoint)?,
+                transformer_name,
+            )?,
+            vae: Weights::load(stream, &Checkpoint::open(vae)?, vae_name)?,
+            block_tables: Tensor::new(&pool, stream, 28 * 6, WIDTH)?,
         };
-        models.tables()?;
+        models.tables(stream)?;
         Ok(models)
     }
 
     /// `y = x wᵀ + bias`, for a layer named by its prefix.
-    fn lin(&self, x: &Tensor, w: &Weights, prefix: &str) -> Result<Tensor> {
+    fn lin(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        w: &Weights,
+        prefix: &str,
+    ) -> Result<Tensor> {
         let bias = match w.has(&format!("{prefix}.bias")) {
-            true => Some(w.get(&format!("{prefix}.bias"))?.values),
+            true => Some(w.get(&format!("{prefix}.bias"))?.values()?),
             false => None,
         };
-        Ok(self.ops.linear(x, w.get(&format!("{prefix}.weight"))?, bias)?)
+        Ok(self.ops.linear(stream, x, w.get(&format!("{prefix}.weight"))?, bias)?)
     }
 
     /// Qwen3-VL's 35 layers, returning the 12 layer taps the fusion consumes.
     ///
     /// The prompt's 34-token prefix is context for the encoder and not part of
     /// the conditioning, so the taps start after it.
-    pub fn encode(&self, ids: &[i32]) -> Result<Tensor> {
+    pub fn encode(&self, stream: &mut Stream, ids: &[i32]) -> Result<Tensor> {
         if !(35..=546).contains(&ids.len()) {
             return Err(Error("text token count must be 35..546".into()));
         }
@@ -93,16 +106,18 @@ impl Models {
             return Err(Error("token id out of range".into()));
         }
         let (count, tokens) = (ids.len(), ids.len() - 34);
-        let mut x = self.ops.tensor(count, TEXT_WIDTH)?;
-        let taps = self.ops.tensor(tokens * 12, TEXT_WIDTH)?;
-        let identifiers = self.ops.pool().scratch(count * 4)?;
-        device().write(identifiers.ptr(), ids)?;
-        let mut args = Args::new();
-        args.i32(x.size() as i32).ptr(embedding.values).ptr(identifiers.ptr()).ptr(x.ptr());
+        let mut x = self.ops.tensor(stream, count, TEXT_WIDTH)?;
+        let taps = self.ops.tensor(stream, tokens * 12, TEXT_WIDTH)?;
+        let identifiers = self.ops.pool().scratch(stream, count * 4)?;
+        stream.upload(identifiers.binding(), bytemuck::cast_slice(ids))?;
+        let args_scalars = Scalars::new().index(x.size());
+        let args = [embedding.values()?, identifiers.binding(), x.binding()?];
         unsafe {
             self.ops.launch(
+                stream,
                 "embedding",
                 config(&[("wsize", embedding.count), ("rows", count), ("cols", TEXT_WIDTH)]),
+                &args_scalars,
                 &args,
                 x.size().div_ceil(256),
                 1,
@@ -114,17 +129,19 @@ impl Models {
             let layer = format!("layers.{index}");
             let attn = format!("{layer}.self_attn");
             let normed = self.ops.norm(
+                stream,
                 &x,
                 self.text.get(&format!("{layer}.input_layernorm.weight"))?,
                 Norm::Scale,
                 1e-6,
             )?;
-            let q = self.lin(&normed, &self.text, &format!("{attn}.q_proj"))?;
-            let k = self.lin(&normed, &self.text, &format!("{attn}.k_proj"))?;
-            let v = self.lin(&normed, &self.text, &format!("{attn}.v_proj"))?;
+            let q = self.lin(stream, &normed, &self.text, &format!("{attn}.q_proj"))?;
+            let k = self.lin(stream, &normed, &self.text, &format!("{attn}.k_proj"))?;
+            let v = self.lin(stream, &normed, &self.text, &format!("{attn}.v_proj"))?;
             let q = self
                 .ops
                 .norm(
+                    stream,
                     &q.view(count * 32, 128, 0)?,
                     self.text.get(&format!("{attn}.q_norm.weight"))?,
                     Norm::Scale,
@@ -134,45 +151,51 @@ impl Models {
             let k = self
                 .ops
                 .norm(
+                    stream,
                     &k.view(count * 8, 128, 0)?,
                     self.text.get(&format!("{attn}.k_norm.weight"))?,
                     Norm::Scale,
                     1e-6,
                 )?
                 .view(count, 1024, 0)?;
-            let q = self.ops.rope(&q, count, 32, 5e6)?;
-            let k = self.ops.rope(&k, count, 8, 5e6)?;
-            let attended = self.ops.attention(&q, &k, &v, 1, count, 32, 8, 128, true)?;
-            let projected = self.lin(&attended, &self.text, &format!("{attn}.o_proj"))?;
-            x = self.ops.binary(&x, &projected, Binary::Add)?;
+            let q = self.ops.rope(stream, &q, count, 32, 5e6)?;
+            let k = self.ops.rope(stream, &k, count, 8, 5e6)?;
+            let attended =
+                self.ops.attention(stream, &q, &k, &v, 1, count, 32, 8, 128, true)?;
+            let projected =
+                self.lin(stream, &attended, &self.text, &format!("{attn}.o_proj"))?;
+            x = self.ops.binary(stream, &x, &projected, Binary::Add)?;
 
             let normed = self.ops.norm(
+                stream,
                 &x,
                 self.text.get(&format!("{layer}.post_attention_layernorm.weight"))?,
                 Norm::Scale,
                 1e-6,
             )?;
-            let gate = self.ops.unary(
-                &self.lin(&normed, &self.text, &format!("{layer}.mlp.gate_proj"))?,
-                Unary::Silu,
-            )?;
-            let up = self.lin(&normed, &self.text, &format!("{layer}.mlp.up_proj"))?;
-            let mixed = self.ops.binary(&gate, &up, Binary::Mul)?;
-            let down = self.lin(&mixed, &self.text, &format!("{layer}.mlp.down_proj"))?;
-            x = self.ops.binary(&x, &down, Binary::Add)?;
+            let projected =
+                self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.gate_proj"))?;
+            let gate = self.ops.unary(stream, &projected, Unary::Silu)?;
+            let up = self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.up_proj"))?;
+            let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
+            let down =
+                self.lin(stream, &mixed, &self.text, &format!("{layer}.mlp.down_proj"))?;
+            x = self.ops.binary(stream, &x, &down, Binary::Add)?;
 
             // Every third layer from the second: twelve taps over 35 layers.
             if index % 3 == 1 {
-                let mut args = Args::new();
-                args.i32((tokens * TEXT_WIDTH) as i32).ptr(x.ptr()).ptr(taps.ptr());
+                let args_scalars = Scalars::new().index(tokens * TEXT_WIDTH);
+                let args = [x.binding()?, taps.binding()?];
                 unsafe {
                     self.ops.launch(
+                        stream,
                         "tap",
                         config(&[
                             ("xsize", x.size()),
                             ("ysize", taps.size()),
                             ("tap1", (index - 1) / 3 + 1),
                         ]),
+                        &args_scalars,
                         &args,
                         (tokens * TEXT_WIDTH).div_ceil(256),
                         1,
@@ -187,6 +210,7 @@ impl Models {
     /// One prenorm/attention/postnorm/MLP block of the text fusion tower.
     fn fusion_block(
         &self,
+        stream: &mut Stream,
         x: &Tensor,
         prefix: &str,
         batch: usize,
@@ -194,17 +218,19 @@ impl Models {
     ) -> Result<Tensor> {
         let w = &self.transformer;
         let normed = self.ops.norm(
+            stream,
             x,
             w.get(&format!("{prefix}.prenorm.scale"))?,
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let q = self.lin(&normed, w, &format!("{prefix}.attn.wq"))?;
-        let k = self.lin(&normed, w, &format!("{prefix}.attn.wk"))?;
-        let v = self.lin(&normed, w, &format!("{prefix}.attn.wv"))?;
+        let q = self.lin(stream, &normed, w, &format!("{prefix}.attn.wq"))?;
+        let k = self.lin(stream, &normed, w, &format!("{prefix}.attn.wk"))?;
+        let v = self.lin(stream, &normed, w, &format!("{prefix}.attn.wv"))?;
         let q = self
             .ops
             .norm(
+                stream,
                 &q.view(q.rows() * 20, 128, 0)?,
                 w.get(&format!("{prefix}.attn.qknorm.qnorm.scale"))?,
                 Norm::OnePlusScale,
@@ -214,46 +240,41 @@ impl Models {
         let k = self
             .ops
             .norm(
+                stream,
                 &k.view(k.rows() * 20, 128, 0)?,
                 w.get(&format!("{prefix}.attn.qknorm.knorm.scale"))?,
                 Norm::OnePlusScale,
                 1e-5,
             )?
             .view(x.rows(), TEXT_WIDTH, 0)?;
-        let attended = self.ops.attention(&q, &k, &v, batch, tokens, 20, 20, 128, false)?;
-        let gate = self
-            .ops
-            .unary(&self.lin(&normed, w, &format!("{prefix}.attn.gate"))?, Unary::Sigmoid)?;
-        let attended = self.ops.binary(&attended, &gate, Binary::Mul)?;
-        let y = self.ops.binary(
-            x,
-            &self.lin(&attended, w, &format!("{prefix}.attn.wo"))?,
-            Binary::Add,
-        )?;
+        let attended =
+            self.ops.attention(stream, &q, &k, &v, batch, tokens, 20, 20, 128, false)?;
+        let projected = self.lin(stream, &normed, w, &format!("{prefix}.attn.gate"))?;
+        let gate = self.ops.unary(stream, &projected, Unary::Sigmoid)?;
+        let attended = self.ops.binary(stream, &attended, &gate, Binary::Mul)?;
+        let projected = self.lin(stream, &attended, w, &format!("{prefix}.attn.wo"))?;
+        let y = self.ops.binary(stream, x, &projected, Binary::Add)?;
 
         let normed = self.ops.norm(
+            stream,
             &y,
             w.get(&format!("{prefix}.postnorm.scale"))?,
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let gate = self
-            .ops
-            .unary(&self.lin(&normed, w, &format!("{prefix}.mlp.gate"))?, Unary::Silu)?;
-        let up = self.lin(&normed, w, &format!("{prefix}.mlp.up"))?;
-        let mixed = self.ops.binary(&gate, &up, Binary::Mul)?;
-        Ok(self.ops.binary(
-            &y,
-            &self.lin(&mixed, w, &format!("{prefix}.mlp.down"))?,
-            Binary::Add,
-        )?)
+        let gated = self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?;
+        let gate = self.ops.unary(stream, &gated, Unary::Silu)?;
+        let up = self.lin(stream, &normed, w, &format!("{prefix}.mlp.up"))?;
+        let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
+        let down = self.lin(stream, &mixed, w, &format!("{prefix}.mlp.down"))?;
+        Ok(self.ops.binary(stream, &y, &down, Binary::Add)?)
     }
 
     /// The 12 layer taps into one conditioning sequence.
     ///
     /// Two blocks mix the taps of each token against one another, a learned
     /// 12-way average projects them to one, and two more mix across tokens.
-    pub fn text_fusion(&self, taps: &Tensor) -> Result<Tensor> {
+    pub fn text_fusion(&self, stream: &mut Stream, taps: &Tensor) -> Result<Tensor> {
         let projector = self.transformer.get("txtfusion.projector.weight")?;
         if !taps.rows().is_multiple_of(12) || taps.cols() != TEXT_WIDTH || projector.count != 12
         {
@@ -263,22 +284,22 @@ impl Models {
         let mut x = taps.clone();
         for index in 0..2 {
             x = self.fusion_block(
+                stream,
                 &x,
                 &format!("txtfusion.layerwise_blocks.{index}"),
                 tokens,
                 12,
             )?;
         }
-        let projected = self.ops.tensor(tokens, TEXT_WIDTH)?;
-        let mut args = Args::new();
-        args.i32(projected.size() as i32)
-            .ptr(x.ptr())
-            .ptr(projector.values)
-            .ptr(projected.ptr());
+        let projected = self.ops.tensor(stream, tokens, TEXT_WIDTH)?;
+        let args_scalars = Scalars::new().index(projected.size());
+        let args = [x.binding()?, projector.values()?, projected.binding()?];
         unsafe {
             self.ops.launch(
+                stream,
                 "fuse",
                 config(&[("xsize", x.size()), ("wsize", 12)]),
+                &args_scalars,
                 &args,
                 projected.size().div_ceil(256),
                 1,
@@ -287,24 +308,31 @@ impl Models {
         }?;
         x = projected;
         for index in 0..2 {
-            x =
-                self.fusion_block(&x, &format!("txtfusion.refiner_blocks.{index}"), 1, tokens)?;
+            x = self.fusion_block(
+                stream,
+                &x,
+                &format!("txtfusion.refiner_blocks.{index}"),
+                1,
+                tokens,
+            )?;
         }
         let x = self.ops.norm(
+            stream,
             &x,
             self.transformer.get("txtmlp.0.scale")?,
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let x = self.ops.unary(&self.lin(&x, &self.transformer, "txtmlp.1")?, Unary::Gelu)?;
-        self.lin(&x, &self.transformer, "txtmlp.3")
+        let projected = self.lin(stream, &x, &self.transformer, "txtmlp.1")?;
+        let x = self.ops.unary(stream, &projected, Unary::Gelu)?;
+        self.lin(stream, &x, &self.transformer, "txtmlp.3")
     }
 
     /// The timestep embedding, and the vector the blocks modulate against.
     ///
     /// The sinusoids are worked out on the host at float precision and rounded
     /// to bf16, which is where the reference implementation rounds them.
-    pub fn time(&self, timestep: f32) -> Result<(Tensor, Tensor)> {
+    pub fn time(&self, stream: &mut Stream, timestep: f32) -> Result<(Tensor, Tensor)> {
         let timestep = to_f32(from_f32(timestep));
         let mut values = vec![0u16; 256];
         for index in 0..128 {
@@ -312,36 +340,35 @@ impl Models {
             values[index] = from_f32(angle.cos());
             values[index + 128] = from_f32(angle.sin());
         }
-        let sinusoids = Tensor::from_slice(self.ops.pool(), &values, 1, 256)?;
-        let hidden =
-            self.ops.unary(&self.lin(&sinusoids, &self.transformer, "tmlp.0")?, Unary::Gelu)?;
-        let embedding = self.lin(&hidden, &self.transformer, "tmlp.2")?;
-        let projected =
-            self.lin(&self.ops.unary(&embedding, Unary::Gelu)?, &self.transformer, "tproj.1")?;
+        let sinusoids = Tensor::from_slice(self.ops.pool(), stream, &values, 1, 256)?;
+        let projected = self.lin(stream, &sinusoids, &self.transformer, "tmlp.0")?;
+        let hidden = self.ops.unary(stream, &projected, Unary::Gelu)?;
+        let embedding = self.lin(stream, &hidden, &self.transformer, "tmlp.2")?;
+        let activated = self.ops.unary(stream, &embedding, Unary::Gelu)?;
+        let projected = self.lin(stream, &activated, &self.transformer, "tproj.1")?;
         Ok((embedding, projected))
     }
 
     /// The latents into the residual stream's width.
-    pub fn image_in(&self, latents: &Tensor) -> Result<Tensor> {
-        self.lin(latents, &self.transformer, "first")
+    pub fn image_in(&self, stream: &mut Stream, latents: &Tensor) -> Result<Tensor> {
+        self.lin(stream, latents, &self.transformer, "first")
     }
 
     /// Every block's modulation table added to this timestep's vector, as the
     /// float32 buffer the block session reads.
-    pub fn modulation(&self, vector: &Tensor) -> Result<Scratch> {
+    pub fn modulation(&self, stream: &mut Stream, vector: &Tensor) -> Result<Scratch> {
         if vector.size() != 6 * WIDTH {
             return Err(Error("modulation dimensions".into()));
         }
-        let out = self.ops.pool().scratch(MODULATION_ELEMENTS * 4)?;
-        let mut args = Args::new();
-        args.i32(MODULATION_ELEMENTS as i32)
-            .ptr(vector.ptr())
-            .ptr(self.block_tables.ptr())
-            .ptr(out.ptr());
+        let out = self.ops.pool().scratch(stream, MODULATION_ELEMENTS * 4)?;
+        let args_scalars = Scalars::new().index(MODULATION_ELEMENTS);
+        let args = [vector.binding()?, self.block_tables.binding()?, out.binding()];
         unsafe {
             self.ops.launch(
+                stream,
                 "modulation",
                 config(&[("xsize", vector.size())]),
+                &args_scalars,
                 &args,
                 MODULATION_ELEMENTS.div_ceil(256),
                 1,
@@ -352,46 +379,57 @@ impl Models {
     }
 
     /// The final norm, its modulation, and the projection back to latents.
-    pub fn last(&self, x: &Tensor, embedding: &Tensor) -> Result<Tensor> {
+    pub fn last(&self, stream: &mut Stream, x: &Tensor, embedding: &Tensor) -> Result<Tensor> {
         if embedding.size() != WIDTH || x.cols() != WIDTH {
             return Err(Error("final layer dimensions".into()));
         }
         let table = self.transformer.get("last.modulation.lin")?.tensor(2, WIDTH)?;
         // The scale and the shift share one embedding, so it goes in twice.
-        let expanded = self.ops.tensor(2, WIDTH)?;
-        device().copy_device_to_device(expanded.ptr(), embedding.ptr(), WIDTH * 2)?;
-        device().copy_device_to_device(
-            expanded.ptr().offset(WIDTH * 2),
-            embedding.ptr(),
-            WIDTH * 2,
-        )?;
-        let modulated = self.ops.binary(&expanded, &table, Binary::Add)?;
+        let expanded = self.ops.tensor(stream, 2, WIDTH)?;
+        let row = WIDTH * 2;
+        stream.copy(expanded.binding()?.slice(0, row)?, embedding.binding()?)?;
+        stream.copy(expanded.binding()?.slice(row, row)?, embedding.binding()?)?;
+        let modulated = self.ops.binary(stream, &expanded, &table, Binary::Add)?;
         let scale = modulated.view(1, WIDTH, 0)?;
         let shift = modulated.view(1, WIDTH, WIDTH)?;
-        let factor = self.ops.tensor(1, WIDTH)?;
-        let mut args = Args::new();
-        args.i32(WIDTH as i32).ptr(scale.ptr()).ptr(factor.ptr());
-        unsafe { self.ops.launch("unary_one", Config::new(), &args, WIDTH / 256, 1, 256) }?;
+        let factor = self.ops.tensor(stream, 1, WIDTH)?;
+        let args_scalars = Scalars::new().index(WIDTH);
+        let args = [scale.binding()?, factor.binding()?];
+        unsafe {
+            self.ops.launch(
+                stream,
+                "unary_one",
+                Config::new(),
+                &args_scalars,
+                &args,
+                WIDTH / 256,
+                1,
+                256,
+            )
+        }?;
         let normed = self.ops.norm(
+            stream,
             x,
             self.transformer.get("last.norm.scale")?,
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let scaled = self.ops.binary(&normed, &factor, Binary::Mul)?;
-        let shifted = self.ops.binary(&scaled, &shift, Binary::Add)?;
-        self.lin(&shifted, &self.transformer, "last.linear")
+        let scaled = self.ops.binary(stream, &normed, &factor, Binary::Mul)?;
+        let shifted = self.ops.binary(stream, &scaled, &shift, Binary::Add)?;
+        self.lin(stream, &shifted, &self.transformer, "last.linear")
     }
 
     /// The 28 blocks' modulation tables gathered into one tensor, once.
-    fn tables(&self) -> Result<()> {
+    fn tables(&self, stream: &mut Stream) -> Result<()> {
         for index in 0..28 {
             let table = self.transformer.get(&format!("blocks.{index}.mod.lin"))?;
             if table.count != 6 * WIDTH {
                 return Err(Error("block modulation dimensions".into()));
             }
-            let destination = self.block_tables.ptr().offset(index * 6 * WIDTH * 2);
-            device().copy_device_to_device(destination, table.values, table.count * 2)?;
+            let bytes = table.count * 2;
+            let destination =
+                self.block_tables.binding()?.slice(index * 6 * WIDTH * 2, bytes)?;
+            stream.copy(destination, table.values()?)?;
         }
         Ok(())
     }
@@ -399,81 +437,102 @@ impl Models {
     /// One VAE residual block: two normed convolutions plus the skip.
     fn residual(
         &self,
+        stream: &mut Stream,
         x: &Tensor,
         prefix: &str,
         height: usize,
         width: usize,
     ) -> Result<Tensor> {
         let skip = match self.vae.has(&format!("{prefix}.conv_shortcut.weight")) {
-            true => self.conv(x, height, width, &format!("{prefix}.conv_shortcut"))?,
+            true => self.conv(stream, x, height, width, &format!("{prefix}.conv_shortcut"))?,
             false => x.clone(),
         };
-        let y = self.ops.norm_silu(x, self.vae.get(&format!("{prefix}.norm1.gamma"))?)?;
-        let y = self.conv(&y, height, width, &format!("{prefix}.conv1"))?;
-        let y = self.ops.norm_silu(&y, self.vae.get(&format!("{prefix}.norm2.gamma"))?)?;
-        let y = self.conv(&y, height, width, &format!("{prefix}.conv2"))?;
-        Ok(self.ops.binary(&y, &skip, Binary::Add)?)
+        let y =
+            self.ops.norm_silu(stream, x, self.vae.get(&format!("{prefix}.norm1.gamma"))?)?;
+        let y = self.conv(stream, &y, height, width, &format!("{prefix}.conv1"))?;
+        let y =
+            self.ops.norm_silu(stream, &y, self.vae.get(&format!("{prefix}.norm2.gamma"))?)?;
+        let y = self.conv(stream, &y, height, width, &format!("{prefix}.conv2"))?;
+        Ok(self.ops.binary(stream, &y, &skip, Binary::Add)?)
     }
 
-    fn conv(&self, x: &Tensor, height: usize, width: usize, prefix: &str) -> Result<Tensor> {
-        let bias = self.vae.get(&format!("{prefix}.bias"))?.values;
+    fn conv(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        height: usize,
+        width: usize,
+        prefix: &str,
+    ) -> Result<Tensor> {
+        let bias = self.vae.get(&format!("{prefix}.bias"))?.values()?;
         let weight = self.vae.get(&format!("{prefix}.weight"))?;
-        Ok(self.ops.conv(x, height, width, weight, Some(bias))?)
+        Ok(self.ops.conv(stream, x, height, width, weight, Some(bias))?)
     }
 
     /// One tile of latents to RGB, at eight times the resolution.
-    fn decode_tile(&self, input: &Tensor, height: usize, width: usize) -> Result<Tensor> {
+    fn decode_tile(
+        &self,
+        stream: &mut Stream,
+        input: &Tensor,
+        height: usize,
+        width: usize,
+    ) -> Result<Tensor> {
         let (mut h, mut w) = (height, width);
-        let x = self.conv(input, h, w, "post_quant_conv")?;
-        let x = self.conv(&x, h, w, "decoder.conv_in")?;
-        let mut x = self.residual(&x, "decoder.mid_block.resnets.0", h, w)?;
+        let x = self.conv(stream, input, h, w, "post_quant_conv")?;
+        let x = self.conv(stream, &x, h, w, "decoder.conv_in")?;
+        let mut x = self.residual(stream, &x, "decoder.mid_block.resnets.0", h, w)?;
 
         let normed = self.ops.norm(
+            stream,
             &x,
             self.vae.get("decoder.mid_block.attentions.0.norm.gamma")?,
             Norm::Group,
             1e-5,
         )?;
-        let qkv = self.conv(&normed, h, w, "decoder.mid_block.attentions.0.to_qkv")?;
+        let qkv = self.conv(stream, &normed, h, w, "decoder.mid_block.attentions.0.to_qkv")?;
         let d = x.cols();
-        let attended = self.ops.attention(
-            &self.columns(&qkv, 0, d)?,
-            &self.columns(&qkv, d, d)?,
-            &self.columns(&qkv, 2 * d, d)?,
-            1,
-            h * w,
-            1,
-            1,
-            d,
-            false,
-        )?;
-        let projected = self.conv(&attended, h, w, "decoder.mid_block.attentions.0.proj")?;
-        x = self.ops.binary(&x, &projected, Binary::Add)?;
-        x = self.residual(&x, "decoder.mid_block.resnets.1", h, w)?;
+        let (cq, ck, cv) = (
+            self.columns(stream, &qkv, 0, d)?,
+            self.columns(stream, &qkv, d, d)?,
+            self.columns(stream, &qkv, 2 * d, d)?,
+        );
+        let attended = self.ops.attention(stream, &cq, &ck, &cv, 1, h * w, 1, 1, d, false)?;
+        let projected =
+            self.conv(stream, &attended, h, w, "decoder.mid_block.attentions.0.proj")?;
+        x = self.ops.binary(stream, &x, &projected, Binary::Add)?;
+        x = self.residual(stream, &x, "decoder.mid_block.resnets.1", h, w)?;
 
         for block in 0..4 {
             let prefix = format!("decoder.up_blocks.{block}");
             for resnet in 0..3 {
-                x = self.residual(&x, &format!("{prefix}.resnets.{resnet}"), h, w)?;
+                x = self.residual(stream, &x, &format!("{prefix}.resnets.{resnet}"), h, w)?;
             }
             if block < 3 {
-                x = self.ops.upsample(&x, h, w)?;
+                x = self.ops.upsample(stream, &x, h, w)?;
                 h *= 2;
                 w *= 2;
-                x = self.conv(&x, h, w, &format!("{prefix}.upsamplers.0.resample.1"))?;
+                x =
+                    self.conv(stream, &x, h, w, &format!("{prefix}.upsamplers.0.resample.1"))?;
             }
         }
-        let x = self.ops.norm_silu(&x, self.vae.get("decoder.norm_out.gamma")?)?;
-        self.conv(&x, h, w, "decoder.conv_out")
+        let x = self.ops.norm_silu(stream, &x, self.vae.get("decoder.norm_out.gamma")?)?;
+        self.conv(stream, &x, h, w, "decoder.conv_out")
     }
 
     /// A window of columns, for splitting a fused qkv projection.
-    fn columns(&self, x: &Tensor, start: usize, count: usize) -> Result<Tensor> {
-        let y = self.ops.tensor(x.rows(), count)?;
-        let mut args = Args::new();
-        args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
+    fn columns(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        start: usize,
+        count: usize,
+    ) -> Result<Tensor> {
+        let y = self.ops.tensor(stream, x.rows(), count)?;
+        let args_scalars = Scalars::new().index(y.size());
+        let args = [x.binding()?, y.binding()?];
         unsafe {
             self.ops.launch(
+                stream,
                 "columns",
                 config(&[
                     ("xsize", x.size()),
@@ -481,6 +540,7 @@ impl Models {
                     ("width", x.cols()),
                     ("start1", start + 1),
                 ]),
+                &args_scalars,
                 &args,
                 y.size().div_ceil(256),
                 1,
@@ -494,9 +554,15 @@ impl Models {
     ///
     /// The VAE's activations are quadratic in tile area, so a large image is
     /// decoded in 32x32-latent tiles with a 64-pixel overlap blended linearly.
-    pub fn decode(&self, packed: &Tensor, height: usize, width: usize) -> Result<Vec<u8>> {
+    pub fn decode(
+        &self,
+        stream: &mut Stream,
+        packed: &Tensor,
+        height: usize,
+        width: usize,
+    ) -> Result<Vec<u8>> {
         let (h, w) = (height / 8, width / 8);
-        let latent = unpack(&packed.download()?, h, w)?;
+        let latent = unpack(&packed.download(stream)?, h, w)?;
 
         // Tiles overlap by 8 latents where there is more than one of them.
         let stride = if h > 32 || w > 32 { 24 } else { 32 };
@@ -512,9 +578,14 @@ impl Models {
                     input[j * tw * 16..(j + 1) * tw * 16]
                         .copy_from_slice(&latent[source..source + tw * 16]);
                 }
-                let uploaded = Tensor::from_slice(self.ops.pool(), &input, th * tw, 16)?;
-                let output = self.decode_tile(&uploaded, th, tw)?;
-                row.push(Tile { height: th * 8, width: tw * 8, data: output.download()? });
+                let uploaded =
+                    Tensor::from_slice(self.ops.pool(), stream, &input, th * tw, 16)?;
+                let output = self.decode_tile(stream, &uploaded, th, tw)?;
+                row.push(Tile {
+                    height: th * 8,
+                    width: tw * 8,
+                    data: output.download(stream)?,
+                });
             }
             tiles.push(row);
         }

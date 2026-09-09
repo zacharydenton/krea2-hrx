@@ -12,11 +12,12 @@ pub mod bundle;
 pub mod sage;
 pub mod weights;
 
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 
-use hrx::{device, Args, Buffer, DevicePtr};
+use hrx::{Buffer, Stream, View};
+use kernels::Scalars;
 
 pub use bundle::{Kernels, Metadata};
 pub use sage::Sage;
@@ -65,8 +66,8 @@ impl From<hrx::Error> for Error {
     }
 }
 
-impl From<loom::Error> for Error {
-    fn from(error: loom::Error) -> Self {
+impl From<kernels::Error> for Error {
+    fn from(error: kernels::Error) -> Self {
         Error::failed(error.to_string())
     }
 }
@@ -91,20 +92,20 @@ fn fingerprint(values: &[f32]) -> u64 {
     hash
 }
 
-/// One block's weights, as device addresses into the resident checkpoint.
+/// One block's weights, located once in the resident checkpoint.
 struct Block {
-    qkvg_q: DevicePtr,
-    qkvg_s: DevicePtr,
-    wo_q: DevicePtr,
-    wo_s: DevicePtr,
-    gu_q: DevicePtr,
-    gu_s: DevicePtr,
-    down_q: DevicePtr,
-    down_s: DevicePtr,
-    prenorm: DevicePtr,
-    postnorm: DevicePtr,
-    qnorm: DevicePtr,
-    knorm: DevicePtr,
+    qkvg_q: crate::weights::At,
+    qkvg_s: crate::weights::At,
+    wo_q: crate::weights::At,
+    wo_s: crate::weights::At,
+    gu_q: crate::weights::At,
+    gu_s: crate::weights::At,
+    down_q: crate::weights::At,
+    down_s: crate::weights::At,
+    prenorm: crate::weights::At,
+    postnorm: crate::weights::At,
+    qnorm: crate::weights::At,
+    knorm: crate::weights::At,
 }
 
 /// The session's scratch: the residual stream and every intermediate, sized for
@@ -125,8 +126,13 @@ struct Buffers {
     sin: Buffer,
 }
 
+/// The gate half of the fused QKVG buffer: from its offset to the end.
+fn gate_half(fused: &Buffer) -> Result<View<'_>> {
+    let at = GATE_OFFSET as usize * 2;
+    fused.try_slice(at, fused.bytes() - at).map_err(Error::from)
+}
+
 pub struct Session {
-    stream: std::sync::Arc<hrx::Device>,
     tokens: usize,
     layers: usize,
     metadata: Metadata,
@@ -139,34 +145,52 @@ pub struct Session {
     sage: Option<Sage>,
     /// What the resident rope tables were last filled from. Each upload drains
     /// the stream, and the tables only change when the image geometry does.
-    rope: Mutex<Option<(u64, u64)>>,
+    rope: Cell<Option<(u64, u64)>>,
     /// Opt-in synchronized wall-clock timing per kernel, off during inference.
     profile: AtomicBool,
-    stages: Mutex<Vec<(&'static str, f64)>>,
-    lock: Mutex<()>,
-    _weights: std::sync::Arc<Weights>,
+    stages: RefCell<Vec<(&'static str, f64)>>,
+    weights: std::sync::Arc<Weights>,
 }
 
 impl Session {
     /// Load a checkpoint and prepare its kernel specializations through HRX.
-    pub fn open(checkpoint: &Path, tokens: usize, layers: usize) -> Result<Session> {
+    pub fn open(
+        stream: &mut Stream,
+        checkpoint: &Path,
+        tokens: usize,
+        layers: usize,
+    ) -> Result<Session> {
+        let (file, plan) = Self::validate(checkpoint, tokens, layers)?;
+        let weights = std::sync::Arc::new(Weights::upload(stream, &file, plan)?);
+        Self::with_weights(stream, weights, tokens, layers, None)
+    }
+
+    /// Everything [`Session::open`] checks before it touches the device: the
+    /// dimensions this build can serve, and the checkpoint's layout. It takes
+    /// no stream, so an invalid argument is refused without a GPU ever being
+    /// opened; `open` calls exactly this and then uploads what it returns.
+    pub fn validate(
+        checkpoint: &Path,
+        tokens: usize,
+        layers: usize,
+    ) -> Result<(krea2_checkpoint::Checkpoint, krea2_checkpoint::Plan)> {
         Self::validate_dimensions(tokens, layers)?;
-        let weights = std::sync::Arc::new(Weights::load(checkpoint)?);
-        Self::with_weights(weights, tokens, layers, None)
+        Weights::plan(checkpoint)
     }
 
     /// Share resident weights and prepare artifacts for this sequence length.
     /// `compiler` selects a Loom shared library for all session kernels.
     pub fn with_weights(
+        stream: &mut Stream,
         weights: std::sync::Arc<Weights>,
         tokens: usize,
         layers: usize,
         compiler: Option<&str>,
     ) -> Result<Session> {
         Self::validate_dimensions(tokens, layers)?;
-        let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
-        let bundle = loom::prepare(compiler, &shape)?;
-        Self::build(weights, &bundle, tokens, layers, compiler)
+        let shape = kernels::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
+        let bundle = kernels::prepare(compiler, &shape)?;
+        Self::build(stream, weights, &bundle, tokens, layers, compiler)
     }
 
     fn validate_dimensions(tokens: usize, layers: usize) -> Result<()> {
@@ -177,15 +201,14 @@ impl Session {
     }
 
     fn build(
+        stream: &mut Stream,
         weights: std::sync::Arc<Weights>,
-        bundle: &loom::PreparedBundle,
+        bundle: &kernels::PreparedBundle,
         tokens: usize,
         layers: usize,
         compiler: Option<&str>,
     ) -> Result<Session> {
         let metadata = Metadata::from(bundle.shape());
-        let stream = weights.stream.clone();
-        let _scope = stream.enter();
         if weights.bits() != metadata.gemm_bits {
             return Err(Error::invalid(format!(
                 "kernel bundle built for int{} GEMM operands but the weights are int{}",
@@ -197,7 +220,7 @@ impl Session {
         let mut blocks = Vec::with_capacity(layers);
         for index in 0..layers {
             let p = format!("blocks.{index}");
-            let at = |name: &str, bytes: usize| weights.at(&format!("{p}.{name}"), bytes);
+            let at = |name: &str, bytes: usize| weights.locate(&format!("{p}.{name}"), bytes);
             blocks.push(Block {
                 qkvg_q: at("qkvg.q", QKVG as usize * HIDDEN as usize * bits / 8)?,
                 qkvg_s: at("qkvg.s", QKVG as usize * 4)?,
@@ -213,10 +236,10 @@ impl Session {
                 knorm: at("knorm", HEAD_DIM as usize * 4)?,
             });
         }
-        let kernels = Kernels::load(bundle, &metadata)?;
+        let kernels = Kernels::load(stream, bundle, &metadata)?;
         let capacity = metadata.capacity;
         let kv_bytes = KV_HEADS as usize * HEAD_DIM as usize * capacity * 2;
-        let allocate = |bytes: usize| device().allocate(bytes).map_err(Error::from);
+        let allocate = |bytes: usize| stream.allocate(bytes).map_err(Error::from);
         let buffers = Buffers {
             x: allocate(capacity * HIDDEN as usize * 2)?,
             // the widest prepared operand: down's K = 16384 at its padded pitch
@@ -239,21 +262,16 @@ impl Session {
         };
         // Headroom rows are read by the kernels and must be zero, not whatever
         // the allocator last held.
-        for (buffer, bytes) in [
-            (&buffers.q, capacity * HIDDEN as usize * 2),
-            (&buffers.k, kv_bytes),
-            (&buffers.v, kv_bytes),
-            (&buffers.fused, capacity * QKVG as usize * 2),
-            (&buffers.x, capacity * HIDDEN as usize * 2),
-        ] {
-            device().zero(buffer.ptr(), bytes)?;
+        for buffer in [&buffers.q, &buffers.k, &buffers.v, &buffers.fused, &buffers.x] {
+            stream.fill(buffer.binding(), 0)?;
         }
         if let Some(transposed) = &buffers.v_transposed {
-            device().zero(transposed.ptr(), kv_bytes)?;
+            stream.fill(transposed.binding(), 0)?;
         }
         let sage = match metadata.attention_bits {
             16 => None,
             bits => Some(Sage::new(
+                stream,
                 tokens,
                 capacity,
                 (KV_HEADS * 4) as usize,
@@ -263,7 +281,6 @@ impl Session {
             )?),
         };
         Ok(Session {
-            stream: stream.clone(),
             tokens,
             layers,
             metadata,
@@ -271,17 +288,11 @@ impl Session {
             blocks,
             buffers,
             sage,
-            rope: Mutex::new(None),
+            rope: Cell::new(None),
             profile: AtomicBool::new(false),
-            stages: Mutex::new(Vec::new()),
-            lock: Mutex::new(()),
-            _weights: weights,
+            stages: RefCell::new(Vec::new()),
+            weights,
         })
-    }
-
-    /// Select the stream that owns this session's weights and buffers.
-    pub fn enter(&self) -> hrx::Scope {
-        self.stream.enter()
     }
 
     pub fn tokens(&self) -> usize {
@@ -300,64 +311,79 @@ impl Session {
 
     /// One kernel, timed when profiling is on. The synchronize on either side
     /// is what makes a stage's number mean anything.
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         &self,
+        stream: &mut Stream,
         kernel: &hrx::Kernel,
         stage: &'static str,
         grid_x: u32,
         grid_y: u32,
         threads: u32,
-        args: &Args,
+        scalars: &Scalars,
+        bindings: &[View<'_>],
     ) -> Result<()> {
+        let constants = scalars.pack(stage, kernel)?;
+        let compiled = kernel.info().workgroup_size;
+        if compiled != [threads, 1, 1] {
+            return Err(Error::failed(format!(
+                "{stage}: compiled for workgroup {compiled:?} but the host asked for {threads}"
+            )));
+        }
+        let grid = [grid_x, grid_y, 1];
         if !self.profile.load(Ordering::Relaxed) {
-            unsafe { kernel.launch_2d(grid_x, grid_y, threads, args) }?;
+            unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
             return Ok(());
         }
-        device().synchronize()?;
+        stream.synchronize()?;
         let began = std::time::Instant::now();
-        unsafe { kernel.launch_2d(grid_x, grid_y, threads, args) }?;
-        device().synchronize()?;
+        unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
+        stream.synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
         Ok(())
     }
 
     /// Uploads changed RoPE tables. Both run APIs must use this method so the
     /// fingerprint stays consistent with the shared device buffers.
-    fn upload_rope(&self, cos: &[f32], sin: &[f32]) -> Result<()> {
+    fn upload_rope(&self, stream: &mut Stream, cos: &[f32], sin: &[f32]) -> Result<()> {
         let fingerprint = (fingerprint(cos), fingerprint(sin));
-        let mut resident = self.rope.lock().unwrap_or_else(|e| e.into_inner());
-        if *resident == Some(fingerprint) {
+        if self.rope.get() == Some(fingerprint) {
             return Ok(());
         }
         // Cleared first: a failed upload must not leave the tables claimed.
-        *resident = None;
-        device().write(self.buffers.cos.ptr(), cos)?;
-        device().write(self.buffers.sin.ptr(), sin)?;
-        *resident = Some(fingerprint);
+        self.rope.set(None);
+        stream.upload(self.buffers.cos.binding(), bytemuck::cast_slice(cos))?;
+        stream.upload(self.buffers.sin.binding(), bytemuck::cast_slice(sin))?;
+        self.rope.set(Some(fingerprint));
         Ok(())
     }
 
     /// The clock a multi-launch stage is timed against, when profiling is on.
-    fn timed(&self) -> Option<std::time::Instant> {
+    fn timed(&self, stream: &mut Stream) -> Option<std::time::Instant> {
         if !self.profile.load(Ordering::Relaxed) {
             return None;
         }
-        let _ = device().synchronize();
+        let _ = stream.synchronize();
         Some(std::time::Instant::now())
     }
 
     /// Closes a stage opened by [`Session::timed`].
-    fn record(&self, stage: &'static str, began: Option<std::time::Instant>) -> Result<()> {
+    fn record(
+        &self,
+        stream: &mut Stream,
+        stage: &'static str,
+        began: Option<std::time::Instant>,
+    ) -> Result<()> {
         let Some(began) = began else {
             return Ok(());
         };
-        device().synchronize()?;
+        stream.synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
         Ok(())
     }
 
     fn accumulate(&self, stage: &'static str, micros: f64) {
-        let mut stages = self.stages.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stages = self.stages.borrow_mut();
         match stages.iter_mut().find(|(name, _)| *name == stage) {
             Some(entry) => entry.1 += micros,
             None => stages.push((stage, micros)),
@@ -369,7 +395,7 @@ impl Session {
         if !self.profile.load(Ordering::Relaxed) {
             return;
         }
-        let mut stages = self.stages.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stages = self.stages.borrow_mut();
         let total: f64 = stages.iter().map(|(_, micros)| micros).sum();
         stages.sort_by(|a, b| b.1.total_cmp(&a.1));
         eprintln!("stage profile over {blocks} block(s), {} tokens:", self.tokens);
@@ -389,8 +415,10 @@ impl Session {
     /// `x` is bf16 `[tokens][6144]`, in and out. `mods` is f32
     /// `[layers][6][6144]`, already including each block's table; `cos` and
     /// `sin` are f32 `[tokens][128]`.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
+        stream: &mut Stream,
         x: &mut [u16],
         mods: &[f32],
         cos: &[f32],
@@ -398,11 +426,6 @@ impl Session {
         first_block: usize,
         block_count: Option<usize>,
     ) -> Result<()> {
-        let _scope = self.stream.enter();
-        let _serialized = self
-            .lock
-            .lock()
-            .map_err(|_| Error::failed("session is poisoned; create a new session"))?;
         let count = block_count.unwrap_or(self.layers.saturating_sub(first_block));
         if first_block >= self.layers || count < 1 || count > self.layers - first_block {
             return Err(Error::invalid("block range must be within the loaded layers"));
@@ -421,14 +444,14 @@ impl Session {
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
-        device().write(self.buffers.x.ptr(), x)?;
-        device().write(self.buffers.mods.ptr(), mods)?;
-        self.upload_rope(cos, sin)?;
+        stream.upload(self.buffers.x.binding(), bytemuck::cast_slice(x))?;
+        stream.upload(self.buffers.mods.binding(), bytemuck::cast_slice(mods))?;
+        self.upload_rope(stream, cos, sin)?;
         for index in first_block..first_block + count {
-            self.block(index, self.buffers.mods.ptr())?;
+            self.block(stream, index, self.buffers.mods.binding())?;
         }
-        device().synchronize()?;
-        device().read(x, self.buffers.x.ptr())?;
+        stream.synchronize()?;
+        stream.read(self.buffers.x.binding(), bytemuck::cast_slice_mut(x))?;
         self.report(count);
         Ok(())
     }
@@ -441,118 +464,137 @@ impl Session {
     /// `[layers][6][6144]`. The rope tables stay host-side because they change
     /// only when the image geometry does.
     ///
-    /// # Safety
-    /// `x` and `mods` must span the documented shapes on this session's stream.
-    /// Use `enter` when allocating input storage through the compatibility API.
-    pub unsafe fn run_device(
+    /// Both views must belong to `stream` and cover the shapes above. The
+    /// runtime checks the first and this checks the second, which is why the
+    /// address-based version's `unsafe` is gone.
+    pub fn run_device(
         &self,
-        x: DevicePtr,
-        mods: DevicePtr,
+        stream: &mut Stream,
+        x: View<'_>,
+        mods: View<'_>,
         cos: &[f32],
         sin: &[f32],
     ) -> Result<()> {
-        let _scope = self.stream.enter();
-        let _serialized = self
-            .lock
-            .lock()
-            .map_err(|_| Error::failed("session is poisoned; create a new session"))?;
         let tokens = self.tokens;
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
         // Into the session's own buffer, whose headroom rows are already zero.
-        device().copy_device_to_device(
-            self.buffers.x.ptr(),
-            x,
-            tokens * HIDDEN as usize * 2,
-        )?;
-        self.upload_rope(cos, sin)?;
+        let rows = tokens * HIDDEN as usize * 2;
+        stream.copy(self.buffers.x.binding().slice(0, rows)?, x.slice(0, rows)?)?;
+        self.upload_rope(stream, cos, sin)?;
         for index in 0..self.layers {
-            self.block(index, mods)?;
+            self.block(stream, index, mods)?;
         }
         // The output copy and subsequent consumers are ordered after the
         // blocks on this session's stream; no host wait is needed here.
         self.report(self.layers);
-        device().copy_device_to_device(
-            x,
-            self.buffers.x.ptr(),
-            tokens * HIDDEN as usize * 2,
-        )?;
+        stream.copy(x.slice(0, rows)?, self.buffers.x.binding().slice(0, rows)?)?;
         Ok(())
     }
 
     /// This block's slice of the modulation tables: prescale, preshift,
     /// pregate, postscale, postshift, postgate, each 6144 floats.
-    fn modulation(&self, mods: DevicePtr, index: usize, part: usize) -> DevicePtr {
-        let stride = 6 * HIDDEN as usize * 4;
-        mods.offset(index * stride + part * HIDDEN as usize * 4)
+    fn modulation<'a>(&self, mods: View<'a>, index: usize, part: usize) -> Result<View<'a>> {
+        let row = HIDDEN as usize * 4;
+        let stride = 6 * row;
+        mods.slice(index * stride + part * row, row).map_err(Error::from)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gemm(
         &self,
+        stream: &mut Stream,
         kernel: &hrx::Kernel,
         stage: &'static str,
-        weights: DevicePtr,
-        scales: DevicePtr,
+        weights: View<'_>,
+        scales: View<'_>,
         n: i32,
-        out: DevicePtr,
-        gate: Option<DevicePtr>,
+        out: View<'_>,
+        gate: Option<View<'_>>,
     ) -> Result<()> {
-        let mut args = Args::new();
-        args.i32(self.tokens as i32)
-            .ptr(self.buffers.a_q.ptr())
-            .ptr(weights)
-            .ptr(scales)
-            .ptr(self.buffers.a_s.ptr())
-            .ptr(out);
+        let scalars = Scalars::new().index(self.tokens);
+        let bindings =
+            [self.buffers.a_q.binding(), weights, scales, self.buffers.a_s.binding(), out];
+        let mut bindings = bindings.to_vec();
         if let Some(gate) = gate {
-            args.ptr(gate);
+            bindings.push(gate);
         }
-        let grid_y = loom::shape::gemm_grid_rows(
+        let grid_y = kernels::shape::gemm_grid_rows(
             self.tokens as i32,
             self.metadata.gemm_rows as i32,
             self.metadata.m_group as i32,
         );
-        self.launch(kernel, stage, (n / 128) as u32, grid_y as u32, THREADS, &args)
+        self.launch(
+            stream,
+            kernel,
+            stage,
+            (n / 128) as u32,
+            grid_y as u32,
+            THREADS,
+            &scalars,
+            &bindings,
+        )
     }
 
-    fn block(&self, index: usize, mods: DevicePtr) -> Result<()> {
+    fn block(&self, stream: &mut Stream, index: usize, mods: View<'_>) -> Result<()> {
+        let w = &self.weights;
         let block = &self.blocks[index];
-        let tokens = self.tokens as i32;
+        let tokens = self.tokens;
         let b = &self.buffers;
 
-        let mut norm = Args::new();
-        norm.i32(tokens)
-            .ptr(b.x.ptr())
-            .ptr(block.prenorm)
-            .ptr(self.modulation(mods, index, 0))
-            .ptr(self.modulation(mods, index, 1))
-            .ptr(b.a_q.ptr())
-            .ptr(b.a_s.ptr());
-        self.launch(&self.kernels.prepare_norm, "prepare", tokens as u32, 1, THREADS, &norm)?;
+        let norm_scalars = Scalars::new().index(tokens);
+        let norm = [
+            b.x.binding(),
+            w.view(block.prenorm),
+            self.modulation(mods, index, 0)?,
+            self.modulation(mods, index, 1)?,
+            b.a_q.binding(),
+            b.a_s.binding(),
+        ];
+        self.launch(
+            stream,
+            &self.kernels.prepare_norm,
+            "prepare",
+            tokens as u32,
+            1,
+            THREADS,
+            &norm_scalars,
+            &norm,
+        )?;
 
         self.gemm(
+            stream,
             &self.kernels.gemm_qkvg,
             "gemm qkvg",
-            block.qkvg_q,
-            block.qkvg_s,
+            w.view(block.qkvg_q),
+            w.view(block.qkvg_s),
             QKVG,
-            b.fused.ptr(),
+            b.fused.binding(),
             None,
         )?;
 
-        let mut rope = Args::new();
-        rope.i32(tokens)
-            .ptr(b.fused.ptr())
-            .ptr(block.qnorm)
-            .ptr(block.knorm)
-            .ptr(b.cos.ptr())
-            .ptr(b.sin.ptr())
-            .ptr(b.q.ptr())
-            .ptr(b.k.ptr())
-            .ptr(b.v.ptr());
-        self.launch(&self.kernels.rope, "qk norm + rope", tokens as u32, 1, THREADS, &rope)?;
+        let rope_scalars = Scalars::new().index(tokens);
+        let rope = [
+            b.fused.binding(),
+            w.view(block.qnorm),
+            w.view(block.knorm),
+            b.cos.binding(),
+            b.sin.binding(),
+            b.q.binding(),
+            b.k.binding(),
+            b.v.binding(),
+        ];
+        self.launch(
+            stream,
+            &self.kernels.rope,
+            "qk norm + rope",
+            tokens as u32,
+            1,
+            THREADS,
+            &rope_scalars,
+            &rope,
+        )?;
 
         match &self.sage {
             // Smoothed int4/int8 QK: the preparation pass quantizes Q and K
@@ -560,28 +602,29 @@ impl Session {
             // back to the scores.
             Some(sage) => {
                 // Six launches, so it is timed as one stage rather than each.
-                let preparing = self.timed();
-                sage.run(b.q.ptr(), b.k.ptr(), b.v.ptr())?;
-                self.record("SA2 preprocessing", preparing)?;
-                let mut attention = Args::new();
-                attention
-                    .i32(tokens)
-                    .i32(KV_HEADS)
-                    .ptr(sage.q4.ptr())
-                    .ptr(sage.k4.ptr())
-                    .ptr(sage.v_transposed.ptr())
-                    .ptr(sage.q_scale.ptr())
-                    .ptr(sage.k_scale.ptr())
-                    .ptr(sage.correction.ptr())
-                    .ptr(b.attn.ptr());
-                let waves = self.metadata.attention_waves as i32;
+                let preparing = self.timed(stream);
+                sage.run(stream, b.q.binding(), b.k.binding(), b.v.binding())?;
+                self.record(stream, "SA2 preprocessing", preparing)?;
+                let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS as usize);
+                let attention = [
+                    sage.q4.binding(),
+                    sage.k4.binding(),
+                    sage.v_transposed.binding(),
+                    sage.q_scale.binding(),
+                    sage.k_scale.binding(),
+                    sage.correction.binding(),
+                    b.attn.binding(),
+                ];
+                let waves = self.metadata.attention_waves as usize;
                 let rows = 16 * (waves / 4);
                 self.launch(
+                    stream,
                     &self.kernels.attention,
                     "SA2 attention",
-                    ((tokens + rows - 1) / rows) as u32,
+                    tokens.div_ceil(rows) as u32,
                     KV_HEADS as u32,
                     32 * waves as u32,
+                    &attention_scalars,
                     &attention,
                 )?;
             }
@@ -589,104 +632,115 @@ impl Session {
             None => {
                 let values = match (&b.v_transposed, &self.kernels.attention_transpose) {
                     (Some(transposed), Some(kernel)) => {
-                        let mut args = Args::new();
-                        args.i32(tokens).ptr(b.v.ptr()).ptr(transposed.ptr());
+                        let scalars = Scalars::new().index(tokens);
+                        let bindings = [b.v.binding(), transposed.binding()];
                         self.launch(
+                            stream,
                             kernel,
                             "f16 V transpose",
-                            tokens.div_euclid(32) as u32 + u32::from(tokens % 32 != 0),
+                            tokens.div_ceil(32) as u32,
                             (KV_HEADS * HEAD_DIM / 32) as u32,
                             256,
-                            &args,
+                            &scalars,
+                            &bindings,
                         )?;
-                        transposed.ptr()
+                        transposed.binding()
                     }
-                    _ => b.v.ptr(),
+                    _ => b.v.binding(),
                 };
-                let mut attention = Args::new();
-                attention
-                    .i32(tokens)
-                    .ptr(b.q.ptr())
-                    .ptr(b.k.ptr())
-                    .ptr(values)
-                    .ptr(b.attn.ptr());
-                let rows = 16 * self.metadata.fp16_query_tiles as i32;
+                let attention_scalars = Scalars::new().index(tokens);
+                let attention = [b.q.binding(), b.k.binding(), values, b.attn.binding()];
+                let rows = 16 * self.metadata.fp16_query_tiles as usize;
                 self.launch(
+                    stream,
                     &self.kernels.attention,
                     "f16 attention",
-                    ((tokens + rows - 1) / rows) as u32,
+                    tokens.div_ceil(rows) as u32,
                     KV_HEADS as u32,
                     128 * self.metadata.fp16_query_tiles,
+                    &attention_scalars,
                     &attention,
                 )?;
             }
         }
 
-        let mut gated = Args::new();
-        gated
-            .i32(tokens)
-            .ptr(b.attn.ptr())
-            .ptr(b.fused.ptr().offset(GATE_OFFSET as usize * 2))
-            .ptr(b.a_q.ptr())
-            .ptr(b.a_s.ptr());
+        let gated_scalars = Scalars::new().index(tokens);
+        let gated = [b.attn.binding(), gate_half(&b.fused)?, b.a_q.binding(), b.a_s.binding()];
         self.launch(
+            stream,
             &self.kernels.prepare_gated,
             "prepare gated",
             tokens as u32,
             1,
             THREADS,
+            &gated_scalars,
             &gated,
         )?;
 
         self.gemm(
+            stream,
             &self.kernels.gemm_wo,
             "gemm wo + residual",
-            block.wo_q,
-            block.wo_s,
+            w.view(block.wo_q),
+            w.view(block.wo_s),
             HIDDEN,
-            b.x.ptr(),
-            Some(self.modulation(mods, index, 2)),
+            b.x.binding(),
+            Some(self.modulation(mods, index, 2)?),
         )?;
 
-        let mut post = Args::new();
-        post.i32(tokens)
-            .ptr(b.x.ptr())
-            .ptr(block.postnorm)
-            .ptr(self.modulation(mods, index, 3))
-            .ptr(self.modulation(mods, index, 4))
-            .ptr(b.a_q.ptr())
-            .ptr(b.a_s.ptr());
-        self.launch(&self.kernels.prepare_norm, "prepare", tokens as u32, 1, THREADS, &post)?;
+        let post_scalars = Scalars::new().index(tokens);
+        let post = [
+            b.x.binding(),
+            w.view(block.postnorm),
+            self.modulation(mods, index, 3)?,
+            self.modulation(mods, index, 4)?,
+            b.a_q.binding(),
+            b.a_s.binding(),
+        ];
+        self.launch(
+            stream,
+            &self.kernels.prepare_norm,
+            "prepare",
+            tokens as u32,
+            1,
+            THREADS,
+            &post_scalars,
+            &post,
+        )?;
 
         self.gemm(
+            stream,
             &self.kernels.gemm_gu,
             "gemm gate|up + swiglu",
-            block.gu_q,
-            block.gu_s,
+            w.view(block.gu_q),
+            w.view(block.gu_s),
             2 * INTER,
-            b.gu.ptr(),
+            b.gu.binding(),
             None,
         )?;
 
-        let mut swiglu = Args::new();
-        swiglu.i32(tokens).ptr(b.gu.ptr()).ptr(b.a_q.ptr()).ptr(b.a_s.ptr());
+        let swiglu_scalars = Scalars::new().index(tokens);
+        let swiglu = [b.gu.binding(), b.a_q.binding(), b.a_s.binding()];
         self.launch(
+            stream,
             &self.kernels.prepare_swiglu,
             "prepare swiglu",
             tokens as u32,
             1,
             THREADS,
+            &swiglu_scalars,
             &swiglu,
         )?;
 
         self.gemm(
+            stream,
             &self.kernels.gemm_down,
             "gemm down + residual",
-            block.down_q,
-            block.down_s,
+            w.view(block.down_q),
+            w.view(block.down_s),
             HIDDEN,
-            b.x.ptr(),
-            Some(self.modulation(mods, index, 5)),
+            b.x.binding(),
+            Some(self.modulation(mods, index, 5)?),
         )?;
         Ok(())
     }
@@ -702,8 +756,10 @@ mod tests {
     #[ignore = "requires Krea checkpoint and gfx1151"]
     fn every_path_that_fills_the_rope_buffers_records_what_it_put_there() {
         let (checkpoint, tokens) = fixture();
-        let session = Session::open(&checkpoint, tokens, 1).expect("resident session");
-        let resident = || *session.rope.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stream = Stream::open().expect("a stream");
+        let session =
+            Session::open(&mut stream, &checkpoint, tokens, 1).expect("resident session");
+        let resident = || session.rope.get();
         assert_eq!(resident(), None, "nothing is resident before the first call");
 
         let mods = vec![0.01f32; 6 * HIDDEN as usize];
@@ -711,14 +767,14 @@ mod tests {
         let b = (vec![0.0f32; tokens * 128], vec![1.0f32; tokens * 128]);
         let mut x = vec![0x3f00u16; tokens * HIDDEN as usize];
 
-        session.run(&mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A");
+        session.run(&mut stream, &mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A");
         let after_a = resident();
         assert!(after_a.is_some(), "A left nothing recorded");
 
-        session.run(&mut x, &mods, &b.0, &b.1, 0, Some(1)).expect("B");
+        session.run(&mut stream, &mut x, &mods, &b.0, &b.1, 0, Some(1)).expect("B");
         assert_ne!(resident(), after_a, "B's upload was not recorded, so A looks resident");
 
-        session.run(&mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A again");
+        session.run(&mut stream, &mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A again");
         assert_eq!(resident(), after_a, "A's second upload was not recorded");
     }
 

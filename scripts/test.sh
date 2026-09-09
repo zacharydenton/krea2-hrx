@@ -14,5 +14,5 @@ grep -v '^#' docs/dependencies.txt | grep -v '^$' | LC_ALL=C sort -u > "$allowed
 diff -u "$allowed" "$shipped"
 cargo test --workspace
 if [ "$gpu" = 1 ]; then
-  cargo test -p loom -p krea2-ops -- --ignored --test-threads=1
+  cargo test -p krea2-kernels -p krea2-ops -- --ignored --test-threads=1
 fi

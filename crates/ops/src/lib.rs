@@ -6,12 +6,12 @@ pub mod tensor;
 
 use std::sync::{Arc, OnceLock};
 
-use hrx::{device, Buffer, DevicePtr};
-use loom::cache::PreparedKernels;
+use hrx::{Buffer, Stream, View};
+use kernels::cache::PreparedKernels;
+pub use kernels::Scalars;
 
-pub use loom::Config;
+pub use kernels::Config;
 
-pub use hrx::Args;
 pub use tensor::{Pool, Scratch, Tensor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +31,8 @@ impl From<hrx::Error> for Error {
     }
 }
 
-impl From<loom::Error> for Error {
-    fn from(error: loom::Error) -> Self {
+impl From<kernels::Error> for Error {
+    fn from(error: kernels::Error) -> Self {
         Error(error.to_string())
     }
 }
@@ -78,15 +78,17 @@ pub enum Layout {
 /// Float32 normalization scales are retained from the checkpoint or upcast
 /// once on first use.
 pub struct Weight {
-    /// bf16 values: what every kernel but the norms reads.
-    pub values: DevicePtr,
     pub shape: Vec<usize>,
     pub count: usize,
-    /// The allocation `values` points into, held so a tensor over this weight
-    /// cannot outlive it.
+    /// The allocation holding the bf16 values, and where in it they start.
+    /// Held so a view over this weight cannot outlive its memory.
     storage: Arc<Buffer>,
+    offset: usize,
     layout: Layout,
-    given: Option<DevicePtr>,
+    /// The checkpoint's own float32 copy. It lives in the packed arena rather
+    /// than beside the bf16 values, so it carries its own allocation: holding
+    /// only the bf16 one left this alive by coincidence.
+    given: Option<(Arc<Buffer>, usize)>,
     upcast: OnceLock<Buffer>,
 }
 
@@ -96,20 +98,25 @@ impl Weight {
     /// says so with [`Weight::in_layout`].
     pub fn new(
         storage: &Arc<Buffer>,
-        values: DevicePtr,
+        offset: usize,
         shape: Vec<usize>,
         count: usize,
-        f32: Option<DevicePtr>,
+        f32: Option<(Arc<Buffer>, usize)>,
     ) -> Weight {
         Weight {
-            values,
             shape,
             count,
             storage: Arc::clone(storage),
+            offset,
             layout: Layout::RowMajor,
             given: f32,
             upcast: OnceLock::new(),
         }
+    }
+
+    /// The bf16 values, as a kernel binding.
+    pub fn values(&self) -> Result<View<'_>> {
+        self.storage.try_slice(self.offset, self.count * 2).map_err(|e| Error(e.to_string()))
     }
 
     /// The same, for values written in `layout`.
@@ -125,24 +132,24 @@ impl Weight {
     /// These values as a matrix, for the operations that take tensors. The
     /// tensor shares the allocation, so it keeps the weight's memory alive.
     pub fn tensor(&self, rows: usize, cols: usize) -> Result<Tensor> {
-        Tensor::shared(&self.storage, self.values, rows, cols)
+        Tensor::shared(&self.storage, self.offset, rows, cols)
     }
 
     /// The scales as float32, upcast once if the file did not keep them so.
-    pub fn f32_values(&self) -> Result<DevicePtr> {
-        if let Some(pointer) = self.given {
-            return Ok(pointer);
+    pub fn f32_values(&self, stream: &mut Stream) -> Result<View<'_>> {
+        if let Some((buffer, offset)) = &self.given {
+            return buffer.try_slice(*offset, self.count * 4).map_err(|e| Error(e.to_string()));
         }
         if let Some(buffer) = self.upcast.get() {
-            return Ok(buffer.ptr());
+            return Ok(buffer.binding());
         }
         let mut bits = vec![0u16; self.count];
-        device().read(&mut bits, self.values)?;
+        stream.read(self.values()?, bytemuck::cast_slice_mut(&mut bits))?;
         let floats: Vec<f32> = bits.into_iter().map(krea2_numerics::to_f32).collect();
-        let buffer = device().allocate(floats.len() * 4)?;
-        device().write(buffer.ptr(), &floats)?;
+        let buffer = stream.allocate(floats.len() * 4)?;
+        stream.upload(buffer.binding(), bytemuck::cast_slice(&floats))?;
         // A losing race drops its buffer, which releases it.
-        Ok(self.upcast.get_or_init(|| buffer).ptr())
+        Ok(self.upcast.get_or_init(|| buffer).binding())
     }
 }
 
@@ -176,32 +183,57 @@ impl Ops {
         &self.pool
     }
 
-    pub fn tensor(&self, rows: usize, cols: usize) -> Result<Tensor> {
-        Tensor::new(&self.pool, rows, cols)
+    pub fn tensor(&self, stream: &Stream, rows: usize, cols: usize) -> Result<Tensor> {
+        Tensor::new(&self.pool, stream, rows, cols)
     }
 
     /// `y = x wᵀ (+ bias)`, the shape every linear layer here takes.
-    pub fn linear(&self, x: &Tensor, w: &Weight, bias: Option<DevicePtr>) -> Result<Tensor> {
+    pub fn linear(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        w: &Weight,
+        bias: Option<View<'_>>,
+    ) -> Result<Tensor> {
         let n = *w.shape.first().ok_or_else(|| Error("linear dimensions".into()))?;
         let k = x.cols();
         if n < 1 || x.rows() < 1 || x.cols() < 1 || w.count != n * k {
             return Err(Error("linear dimensions".into()));
         }
-        let y = self.tensor(x.rows(), n)?;
+        let y = self.tensor(stream, x.rows(), n)?;
         let name = if bias.is_some() { "gemm_bf16_bf16_nt_bias" } else { "gemm_bf16_bf16_nt" };
-        self.matmul(name, x.ptr(), w.values, y.ptr(), x.rows(), n, k, 1, 1.0, bias)?;
+        self.matmul(
+            stream,
+            name,
+            x.binding()?,
+            w.values()?,
+            y.binding()?,
+            x.rows(),
+            n,
+            k,
+            1,
+            1.0,
+            bias,
+        )?;
         Ok(y)
     }
 
     /// RMSNorm with float32 scales.
-    pub fn norm(&self, x: &Tensor, w: &Weight, mode: Norm, eps: f32) -> Result<Tensor> {
+    pub fn norm(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        w: &Weight,
+        mode: Norm,
+        eps: f32,
+    ) -> Result<Tensor> {
         if w.count != x.cols() {
             return Err(Error("norm dimensions".into()));
         }
-        let scales = w.f32_values()?;
-        let y = self.tensor(x.rows(), x.cols())?;
-        let mut args = Args::new();
-        args.i32(x.rows() as i32).f32(eps).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
+        let scales = w.f32_values(stream)?;
+        let y = self.tensor(stream, x.rows(), x.cols())?;
+        let scalars = Scalars::new().index(x.rows()).float(eps);
+        let bindings = [x.binding()?, scales, y.binding()?];
         // Eight rows per workgroup when a row fits in one wave's registers.
         let wave = mode == Norm::Group && x.cols() <= 1024;
         let name =
@@ -209,9 +241,11 @@ impl Ops {
         let grid = if wave { x.rows().div_ceil(8) } else { x.rows() };
         unsafe {
             self.launch(
+                stream,
                 &name,
                 config(&[("xsize", x.size()), ("cols", x.cols())]),
-                &args,
+                &scalars,
+                &bindings,
                 grid,
                 1,
                 256,
@@ -221,23 +255,25 @@ impl Ops {
     }
 
     /// VAE L2 normalization and SiLU in one pass, preserving its bf16 boundaries.
-    pub fn norm_silu(&self, x: &Tensor, w: &Weight) -> Result<Tensor> {
+    pub fn norm_silu(&self, stream: &mut Stream, x: &Tensor, w: &Weight) -> Result<Tensor> {
         if w.count != x.cols() {
             return Err(Error("normalization dimensions".into()));
         }
         if x.cols() > 1024 {
-            let normed = self.norm(x, w, Norm::Group, 1e-5)?;
-            return self.unary(&normed, Unary::Silu);
+            let normed = self.norm(stream, x, w, Norm::Group, 1e-5)?;
+            return self.unary(stream, &normed, Unary::Silu);
         }
-        let scales = w.f32_values()?;
-        let y = self.tensor(x.rows(), x.cols())?;
-        let mut args = Args::new();
-        args.i32(x.rows() as i32).f32(1e-5).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
+        let scales = w.f32_values(stream)?;
+        let y = self.tensor(stream, x.rows(), x.cols())?;
+        let scalars = Scalars::new().index(x.rows()).float(1e-5);
+        let bindings = [x.binding()?, scales, y.binding()?];
         unsafe {
             self.launch(
+                stream,
                 "norm_2_wave_silu",
                 config(&[("xsize", x.size()), ("cols", x.cols())]),
-                &args,
+                &scalars,
+                &bindings,
                 x.rows().div_ceil(8),
                 1,
                 256,
@@ -246,36 +282,55 @@ impl Ops {
         Ok(y)
     }
 
-    pub fn unary(&self, x: &Tensor, op: Unary) -> Result<Tensor> {
-        let y = self.tensor(x.rows(), x.cols())?;
-        let mut args = Args::new();
-        args.i32(x.size() as i32).ptr(x.ptr()).ptr(y.ptr());
+    pub fn unary(&self, stream: &mut Stream, x: &Tensor, op: Unary) -> Result<Tensor> {
+        let y = self.tensor(stream, x.rows(), x.cols())?;
+        let scalars = Scalars::new().index(x.size());
+        let bindings = [x.binding()?, y.binding()?];
         let name = match op {
             Unary::Silu => "unary_silu",
             Unary::Gelu => "unary_gelu",
             Unary::Sigmoid => "unary_sigmoid",
         };
-        unsafe { self.launch(name, Config::new(), &args, x.size().div_ceil(256), 1, 256) }?;
+        unsafe {
+            self.launch(
+                stream,
+                name,
+                Config::new(),
+                &scalars,
+                &bindings,
+                x.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(y)
     }
 
     /// `z = x op y`, with `y` repeating over `x` when it is shorter.
-    pub fn binary(&self, x: &Tensor, y: &Tensor, op: Binary) -> Result<Tensor> {
+    pub fn binary(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        y: &Tensor,
+        op: Binary,
+    ) -> Result<Tensor> {
         if y.size() == 0 || !x.size().is_multiple_of(y.size()) {
             return Err(Error("binary broadcast".into()));
         }
-        let z = self.tensor(x.rows(), x.cols())?;
-        let mut args = Args::new();
-        args.i32(x.size() as i32).ptr(x.ptr()).ptr(y.ptr()).ptr(z.ptr());
+        let z = self.tensor(stream, x.rows(), x.cols())?;
+        let scalars = Scalars::new().index(x.size());
+        let bindings = [x.binding()?, y.binding()?, z.binding()?];
         let name = match op {
             Binary::Add => "binary_add",
             Binary::Mul => "binary_mul",
         };
         unsafe {
             self.launch(
+                stream,
                 name,
                 config(&[("yn", y.size())]),
-                &args,
+                &scalars,
+                &bindings,
                 x.size().div_ceil(256),
                 1,
                 256,
@@ -285,7 +340,14 @@ impl Ops {
     }
 
     /// Split-half rotary embedding over `heads` heads of `cols / heads`.
-    pub fn rope(&self, x: &Tensor, tokens: usize, heads: usize, theta: f32) -> Result<Tensor> {
+    pub fn rope(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        tokens: usize,
+        heads: usize,
+        theta: f32,
+    ) -> Result<Tensor> {
         if tokens != x.rows()
             || heads < 1
             || !x.cols().is_multiple_of(heads)
@@ -295,14 +357,16 @@ impl Ops {
         {
             return Err(Error("split-half rotary dimensions".into()));
         }
-        let y = self.tensor(x.rows(), x.cols())?;
-        let mut args = Args::new();
-        args.i32(x.size() as i32).f32(theta).ptr(x.ptr()).ptr(y.ptr());
+        let y = self.tensor(stream, x.rows(), x.cols())?;
+        let scalars = Scalars::new().index(x.size()).float(theta);
+        let bindings = [x.binding()?, y.binding()?];
         unsafe {
             self.launch(
+                stream,
                 "rope",
                 config(&[("dim", x.cols() / heads), ("heads", heads)]),
-                &args,
+                &scalars,
+                &bindings,
                 x.size().div_ceil(256),
                 1,
                 256,
@@ -313,27 +377,57 @@ impl Ops {
 
     /// Euler in place: `sample += delta * velocity`, rounded to bf16 at the
     /// delta, the product and the sum, as the CUDA pipeline rounds it.
-    pub fn euler_step(&self, sample: &Tensor, velocity: &Tensor, delta: f32) -> Result<()> {
+    pub fn euler_step(
+        &self,
+        stream: &mut Stream,
+        sample: &Tensor,
+        velocity: &Tensor,
+        delta: f32,
+    ) -> Result<()> {
         if sample.rows() != velocity.rows() || sample.cols() != velocity.cols() {
             return Err(Error("scheduler tensor dimensions".into()));
         }
-        let mut args = Args::new();
-        args.i32(sample.size() as i32).f32(delta).ptr(sample.ptr()).ptr(velocity.ptr());
+        let scalars = Scalars::new().index(sample.size()).float(delta);
+        let bindings = [sample.binding()?, velocity.binding()?];
         unsafe {
-            self.launch("euler", Config::new(), &args, sample.size().div_ceil(256), 1, 256)
+            self.launch(
+                stream,
+                "euler",
+                Config::new(),
+                &scalars,
+                &bindings,
+                sample.size().div_ceil(256),
+                1,
+                256,
+            )
         }
     }
 
     /// Krea's guidance in place: `cond += scale * (cond - uncond)`, with
     /// diffusers' bf16 rounding at each of its three operations.
-    pub fn guidance(&self, cond: &Tensor, uncond: &Tensor, scale: f32) -> Result<()> {
+    pub fn guidance(
+        &self,
+        stream: &mut Stream,
+        cond: &Tensor,
+        uncond: &Tensor,
+        scale: f32,
+    ) -> Result<()> {
         if cond.rows() != uncond.rows() || cond.cols() != uncond.cols() {
             return Err(Error("guidance tensor dimensions".into()));
         }
-        let mut args = Args::new();
-        args.i32(cond.size() as i32).f32(scale).ptr(cond.ptr()).ptr(uncond.ptr());
+        let scalars = Scalars::new().index(cond.size()).float(scale);
+        let bindings = [cond.binding()?, uncond.binding()?];
         unsafe {
-            self.launch("guidance", Config::new(), &args, cond.size().div_ceil(256), 1, 256)
+            self.launch(
+                stream,
+                "guidance",
+                Config::new(),
+                &scalars,
+                &bindings,
+                cond.size().div_ceil(256),
+                1,
+                256,
+            )
         }
     }
 
@@ -345,6 +439,7 @@ impl Ops {
     #[allow(clippy::too_many_arguments)]
     pub fn attention(
         &self,
+        stream: &mut Stream,
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
@@ -372,11 +467,12 @@ impl Ops {
             .into_iter()
             .enumerate()
             .map(|(index, source)| {
-                let out = self.tensor(rows, dim)?;
-                let mut args = Args::new();
-                args.i32(out.size() as i32).ptr(source.ptr()).ptr(out.ptr());
+                let out = self.tensor(stream, rows, dim)?;
+                let scalars = Scalars::new().index(out.size());
+                let bindings = [source.binding()?, out.binding()?];
                 unsafe {
                     self.launch(
+                        stream,
                         "head_pack",
                         config(&[
                             ("dim", dim),
@@ -388,7 +484,8 @@ impl Ops {
                             ("xsize", source.size()),
                             ("ysize", out.size()),
                         ]),
-                        &args,
+                        &scalars,
+                        &bindings,
                         out.size().div_ceil(256),
                         1,
                         256,
@@ -399,12 +496,13 @@ impl Ops {
             .collect::<Result<Vec<_>>>()?;
 
         let count = batch * heads * tokens * tokens;
-        let scores = self.pool.scratch(count * 4)?;
+        let scores = self.pool.scratch(stream, count * 4)?;
         self.matmul(
+            stream,
             "gemm_bf16_f32_nt",
-            packed[0].ptr(),
-            packed[1].ptr(),
-            scores.ptr(),
+            packed[0].binding()?,
+            packed[1].binding()?,
+            scores.binding(),
             tokens,
             tokens,
             dim,
@@ -413,26 +511,29 @@ impl Ops {
             None,
         )?;
 
-        let probabilities = self.tensor(rows, tokens)?;
-        let mut args = Args::new();
-        args.i32(rows as i32).ptr(scores.ptr()).ptr(probabilities.ptr());
+        let probabilities = self.tensor(stream, rows, tokens)?;
+        let scalars = Scalars::new().index(rows);
+        let bindings = [scores.binding(), probabilities.binding()?];
         unsafe {
             self.launch(
+                stream,
                 if causal { "softmax_causal" } else { "softmax" },
                 config(&[("xsize", count), ("tokens", tokens)]),
-                &args,
+                &scalars,
+                &bindings,
                 rows,
                 1,
                 256,
             )
         }?;
 
-        let weighted = self.tensor(rows, dim)?;
+        let weighted = self.tensor(stream, rows, dim)?;
         self.matmul(
+            stream,
             "gemm_bf16_bf16_nn",
-            probabilities.ptr(),
-            packed[2].ptr(),
-            weighted.ptr(),
+            probabilities.binding()?,
+            packed[2].binding()?,
+            weighted.binding()?,
             tokens,
             dim,
             tokens,
@@ -441,11 +542,12 @@ impl Ops {
             None,
         )?;
 
-        let out = self.tensor(batch * tokens, heads * dim)?;
-        let mut args = Args::new();
-        args.i32(weighted.size() as i32).ptr(weighted.ptr()).ptr(out.ptr());
+        let out = self.tensor(stream, batch * tokens, heads * dim)?;
+        let scalars = Scalars::new().index(weighted.size());
+        let bindings = [weighted.binding()?, out.binding()?];
         unsafe {
             self.launch(
+                stream,
                 "head_unpack",
                 config(&[
                     ("dim", dim),
@@ -455,7 +557,8 @@ impl Ops {
                     ("xsize", weighted.size()),
                     ("ysize", out.size()),
                 ]),
-                &args,
+                &scalars,
+                &bindings,
                 weighted.size().div_ceil(256),
                 1,
                 256,
@@ -469,11 +572,12 @@ impl Ops {
     /// A 1×1 kernel uses GEMM directly.
     pub fn conv(
         &self,
+        stream: &mut Stream,
         x: &Tensor,
         height: usize,
         width: usize,
         w: &Weight,
-        bias: Option<DevicePtr>,
+        bias: Option<View<'_>>,
     ) -> Result<Tensor> {
         if w.shape.len() != 4
             || w.shape[1] != x.cols()
@@ -487,23 +591,24 @@ impl Ops {
         }
         let kernel = w.shape[2];
         if kernel == 1 {
-            return self.linear(x, w, bias);
+            return self.linear(stream, x, w, bias);
         }
         // The values decide the path, because only they know their order.
         if w.layout() == Layout::ChannelsLast {
             if kernel != 3 {
                 return Err(Error("only a 3x3 is packed channels-last".into()));
             }
-            return self.conv3x3(x, height, width, w, bias);
+            return self.conv3x3(stream, x, height, width, w, bias);
         }
-        let patches = self.tensor(height * width, x.cols() * kernel * kernel)?;
-        let mut args = Args::new();
-        args.i32(patches.size() as i32).ptr(x.ptr()).ptr(patches.ptr());
+        let patches = self.tensor(stream, height * width, x.cols() * kernel * kernel)?;
+        let scalars = Scalars::new().index(patches.size());
+        let bindings = [x.binding()?, patches.binding()?];
         // One workgroup per output pixel when a row of channels is a whole
         // number of 32-lane reads.
         let coalesced = kernel == 3 && x.cols().is_multiple_of(32) && x.cols() <= 1024;
         unsafe {
             self.launch(
+                stream,
                 if coalesced { "im2col_coalesced" } else { "im2col" },
                 config(&[
                     ("xsize", x.size()),
@@ -512,36 +617,38 @@ impl Ops {
                     ("height", height),
                     ("kernel", kernel),
                 ]),
-                &args,
+                &scalars,
+                &bindings,
                 if coalesced { height * width } else { patches.size().div_ceil(256) },
                 1,
                 256,
             )
         }?;
-        self.linear(&patches, w, bias)
+        self.linear(stream, &patches, w, bias)
     }
 
     /// Implicit GEMM over `[out, ky, kx, in]` weights, without a patch buffer.
     /// Uses the dense GEMM tile rules with tap-major accumulation.
     fn conv3x3(
         &self,
+        stream: &mut Stream,
         x: &Tensor,
         height: usize,
         width: usize,
         w: &Weight,
-        bias: Option<DevicePtr>,
+        bias: Option<View<'_>>,
     ) -> Result<Tensor> {
         let (m, n, k) = (height * width, w.shape[0], x.cols() * 9);
         if w.count != n * k {
             return Err(Error("convolution dimensions".into()));
         }
-        let y = self.tensor(m, n)?;
+        let y = self.tensor(stream, m, n)?;
         let name =
             if bias.is_some() { "conv3x3_bf16_bf16_nt_bias" } else { "conv3x3_bf16_bf16_nt" };
-        let mut args = Args::new();
-        args.i32(m as i32).f32(1.0).ptr(x.ptr()).ptr(w.values).ptr(y.ptr());
+        let scalars = Scalars::new().index(m).float(1.0);
+        let mut bindings = vec![x.binding()?, w.values()?, y.binding()?];
         if let Some(bias) = bias {
-            args.ptr(bias);
+            bindings.push(bias);
         }
         // Widen only when the larger tile adds no padded rows or columns.
         let wide = m >= 128 && n >= 64 && m.div_ceil(64).is_multiple_of(2);
@@ -554,6 +661,7 @@ impl Ops {
         };
         unsafe {
             self.launch(
+                stream,
                 &name,
                 config(&[
                     ("m", m),
@@ -569,7 +677,8 @@ impl Ops {
                     ("width", width),
                     ("height", height),
                 ]),
-                &args,
+                &scalars,
+                &bindings,
                 n.div_ceil(tile_n),
                 m.div_ceil(tile_m),
                 256,
@@ -579,18 +688,26 @@ impl Ops {
     }
 
     /// Nearest-neighbour 2x, the VAE's upsampler.
-    pub fn upsample(&self, x: &Tensor, height: usize, width: usize) -> Result<Tensor> {
+    pub fn upsample(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        height: usize,
+        width: usize,
+    ) -> Result<Tensor> {
         if height == 0 || width == 0 || height * width != x.rows() {
             return Err(Error("upsampling dimensions".into()));
         }
-        let y = self.tensor(height * width * 4, x.cols())?;
-        let mut args = Args::new();
-        args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
+        let y = self.tensor(stream, height * width * 4, x.cols())?;
+        let scalars = Scalars::new().index(y.size());
+        let bindings = [x.binding()?, y.binding()?];
         unsafe {
             self.launch(
+                stream,
                 "upsample",
                 config(&[("xsize", x.size()), ("channels", x.cols()), ("width", width)]),
-                &args,
+                &scalars,
+                &bindings,
                 y.size().div_ceil(256),
                 1,
                 256,
@@ -604,18 +721,39 @@ impl Ops {
     /// # Safety
     /// The argument layout, allocation extents, launch dimensions, and configuration
     /// must match the embedded kernel. All allocations belong to the current stream.
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn launch(
         &self,
+        stream: &mut Stream,
         name: &str,
         config: Config,
-        args: &Args,
+        scalars: &Scalars,
+        bindings: &[View<'_>],
         grid_x: usize,
         grid_y: usize,
         threads: u32,
     ) -> Result<()> {
-        self.pool.check_stream()?;
-        let kernel = self.kernels.get(name, config, (grid_x as u32, grid_y as u32))?;
-        unsafe { kernel.launch_2d(grid_x as u32, grid_y as u32, threads, args) }?;
+        let kernel = self.kernels.get(stream, name, config, (grid_x as u32, grid_y as u32))?;
+        let constants = scalars.pack(name, &kernel)?;
+        // The runtime validates the block against the size the kernel was
+        // compiled with, which the address-based path never checked. Disagreeing
+        // is a host bug, so say so here rather than launch a different shape.
+        let compiled = kernel.info().workgroup_size;
+        if compiled != [threads, 1, 1] {
+            return Err(Error(format!(
+                "{name}: compiled for workgroup {compiled:?} but the host asked for {threads}"
+            )));
+        }
+        unsafe {
+            stream.dispatch(
+                &kernel,
+                [grid_x as u32, grid_y as u32, 1],
+                compiled,
+                &constants,
+                bindings,
+            )
+        }
+        .map_err(|e| Error(e.to_string()))?;
         Ok(())
     }
 
@@ -627,21 +765,22 @@ impl Ops {
     #[allow(clippy::too_many_arguments)]
     fn matmul(
         &self,
+        stream: &mut Stream,
         name: &str,
-        a: DevicePtr,
-        b: DevicePtr,
-        out: DevicePtr,
+        a: View<'_>,
+        b: View<'_>,
+        out: View<'_>,
         m: usize,
         n: usize,
         k: usize,
         batches: usize,
         alpha: f32,
-        bias: Option<DevicePtr>,
+        bias: Option<View<'_>>,
     ) -> Result<()> {
-        let mut args = Args::new();
-        args.i32(m as i32).f32(alpha).ptr(a).ptr(b).ptr(out);
+        let scalars = Scalars::new().index(m).float(alpha);
+        let mut bindings = vec![a, b, out];
         if let Some(bias) = bias {
-            args.ptr(bias);
+            bindings.push(bias);
         }
         let wide = m >= 128
             && n >= 64
@@ -669,9 +808,11 @@ impl Ops {
         ]);
         unsafe {
             self.launch(
+                stream,
                 &name,
                 config,
-                &args,
+                &scalars,
+                &bindings,
                 n.div_ceil(tile_n),
                 batches * m.div_ceil(tile_m),
                 256,
@@ -697,14 +838,6 @@ pub fn config(entries: &[(&str, usize)]) -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn dimension_mismatches_are_refused_before_any_launch() {
-        // These reject on shape alone, so they need no GPU.
-        let ops = Ops::new(Pool::new());
-        assert!(ops.tensor(0, 8).is_err(), "an empty tensor is not a tensor");
-    }
 
     #[test]
     fn the_matmul_tile_widens_only_when_it_adds_no_padded_rows() {

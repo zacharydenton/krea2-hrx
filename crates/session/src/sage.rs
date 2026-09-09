@@ -9,8 +9,9 @@
 //! 128 for int8, with `[heads][capacity]` float32 scales, so one key tile is
 //! one contiguous block. The correction is
 //! `[query heads][ceil(tokens / 64)][capacity]` in float32.
-use hrx::{device, Args, Buffer, DevicePtr};
-use loom::{cache::PreparedKernels, Config};
+use hrx::{Buffer, Stream, View};
+use kernels::Scalars;
+use kernels::{cache::PreparedKernels, Config};
 
 use crate::{Error, Result};
 
@@ -36,10 +37,36 @@ pub struct Sage {
     centered_k: Buffer,
 }
 
+/// The shapes these kernels serve, checked before anything is allocated, and
+/// the tile count that follows from them. Separate from [`Sage::new`] so it can
+/// be tested without a stream, which naming a buffer now requires.
+fn dimensions(
+    tokens: usize,
+    capacity: usize,
+    heads: usize,
+    kv_heads: usize,
+    bits: u32,
+) -> Result<usize> {
+    let tiles = tokens.div_ceil(64);
+    if !(16..=16896).contains(&tokens)
+        || capacity < tiles * 64
+        || !capacity.is_multiple_of(32)
+        || heads < 1
+        || kv_heads < 1
+        || !heads.is_multiple_of(kv_heads)
+        || heads / kv_heads != 4
+        || (bits != 4 && bits != 8)
+    {
+        return Err(Error::invalid("unsupported Sage dimensions"));
+    }
+    Ok(tiles)
+}
+
 impl Sage {
     /// `bits` is 4 (codes -7..7, 64 bytes per head row) or 8 (-127..127, 128);
     /// the attention kernel of the same width consumes the output.
     pub fn new(
+        stream: &mut Stream,
         tokens: usize,
         capacity: usize,
         heads: usize,
@@ -47,18 +74,7 @@ impl Sage {
         bits: u32,
         compiler: Option<&str>,
     ) -> Result<Sage> {
-        let tiles = tokens.div_ceil(64);
-        if !(16..=16896).contains(&tokens)
-            || capacity < tiles * 64
-            || !capacity.is_multiple_of(32)
-            || heads < 1
-            || kv_heads < 1
-            || !heads.is_multiple_of(kv_heads)
-            || heads / kv_heads != 4
-            || (bits != 4 && bits != 8)
-        {
-            return Err(Error::invalid("unsupported Sage dimensions"));
-        }
+        let tiles = dimensions(tokens, capacity, heads, kv_heads, bits)?;
         // One head's codes: a nibble or a byte per channel of 128.
         let row_bytes = if bits == 4 { 64 } else { 128 };
         let sage = Sage {
@@ -69,36 +85,43 @@ impl Sage {
             kv_heads,
             tiles,
             bits,
-            q4: device().allocate(capacity * heads * row_bytes)?,
-            k4: device().allocate(capacity * kv_heads * row_bytes)?,
-            q_scale: device().allocate(capacity * heads * 4)?,
-            k_scale: device().allocate(capacity * kv_heads * 4)?,
-            correction: device().allocate(heads * tiles * capacity * 4)?,
-            v_transposed: device().allocate(kv_heads * capacity * 128 * 2)?,
-            key_partial: device().allocate(tiles * kv_heads * 128 * 4)?,
-            key_mean: device().allocate(kv_heads * 128 * 4)?,
-            query_mean: device().allocate(heads * tiles * 128 * 4)?,
-            query_mean_half: device().allocate(heads * tiles * 128 * 2)?,
-            centered_k: device().allocate(kv_heads * capacity * 128 * 2)?,
+            q4: stream.allocate(capacity * heads * row_bytes)?,
+            k4: stream.allocate(capacity * kv_heads * row_bytes)?,
+            q_scale: stream.allocate(capacity * heads * 4)?,
+            k_scale: stream.allocate(capacity * kv_heads * 4)?,
+            correction: stream.allocate(heads * tiles * capacity * 4)?,
+            v_transposed: stream.allocate(kv_heads * capacity * 128 * 2)?,
+            key_partial: stream.allocate(tiles * kv_heads * 128 * 4)?,
+            key_mean: stream.allocate(kv_heads * 128 * 4)?,
+            query_mean: stream.allocate(heads * tiles * 128 * 4)?,
+            query_mean_half: stream.allocate(heads * tiles * 128 * 2)?,
+            centered_k: stream.allocate(kv_heads * capacity * 128 * 2)?,
         };
         // The padding past `tokens` is never written but is read as codes, so
         // it starts at zero rather than at whatever the allocator held.
-        device().zero(sage.q4.ptr(), capacity * heads * row_bytes)?;
-        device().zero(sage.q_scale.ptr(), capacity * heads * 4)?;
-        device().zero(sage.v_transposed.ptr(), kv_heads * capacity * 128 * 2)?;
+        stream.fill(sage.q4.binding(), 0)?;
+        stream.fill(sage.q_scale.binding(), 0)?;
+        stream.fill(sage.v_transposed.binding(), 0)?;
         Ok(sage)
     }
 
     /// Prepares one block's Q, K and V, in the session's stream order.
-    pub fn run(&self, q: DevicePtr, k: DevicePtr, v: DevicePtr) -> Result<()> {
+    pub fn run(
+        &self,
+        stream: &mut Stream,
+        q: View<'_>,
+        k: View<'_>,
+        v: View<'_>,
+    ) -> Result<()> {
         let (t, c, h, kv, tiles) =
             (self.tokens, self.capacity, self.heads, self.kv_heads, self.tiles);
 
         // The key mean, over the whole sequence: a partial sum per tile, then
         // one workgroup per head to finish it.
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(k).ptr(self.key_partial.ptr());
+        let scalars = Scalars::new().index(t);
+        let bindings = [k, self.key_partial.binding()];
         self.launch(
+            stream,
             "sage_key_partial",
             &[
                 ("tokens", t),
@@ -107,13 +130,15 @@ impl Sage {
                 ("xsize", c * kv * 128),
                 ("ysize", tiles * kv * 128),
             ],
-            &args,
+            &scalars,
+            &bindings,
             (kv as u32, tiles as u32),
             128,
         )?;
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(self.key_partial.ptr()).ptr(self.key_mean.ptr());
+        let scalars = Scalars::new().index(t);
+        let bindings = [self.key_partial.binding(), self.key_mean.binding()];
         self.launch(
+            stream,
             "sage_key_mean",
             &[
                 ("tokens", t),
@@ -122,16 +147,18 @@ impl Sage {
                 ("xsize", tiles * kv * 128),
                 ("ysize", kv * 128),
             ],
-            &args,
+            &scalars,
+            &bindings,
             (kv as u32, 1),
             128,
         )?;
 
         // The query mean is per tile, not per sequence: each query tile only
         // ever meets the keys once.
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(q).ptr(self.query_mean.ptr()).ptr(self.query_mean_half.ptr());
+        let scalars = Scalars::new().index(t);
+        let bindings = [q, self.query_mean.binding(), self.query_mean_half.binding()];
         self.launch(
+            stream,
             "sage_query_mean",
             &[
                 ("tokens", t),
@@ -140,18 +167,17 @@ impl Sage {
                 ("xsize", c * h * 128),
                 ("ysize", h * tiles * 128),
             ],
-            &args,
+            &scalars,
+            &bindings,
             (tiles as u32, h as u32),
             128,
         )?;
 
-        let mut args = Args::new();
-        args.i32(t as i32)
-            .ptr(q)
-            .ptr(self.query_mean.ptr())
-            .ptr(self.q4.ptr())
-            .ptr(self.q_scale.ptr());
+        let scalars = Scalars::new().index(t);
+        let bindings =
+            [q, self.query_mean.binding(), self.q4.binding(), self.q_scale.binding()];
         self.launch(
+            stream,
             self.quantize("q"),
             &[
                 ("tokens", t),
@@ -163,18 +189,21 @@ impl Sage {
                 ("psize", c * h * 32),
                 ("ssize", c * h),
             ],
-            &args,
+            &scalars,
+            &bindings,
             (t.div_ceil(8) as u32, h as u32),
             256,
         )?;
-        let mut args = Args::new();
-        args.i32(t as i32)
-            .ptr(k)
-            .ptr(self.key_mean.ptr())
-            .ptr(self.k4.ptr())
-            .ptr(self.k_scale.ptr())
-            .ptr(self.centered_k.ptr());
+        let scalars = Scalars::new().index(t);
+        let bindings = [
+            k,
+            self.key_mean.binding(),
+            self.k4.binding(),
+            self.k_scale.binding(),
+            self.centered_k.binding(),
+        ];
         self.launch(
+            stream,
             self.quantize("k"),
             &[
                 ("tokens", t),
@@ -186,18 +215,21 @@ impl Sage {
                 ("psize", c * kv * 32),
                 ("ssize", c * kv),
             ],
-            &args,
+            &scalars,
+            &bindings,
             // Over the capacity, not the tokens: the padded rows are read.
             (c.div_ceil(8) as u32, kv as u32),
             256,
         )?;
 
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(v).ptr(self.v_transposed.ptr());
+        let scalars = Scalars::new().index(t);
+        let bindings = [v, self.v_transposed.binding()];
         self.launch(
+            stream,
             "sage_transpose",
             &[("width", kv * 128), ("row_capacity", c)],
-            &args,
+            &scalars,
+            &bindings,
             (t.div_ceil(32) as u32, (kv * 128 / 32) as u32),
             256,
         )?;
@@ -206,13 +238,14 @@ impl Sage {
         // what the kernel adds back to each score.
         let (m, n) = (tiles * 4, c);
         let (a_stride, b_stride) = (m * 128, n * 128);
-        let mut args = Args::new();
-        args.i32(m as i32)
-            .f32(1.0)
-            .ptr(self.query_mean_half.ptr())
-            .ptr(self.centered_k.ptr())
-            .ptr(self.correction.ptr());
+        let scalars = Scalars::new().index(m).float(1.0);
+        let bindings = [
+            self.query_mean_half.binding(),
+            self.centered_k.binding(),
+            self.correction.binding(),
+        ];
         self.launch(
+            stream,
             "gemm_f16_f32_nt",
             &[
                 ("m", m),
@@ -224,7 +257,8 @@ impl Sage {
                 ("astride", a_stride),
                 ("bstride", b_stride),
             ],
-            &args,
+            &scalars,
+            &bindings,
             (n.div_ceil(64) as u32, (kv * m.div_ceil(64)) as u32),
             256,
         )
@@ -239,18 +273,30 @@ impl Sage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         &self,
+        stream: &mut Stream,
         name: &str,
         config: &[(&str, usize)],
-        args: &Args,
+        scalars: &Scalars,
+        bindings: &[View<'_>],
         grid: (u32, u32),
         threads: u32,
     ) -> Result<()> {
         let config: Config =
             config.iter().map(|(key, value)| ((*key).to_string(), *value as u64)).collect();
-        let kernel = self.kernels.get(name, config, grid)?;
-        unsafe { kernel.launch_2d(grid.0, grid.1, threads, args) }?;
+        let kernel = self.kernels.get(stream, name, config, grid)?;
+        let constants = scalars.pack(name, &kernel)?;
+        let compiled = kernel.info().workgroup_size;
+        if compiled != [threads, 1, 1] {
+            return Err(Error::failed(format!(
+                "{name}: compiled for workgroup {compiled:?} but the host asked for {threads}"
+            )));
+        }
+        unsafe {
+            stream.dispatch(&kernel, [grid.0, grid.1, 1], compiled, &constants, bindings)
+        }?;
         Ok(())
     }
 }
@@ -261,7 +307,8 @@ mod tests {
 
     #[test]
     fn the_shapes_the_kernels_cannot_serve_are_refused() {
-        // No device is touched: these fail on arithmetic alone.
+        // No device is touched: these fail on arithmetic alone, which is why
+        // the check is a free function rather than the first act of `new`.
         for (tokens, capacity, heads, kv, bits, why) in [
             (8usize, 64usize, 48usize, 12usize, 4u32, "too few tokens"),
             (64, 64, 48, 12, 5, "an unsupported width"),
@@ -269,10 +316,11 @@ mod tests {
             (64, 66, 48, 12, 4, "a capacity off the 32-row grid"),
             (64, 64, 24, 12, 4, "a group size that is not four"),
         ] {
-            let Err(error) = Sage::new(tokens, capacity, heads, kv, bits, None) else {
+            let Err(error) = dimensions(tokens, capacity, heads, kv, bits) else {
                 panic!("{why} was accepted");
             };
             assert!(error.message.contains("unsupported Sage dimensions"), "{why}");
         }
+        assert!(dimensions(4115, 4160, 48, 12, 4).is_ok(), "the session's own shape");
     }
 }

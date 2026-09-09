@@ -45,7 +45,7 @@ krea2 --width 1504 --height 640 --seed 9 --out canyon.png \
   resident. The transformer checkpoint alone is about 13 GB.
 
 Builds, tests, and model execution use Rust. Kernel sources are maintained directly
-in `crates/loom/kernels`. See the [runtime guide](docs/hrx-runtime.md) for deployment
+in `crates/kernels/kernels`. See the [runtime guide](docs/hrx-runtime.md) for deployment
 and [native tests](docs/testing.md) for validation.
 
 ## Install
@@ -59,9 +59,8 @@ hrx prepare hrx-linux-x86_64-gfx1151.tar.gz
 cargo install --locked --path cli
 ```
 
-The native bundle is pinned by hash. The HRX repository is currently private;
-follow the [runtime guide](docs/hrx-runtime.md) to download its release with
-GitHub credentials before `hrx prepare`.
+The native bundle is pinned by hash. See the
+[runtime guide](docs/hrx-runtime.md) for what `hrx prepare` fetches.
 
 ## Models
 

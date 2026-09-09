@@ -59,9 +59,9 @@ pub struct Plan {
     pub bits: u32,
 }
 
-/// Operand row pitch in k elements, from `loom::shape`, in bytes for int8.
+/// Operand row pitch in k elements, from `kernels::shape`, in bytes for int8.
 fn device_row_bytes(row_bytes: usize, bits: u32) -> usize {
-    loom::shape::gemm_pitch(row_bytes as i32 * 8 / bits as i32, bits as i32) as usize
+    kernels::shape::gemm_pitch(row_bytes as i32 * 8 / bits as i32, bits as i32) as usize
         * bits as usize
         / 8
 }

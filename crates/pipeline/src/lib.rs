@@ -10,7 +10,7 @@ pub mod schedule;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hrx::device;
+use hrx::Stream;
 use krea2_models::Models;
 use krea2_numerics::{from_f32, to_f32};
 use krea2_ops::Tensor;
@@ -47,7 +47,7 @@ macro_rules! from_error {
 
 from_error!(
     hrx::Error,
-    loom::Error,
+    kernels::Error,
     krea2_models::Error,
     krea2_ops::Error,
     krea2_session::Error
@@ -143,7 +143,6 @@ impl<T> ShapeCache<T> {
 /// Everything resident: the three models, the block weights, and whichever
 /// two most recently used block sessions.
 pub struct Pipeline {
-    stream: Arc<hrx::Device>,
     files: Files,
     compiler: Option<String>,
     models: Models,
@@ -151,8 +150,11 @@ pub struct Pipeline {
     state: Mutex<State>,
 }
 
-#[derive(Default)]
+/// The stream lives here rather than beside the buffers: it is `!Sync` and
+/// almost every operation on it needs `&mut`, and this is the lock that already
+/// serialized calls because they share the models' pool.
 struct State {
+    stream: Stream,
     weights: Option<Arc<Weights>>,
     blocks: ShapeCache<Blocks>,
 }
@@ -160,14 +162,15 @@ struct State {
 impl Pipeline {
     /// `compiler` of `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
-        let stream = hrx::Device::open()?;
-        let _scope = stream.enter();
+        // Built before the state so the models allocate on the stream that will
+        // later dispatch them; allocation only needs a shared borrow.
+        let mut stream = Stream::open()?;
+        let models = Models::open(&mut stream, &files, compiler)?;
         Ok(Pipeline {
-            stream: stream.clone(),
-            models: Models::open(&files, compiler)?,
+            models,
             files,
             compiler: compiler.map(str::to_string),
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State { stream, weights: None, blocks: ShapeCache::default() }),
         })
     }
 
@@ -194,28 +197,28 @@ impl Pipeline {
 
     /// A prompt encoded through Krea's template: float32 `[tokens][12][2560]`.
     pub fn encode(&self, prompt: &str) -> Result<(usize, Vec<f32>)> {
-        let _scope = self.stream.enter();
-        let _serialized = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
+        let State { stream, .. } = &mut *state;
         let ids = self.models.tokenizer.prompt(prompt).map_err(krea2_models::Error::from)?;
-        let taps = self.models.encode(&ids)?;
-        device().synchronize()?;
-        Ok((ids.len() - 34, downloaded(&taps)?))
+        let taps = self.models.encode(stream, &ids)?;
+        stream.synchronize()?;
+        Ok((ids.len() - 34, downloaded(stream, &taps)?))
     }
 
     /// Latents to RGB8 HWC.
     pub fn decode(&self, latents: &[f32], width: usize, height: usize) -> Result<Vec<u8>> {
-        let _scope = self.stream.enter();
         dimensions(width, height)?;
-        let _serialized = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
-        let packed = self.upload(latents, width / PATCH * (height / PATCH), 64)?;
-        let rgb = self.models.decode(&packed, height, width)?;
-        device().synchronize()?;
+        let State { stream, .. } = &mut *state;
+        let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
+        let rgb = self.models.decode(stream, &packed, height, width)?;
+        stream.synchronize()?;
         Ok(rgb)
     }
 
@@ -230,7 +233,6 @@ impl Pipeline {
         height: usize,
         timestep: f32,
     ) -> Result<Vec<f32>> {
-        let _scope = self.stream.enter();
         dimensions(width, height)?;
         if !(1..=512).contains(&text_tokens) || !(0.0..=1.0).contains(&timestep) {
             return Err(Error("invalid transformer arguments".into()));
@@ -239,13 +241,22 @@ impl Pipeline {
             .state
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
-        let taps = self.upload(text, text_tokens * 12, 2560)?;
-        let conditioning = self.models.text_fusion(&taps)?;
-        let packed = self.upload(latents, width / PATCH * (height / PATCH), 64)?;
-        let velocity =
-            self.forward(&mut state, &packed, &conditioning, timestep, width, height)?;
-        device().synchronize()?;
-        downloaded(&velocity)
+        let State { stream, weights, blocks } = &mut *state;
+        let taps = self.upload(stream, text, text_tokens * 12, 2560)?;
+        let conditioning = self.models.text_fusion(stream, &taps)?;
+        let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
+        let velocity = self.forward(
+            stream,
+            weights,
+            blocks,
+            &packed,
+            &conditioning,
+            timestep,
+            width,
+            height,
+        )?;
+        stream.synchronize()?;
+        downloaded(stream, &velocity)
     }
 
     /// One image. `progress` is called after each step and may cancel.
@@ -254,7 +265,6 @@ impl Pipeline {
         request: &Request,
         mut progress: Option<Progress>,
     ) -> Result<Vec<u8>> {
-        let _scope = self.stream.enter();
         let (width, height) = (request.width, request.height);
         dimensions(width, height)?;
         let guidance = request.guidance.unwrap_or(if self.distilled() { 0.0 } else { 3.5 });
@@ -270,109 +280,125 @@ impl Pipeline {
             .state
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
+        let State { stream, weights, blocks } = &mut *state;
         let began = std::time::Instant::now();
-        let mut timing = Profile::new("generate");
+        let mut timing = Profile::new(stream, "generate");
 
         let latents = match request.initial_latents {
-            Some(values) => self.upload(values, image_tokens, 64)?,
+            Some(values) => self.upload(stream, values, image_tokens, 64)?,
             None => {
                 let values = noise::latents(request.seed, image_tokens * 64);
-                self.upload(&values, image_tokens, 64)?
+                self.upload(stream, &values, image_tokens, 64)?
             }
         };
-        let text = self.conditioning(request.prompt)?;
+        let text = self.conditioning(stream, request.prompt)?;
         let guided = guidance > 0.0;
-        let uncond =
-            if guided { Some(self.conditioning(request.negative_prompt)?) } else { None };
-        timing.mark("encode and text fusion")?;
+        let uncond = if guided {
+            Some(self.conditioning(stream, request.negative_prompt)?)
+        } else {
+            None
+        };
+        timing.mark(stream, "encode and text fusion")?;
 
         // Turbo's shift is fixed; Raw's follows the image's token count.
         let mu = if self.distilled() { 1.15 } else { schedule::dynamic_mu(image_tokens) };
         for step in 0..steps {
             let sigma = schedule::sigma(step, steps, mu);
             let next = schedule::sigma(step + 1, steps, mu);
-            let velocity = self.forward(&mut state, &latents, &text, sigma, width, height)?;
+            let velocity =
+                self.forward(stream, weights, blocks, &latents, &text, sigma, width, height)?;
             if let Some(uncond) = &uncond {
-                let unguided =
-                    self.forward(&mut state, &latents, uncond, sigma, width, height)?;
-                self.models.ops.guidance(&velocity, &unguided, guidance)?;
+                let unguided = self
+                    .forward(stream, weights, blocks, &latents, uncond, sigma, width, height)?;
+                self.models.ops.guidance(stream, &velocity, &unguided, guidance)?;
             }
-            self.models.ops.euler_step(&latents, &velocity, next - sigma)?;
+            self.models.ops.euler_step(stream, &latents, &velocity, next - sigma)?;
             if let Some(progress) = progress.as_deref_mut() {
-                device().synchronize()?;
+                stream.synchronize()?;
                 if !progress(step + 1, steps, began.elapsed().as_secs_f64()) {
                     return Err(Error("cancelled".into()));
                 }
             }
         }
-        timing.mark("denoise")?;
-        let rgb = self.models.decode(&latents, height, width)?;
-        device().synchronize()?;
-        timing.mark("VAE decode")?;
+        timing.mark(stream, "denoise")?;
+        let rgb = self.models.decode(stream, &latents, height, width)?;
+        stream.synchronize()?;
+        timing.mark(stream, "VAE decode")?;
         Ok(rgb)
     }
 
     /// A prompt through the tokenizer, the encoder and the fusion tower.
-    fn conditioning(&self, prompt: &str) -> Result<Tensor> {
+    fn conditioning(&self, stream: &mut Stream, prompt: &str) -> Result<Tensor> {
         let ids = self.models.tokenizer.prompt(prompt).map_err(krea2_models::Error::from)?;
-        let taps = self.models.encode(&ids)?;
-        Ok(self.models.text_fusion(&taps)?)
+        let taps = self.models.encode(stream, &ids)?;
+        Ok(self.models.text_fusion(stream, &taps)?)
     }
 
     /// Text and image tokens through the 28 blocks and the final layer.
+    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
-        state: &mut State,
+        stream: &mut Stream,
+        weights: &mut Option<Arc<Weights>>,
+        cache: &mut ShapeCache<Blocks>,
         latents: &Tensor,
         text: &Tensor,
         timestep: f32,
         width: usize,
         height: usize,
     ) -> Result<Tensor> {
-        let mut timing = Profile::new("forward");
+        let mut timing = Profile::new(stream, "forward");
         let image_tokens = width / PATCH * (height / PATCH);
         let tokens = text.rows() + image_tokens;
-        let (embedding, modulation) = self.models.time(timestep)?;
-        let image = self.models.image_in(latents)?;
+        let (embedding, modulation) = self.models.time(stream, timestep)?;
+        let image = self.models.image_in(stream, latents)?;
 
         // The residual stream is the conditioning followed by the image.
-        let x = self.models.ops.tensor(tokens, WIDTH)?;
-        device().copy_device_to_device(x.ptr(), text.ptr(), text.size() * 2)?;
-        device().copy_device_to_device(
-            x.ptr().offset(text.size() * 2),
-            image.ptr(),
-            image.size() * 2,
-        )?;
+        let x = self.models.ops.tensor(stream, tokens, WIDTH)?;
+        stream.copy(x.binding()?.slice(0, text.size() * 2)?, text.binding()?)?;
+        stream
+            .copy(x.binding()?.slice(text.size() * 2, image.size() * 2)?, image.binding()?)?;
 
-        timing.mark("embeddings")?;
-        let blocks = self.prepare(state, tokens)?;
-        timing.mark("prepare session")?;
-        let mods = self.models.modulation(&modulation)?;
+        timing.mark(stream, "embeddings")?;
+        let mods = self.models.modulation(stream, &modulation)?;
+        let blocks = self.prepare(stream, weights, cache, tokens)?;
+        timing.mark(stream, "prepare session")?;
         self.rope(&mut blocks.rope, width, height, text.rows());
-        timing.mark("modulation and rope")?;
-        unsafe {
-            blocks.session.run_device(x.ptr(), mods.ptr(), &blocks.rope.cos, &blocks.rope.sin)
-        }?;
-        timing.mark("blocks")?;
+        timing.mark(stream, "modulation and rope")?;
+        blocks.session.run_device(
+            stream,
+            x.binding()?,
+            mods.binding(),
+            &blocks.rope.cos,
+            &blocks.rope.sin,
+        )?;
+        timing.mark(stream, "blocks")?;
 
         let output = x.view(image_tokens, WIDTH, text.rows() * WIDTH)?;
-        let velocity = self.models.last(&output, &embedding)?;
-        timing.mark("final layer")?;
+        let velocity = self.models.last(stream, &output, &embedding)?;
+        timing.mark(stream, "final layer")?;
         Ok(velocity)
     }
 
     /// Reuse either guidance shape. Weights are shared by both workspaces.
-    fn prepare<'a>(&self, state: &'a mut State, tokens: usize) -> Result<&'a mut Blocks> {
-        let weights = match &state.weights {
+    fn prepare<'a>(
+        &self,
+        stream: &mut Stream,
+        weights: &mut Option<Arc<Weights>>,
+        cache: &'a mut ShapeCache<Blocks>,
+        tokens: usize,
+    ) -> Result<&'a mut Blocks> {
+        let resident = match &*weights {
             Some(weights) => Arc::clone(weights),
             None => {
-                let loaded = Arc::new(Weights::load(&self.files.checkpoint)?);
-                state.weights = Some(Arc::clone(&loaded));
+                let loaded = Arc::new(Weights::load(stream, &self.files.checkpoint)?);
+                *weights = Some(Arc::clone(&loaded));
                 loaded
             }
         };
-        state.blocks.get_or_try_insert_with(tokens, || {
-            let session = Session::with_weights(weights, tokens, 28, self.compiler.as_deref())?;
+        cache.get_or_try_insert_with(tokens, || {
+            let session =
+                Session::with_weights(stream, resident, tokens, 28, self.compiler.as_deref())?;
             Ok(Blocks { session, rope: Rope::default() })
         })
     }
@@ -413,7 +439,13 @@ impl Pipeline {
     }
 
     /// Float32 in, bf16 on the device, refusing what bf16 cannot hold.
-    fn upload(&self, values: &[f32], rows: usize, cols: usize) -> Result<Tensor> {
+    fn upload(
+        &self,
+        stream: &mut Stream,
+        values: &[f32],
+        rows: usize,
+        cols: usize,
+    ) -> Result<Tensor> {
         if values.len() != rows * cols {
             return Err(Error("wrong input buffer size".into()));
         }
@@ -428,12 +460,12 @@ impl Pipeline {
             }
             bits.push(rounded);
         }
-        Ok(Tensor::from_slice(self.models.ops.pool(), &bits, rows, cols)?)
+        Ok(Tensor::from_slice(self.models.ops.pool(), stream, &bits, rows, cols)?)
     }
 }
 
-fn downloaded(tensor: &Tensor) -> Result<Vec<f32>> {
-    Ok(tensor.download()?.into_iter().map(to_f32).collect())
+fn downloaded(stream: &mut Stream, tensor: &Tensor) -> Result<Vec<f32>> {
+    Ok(tensor.download(stream)?.into_iter().map(to_f32).collect())
 }
 
 fn dimensions(width: usize, height: usize) -> Result<()> {

@@ -55,7 +55,7 @@ is an empirical choice on gfx1151.
 
 ## Validation
 
-- `crates/loom/tests/quantized.rs`: production fp16 attention and quantized
+- `crates/kernels/tests/quantized.rs`: production fp16 attention and quantized
   preparation against independent softmax and Hadamard references, including
   padded and partial tiles.
 - `crates/pipeline/tests/unquantized_parity.rs`, via `scripts/parity.sh`:

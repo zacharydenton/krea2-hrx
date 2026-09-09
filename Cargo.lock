@@ -1212,11 +1212,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "hrx"
+name = "hrx-rs"
 version = "0.1.0"
-source = "git+https://github.com/zacharydenton/hrx.rs?rev=be89b44652af6adf17c5c950d0759f92c2e88582#be89b44652af6adf17c5c950d0759f92c2e88582"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46f435fb6db94df0b7ab9af8755f6216fdc9798faf3bad7ed76f4f25f5d4a4df"
 dependencies = [
- "bytemuck",
  "flate2",
  "libc",
  "libloading",
@@ -1616,16 +1616,18 @@ dependencies = [
 name = "krea2-checkpoint"
 version = "0.1.0"
 dependencies = [
- "loom",
+ "krea2-kernels",
  "memmap2",
  "safetensors",
 ]
 
 [[package]]
-name = "krea2-hrx"
+name = "krea2-kernels"
 version = "0.1.0"
 dependencies = [
- "hrx",
+ "bytemuck",
+ "half",
+ "hrx-rs",
 ]
 
 [[package]]
@@ -1634,8 +1636,9 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "hf-hub",
+ "hrx-rs",
  "krea2-checkpoint",
- "krea2-hrx",
+ "krea2-kernels",
  "krea2-numerics",
  "krea2-ops",
  "krea2-tokenizer",
@@ -1652,21 +1655,22 @@ dependencies = [
 name = "krea2-ops"
 version = "0.1.0"
 dependencies = [
- "krea2-hrx",
+ "bytemuck",
+ "hrx-rs",
+ "krea2-kernels",
  "krea2-numerics",
- "loom",
 ]
 
 [[package]]
 name = "krea2-pipeline"
 version = "0.1.0"
 dependencies = [
- "krea2-hrx",
+ "hrx-rs",
+ "krea2-kernels",
  "krea2-models",
  "krea2-numerics",
  "krea2-ops",
  "krea2-session",
- "loom",
  "png",
  "rand 0.9.5",
  "rand_chacha",
@@ -1680,9 +1684,9 @@ name = "krea2-session"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "hrx-rs",
  "krea2-checkpoint",
- "krea2-hrx",
- "loom",
+ "krea2-kernels",
 ]
 
 [[package]]
@@ -1759,16 +1763,6 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
-
-[[package]]
-name = "loom"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "hrx",
- "krea2-hrx",
-]
 
 [[package]]
 name = "lru-slab"

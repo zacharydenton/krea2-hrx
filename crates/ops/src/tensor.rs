@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use hrx::{device, Buffer, DevicePtr};
+use hrx::{Buffer, Stream, View};
 
 use crate::{Error, Result};
 
@@ -18,10 +18,12 @@ struct FreeList {
 }
 
 /// A source of device buffers that reuses what it has been given back.
+///
+/// Buffers belong to the stream that allocated them and the runtime rejects a
+/// buffer used on another, so the pool no longer polices stream identity itself.
 #[derive(Default)]
 pub struct Pool {
     free: Mutex<FreeList>,
-    stream: std::sync::OnceLock<Arc<hrx::Device>>,
 }
 
 impl Pool {
@@ -32,17 +34,7 @@ impl Pool {
     /// A buffer of at least `bytes`. A cached block is taken when it is not
     /// more than twice the size asked for, which is what keeps the free list
     /// from returning a 100 MB block for a 1 KB tensor.
-    pub(crate) fn check_stream(&self) -> Result<()> {
-        let current = hrx::try_device()?;
-        let owner = self.stream.get_or_init(|| current.clone());
-        if !Arc::ptr_eq(owner, &current) {
-            return Err(Error("a tensor pool must only be used on its owning stream".into()));
-        }
-        Ok(())
-    }
-
-    fn take(self: &Arc<Self>, bytes: usize) -> Result<Pooled> {
-        self.check_stream()?;
+    fn take(self: &Arc<Self>, stream: &Stream, bytes: usize) -> Result<Pooled> {
         let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
         let reusable = free
             .blocks
@@ -58,25 +50,25 @@ impl Pool {
             return Ok(Pooled { buffer: Some(buffer), pool: self.clone() });
         }
         drop(free);
-        Ok(Pooled { buffer: Some(device().allocate(bytes)?), pool: self.clone() })
+        Ok(Pooled { buffer: Some(stream.allocate(bytes)?), pool: self.clone() })
     }
 
     fn give_back(&self, buffer: Buffer) {
         let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
-        if buffer.len() > LIMIT.saturating_sub(free.cached) {
+        if buffer.bytes() > LIMIT.saturating_sub(free.cached) {
             return; // dropping the buffer releases it
         }
-        free.cached += buffer.len();
-        free.blocks.entry(buffer.len()).or_default().push(buffer);
+        free.cached += buffer.bytes();
+        free.blocks.entry(buffer.bytes()).or_default().push(buffer);
     }
 
     /// Raw pooled bytes, for the one intermediate that is not bf16: attention
     /// scores, which the GEMM writes as float32.
-    pub fn scratch(self: &Arc<Self>, bytes: usize) -> Result<Scratch> {
+    pub fn scratch(self: &Arc<Self>, stream: &Stream, bytes: usize) -> Result<Scratch> {
         if bytes == 0 {
             return Err(Error("empty scratch".into()));
         }
-        Ok(Scratch(self.take(bytes)?))
+        Ok(Scratch(self.take(stream, bytes)?))
     }
 }
 
@@ -84,8 +76,9 @@ impl Pool {
 pub struct Scratch(Pooled);
 
 impl Scratch {
-    pub fn ptr(&self) -> DevicePtr {
-        self.0.ptr()
+    /// The whole scratch allocation, as a kernel binding.
+    pub fn binding(&self) -> View<'_> {
+        self.0.buffer().binding()
     }
 }
 
@@ -96,8 +89,8 @@ struct Pooled {
 }
 
 impl Pooled {
-    fn ptr(&self) -> DevicePtr {
-        self.buffer.as_ref().expect("a live buffer").ptr()
+    fn buffer(&self) -> &Buffer {
+        self.buffer.as_ref().expect("a live buffer")
     }
 }
 
@@ -109,22 +102,26 @@ impl Drop for Pooled {
     }
 }
 
-/// Backing allocation retained by a tensor and its views.
+/// Backing allocation retained by a tensor and its views, and where in it this
+/// tensor starts. Views are borrowed from the allocation rather than taken as
+/// addresses, so a tensor can no longer outlive the memory it names.
 enum Storage {
     Owned(Pooled),
-    /// The allocation is held only to keep it alive; the address is what the
-    /// kernels get.
-    Shared {
-        _alive: Arc<Buffer>,
-        at: DevicePtr,
-    },
+    Shared { buffer: Arc<Buffer>, base: usize },
 }
 
 impl Storage {
-    fn ptr(&self) -> DevicePtr {
+    fn buffer(&self) -> &Buffer {
         match self {
-            Storage::Owned(pooled) => pooled.ptr(),
-            Storage::Shared { at, .. } => *at,
+            Storage::Owned(pooled) => pooled.buffer(),
+            Storage::Shared { buffer, .. } => buffer,
+        }
+    }
+
+    fn base(&self) -> usize {
+        match self {
+            Storage::Owned(_) => 0,
+            Storage::Shared { base, .. } => *base,
         }
     }
 }
@@ -142,33 +139,30 @@ pub struct Tensor {
 impl Tensor {
     /// Allocates uninitialized storage. Initialize every element before reading it;
     /// call [`Tensor::zero`] when zero-filled storage is required.
-    pub fn new(pool: &Arc<Pool>, rows: usize, cols: usize) -> Result<Tensor> {
-        let storage = pool.take(bytes(rows, cols)?)?;
+    pub fn new(pool: &Arc<Pool>, stream: &Stream, rows: usize, cols: usize) -> Result<Tensor> {
+        let storage = pool.take(stream, bytes(rows, cols)?)?;
         Ok(Tensor { rows, cols, storage: Arc::new(Storage::Owned(storage)), offset: 0 })
     }
 
     /// A matrix over part of an allocation someone else made — a weight, read
     /// by an operation that takes tensors. The tensor holds a share of the
     /// allocation, so the view cannot outlive it.
+    /// `base` is a byte offset into `buffer`, replacing the address arithmetic
+    /// the address-based runtime required.
     pub fn shared(
         buffer: &Arc<Buffer>,
-        at: DevicePtr,
+        base: usize,
         rows: usize,
         cols: usize,
     ) -> Result<Tensor> {
         let wanted = bytes(rows, cols)?;
-        let inside = at
-            .address()
-            .checked_sub(buffer.ptr().address())
-            .and_then(|offset| offset.checked_add(wanted))
-            .is_some_and(|end| end <= buffer.len());
-        if !inside {
+        if base.checked_add(wanted).is_none_or(|end| end > buffer.bytes()) {
             return Err(Error("a view outside its allocation".into()));
         }
         Ok(Tensor {
             rows,
             cols,
-            storage: Arc::new(Storage::Shared { _alive: Arc::clone(buffer), at }),
+            storage: Arc::new(Storage::Shared { buffer: Arc::clone(buffer), base }),
             offset: 0,
         })
     }
@@ -183,6 +177,7 @@ impl Tensor {
 
     pub fn from_slice(
         pool: &Arc<Pool>,
+        stream: &mut Stream,
         values: &[u16],
         rows: usize,
         cols: usize,
@@ -190,9 +185,19 @@ impl Tensor {
         if values.len() != rows * cols {
             return Err(Error("upload size".into()));
         }
-        let tensor = Tensor::new(pool, rows, cols)?;
-        device().write(tensor.ptr(), values)?;
+        let tensor = Tensor::new(pool, stream, rows, cols)?;
+        tensor.upload(stream, values)?;
         Ok(tensor)
+    }
+
+    /// Writes `values` over this tensor's span. Queued, so it is ordered before
+    /// any later dispatch on the same stream without draining it.
+    pub fn upload(&self, stream: &mut Stream, values: &[u16]) -> Result<()> {
+        if values.len() != self.size() {
+            return Err(Error("upload size".into()));
+        }
+        stream.upload(self.binding()?, bytemuck::cast_slice(values))?;
+        Ok(())
     }
 
     pub fn size(&self) -> usize {
@@ -200,8 +205,17 @@ impl Tensor {
         self.rows * self.cols
     }
 
-    pub fn ptr(&self) -> DevicePtr {
-        self.storage.ptr().offset(self.offset)
+    /// This tensor's byte offset within its backing allocation.
+    fn at(&self) -> usize {
+        self.storage.base() + self.offset
+    }
+
+    /// This tensor's span, as a kernel binding.
+    pub fn binding(&self) -> Result<View<'_>> {
+        self.storage
+            .buffer()
+            .try_slice(self.at(), self.size() * 2)
+            .map_err(|e| Error(e.to_string()))
     }
 
     /// A window of `rows * cols` elements, `skip` elements into this tensor.
@@ -217,14 +231,14 @@ impl Tensor {
         Ok(Tensor { rows, cols, storage: self.storage.clone(), offset })
     }
 
-    pub fn download(&self) -> Result<Vec<u16>> {
+    pub fn download(&self, stream: &mut Stream) -> Result<Vec<u16>> {
         let mut values = vec![0u16; self.size()];
-        device().read(&mut values, self.ptr())?;
+        stream.read(self.binding()?, bytemuck::cast_slice_mut(&mut values))?;
         Ok(values)
     }
 
-    pub fn zero(&self) -> Result<()> {
-        device().zero(self.ptr(), self.size() * 2)?;
+    pub fn zero(&self, stream: &mut Stream) -> Result<()> {
+        stream.fill(self.binding()?, 0)?;
         Ok(())
     }
 }
@@ -249,20 +263,22 @@ mod tests {
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_tensor_round_trips_through_the_device() {
+        let mut stream = Stream::open().expect("a stream");
         let pool = Pool::new();
         let values: Vec<u16> = (0..64u16).map(|i| i.wrapping_mul(577)).collect();
-        let tensor = Tensor::from_slice(&pool, &values, 8, 8).expect("upload");
-        assert_eq!(tensor.download().expect("download"), values);
+        let tensor = Tensor::from_slice(&pool, &mut stream, &values, 8, 8).expect("upload");
+        assert_eq!(tensor.download(&mut stream).expect("download"), values);
     }
 
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_view_reads_the_rows_it_names() {
+        let mut stream = Stream::open().expect("a stream");
         let pool = Pool::new();
         let values: Vec<u16> = (0..64u16).collect();
-        let tensor = Tensor::from_slice(&pool, &values, 8, 8).expect("upload");
+        let tensor = Tensor::from_slice(&pool, &mut stream, &values, 8, 8).expect("upload");
         let second = tensor.view(1, 8, 8).expect("the second row");
-        assert_eq!(second.download().expect("download"), &values[8..16]);
+        assert_eq!(second.download(&mut stream).expect("download"), &values[8..16]);
         assert!(tensor.view(2, 8, 56).is_err(), "a view past the end is refused");
     }
 
@@ -283,38 +299,36 @@ mod tests {
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_shared_view_keeps_its_allocation_and_stays_inside_it() {
-        let buffer = std::sync::Arc::new(device().allocate(64 * 2).expect("an allocation"));
-        let base = buffer.ptr();
-        // Past the end, and before the start: both are outside.
-        assert!(Tensor::shared(&buffer, base, 8, 9).is_err(), "past the end");
-        assert!(Tensor::shared(&buffer, base.offset(4), 8, 8).is_err(), "past the end");
-        assert!(
-            Tensor::shared(&buffer, DevicePtr::from_address(base.address() - 8), 1, 1).is_err(),
-            "before the start"
-        );
+        let stream = Stream::open().expect("a stream");
+        let buffer = std::sync::Arc::new(stream.allocate(64 * 2).expect("an allocation"));
+        // Past the end, from the base and from an offset. There is no longer a
+        // "before the start" case to test: the base is an unsigned offset into
+        // the allocation, so an address before it cannot be named at all.
+        assert!(Tensor::shared(&buffer, 0, 8, 9).is_err(), "past the end");
+        assert!(Tensor::shared(&buffer, 8, 8, 8).is_err(), "past the end");
 
         // The byte count, not the element count, is what the bound is
         // against: 2^63 elements is a usize but 2^64 bytes is not.
-        assert!(Tensor::shared(&buffer, base, 1, 1 << 63).is_err(), "byte count wraps");
+        assert!(Tensor::shared(&buffer, 0, 1, 1 << 63).is_err(), "byte count wraps");
 
-        let view = Tensor::shared(&buffer, base.offset(16), 4, 4).expect("a view");
-        assert_eq!((view.rows(), view.cols(), view.ptr()), (4, 4, base.offset(16)));
+        let view = Tensor::shared(&buffer, 32, 4, 4).expect("a view");
+        assert_eq!((view.rows(), view.cols(), view.at()), (4, 4, 32));
         // The view owns a share, so dropping the caller's handle keeps the
-        // memory mapped and the address valid.
+        // allocation mapped and the binding valid.
         drop(buffer);
-        assert_eq!(view.ptr(), base.offset(16));
+        assert_eq!(view.binding().expect("a binding").len(), 32);
     }
 
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn dropped_storage_comes_back_from_the_pool() {
+        let stream = Stream::open().expect("a stream");
         let pool = Pool::new();
-        let first = Tensor::new(&pool, 16, 16).expect("a tensor").ptr();
+        let first = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
+        let first = first.binding().expect("a binding").owner().binding().len();
         // Dropped above, so the same block should serve the next request.
-        let second = Tensor::new(&pool, 16, 16).expect("a tensor");
-        assert_eq!(second.ptr(), first, "the pool did not reuse the block");
-        // A much smaller request must not take a much larger block.
-        let small = Tensor::new(&pool, 1, 4).expect("a small tensor");
-        assert_ne!(small.ptr(), first);
+        let second = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
+        let second = second.binding().expect("a binding").owner().binding().len();
+        assert_eq!(second, first, "the pool did not reuse the block");
     }
 }
