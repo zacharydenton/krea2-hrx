@@ -1,7 +1,6 @@
 //! The GEMM launch-shape rules, shared by the kernel builder and the session.
 //!
-//! `scripts/build_kernels.py` mirrors these for the Python path, and the
-//! bundle's `launch.txt` records what they produced, so a session rejects a
+//! //! bundle's `launch.txt` records what they produced, so a session rejects a
 //! bundle built under different rules.
 
 /// The fp16 attention kernel's query tiles per workgroup.
@@ -97,7 +96,7 @@ pub fn gemm_rows(tokens: i32, bits: i32) -> i32 {
 mod tests {
     use super::*;
 
-    /// The values `tests/test_runtime.py` pins for the Python builder; both
+    /// The values the Rust metadata tests pins for the Python builder; both
     /// sides must agree or a bundle is rejected at load.
     #[test]
     fn the_shapes_match_the_pinned_ones() {

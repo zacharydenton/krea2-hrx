@@ -38,7 +38,7 @@ fn no_device_was_opened() -> bool {
 #[test]
 fn an_incomplete_checkpoint_and_bad_metadata_are_refused_before_the_gpu() {
     let root = fixture("reject");
-    let valid = "4 16 256 4 64 8 6144 16448 4 8\n";
+    let valid = "5 16 256 4 64 8 6144 16448 4 8 1\n";
     std::fs::write(root.join("launch.txt"), valid).expect("launch.txt");
 
     // One block's wq only: every other tensor is missing.
@@ -88,7 +88,7 @@ fn an_incomplete_checkpoint_and_bad_metadata_are_refused_before_the_gpu() {
 #[test]
 fn the_interleaved_gate_and_up_rows_are_validated_before_any_allocation() {
     let root = fixture("interleave");
-    std::fs::write(root.join("launch.txt"), "4 16 256 4 64 8 6144 16448 4 8\n")
+    std::fs::write(root.join("launch.txt"), "5 16 256 4 64 8 6144 16448 4 8 1\n")
         .expect("launch.txt");
     let path = root.join("tiny.safetensors");
 

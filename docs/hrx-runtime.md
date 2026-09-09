@@ -1,58 +1,68 @@
-# Runtime and deployment
+# Shared HRX runtime
 
-The native path is Rust → HRX C API → compiled Loom kernels → gfx1151.
-`crates/hrx` owns one process-wide device and ordered stream. Dispatches and
-device copies insert execution barriers; host transfers synchronize the stream.
-Tensors retain their allocations, and sessions reuse scratch buffers.
+Krea uses the [`hrx.rs`](https://github.com/zacharydenton/hrx.rs) crate through
+the small `crates/hrx` compatibility export, pinned by revision in
+the workspace `Cargo.toml` so that a clone builds without a sibling checkout.
+Its features are explicit and `Cargo.lock` pins the complete dependency graph.
+The shared implementation owns native loading, status conversion,
+allocation, streams, dispatch lifetimes, compiler caching and C boundary helpers.
+There is no link-time libhrx dependency or runtime rpath in `libkrea2.so`.
 
-`libkrea2.so` exports both the pipeline and block APIs. Load this single library
-when using both interfaces. Calls sharing a pipeline or block session are
-serialized. HRX initialization owned by another caller is respected.
+A pipeline selects its own ordered stream. Nested block sessions inherit it;
+standalone block sessions open a stream of their own. Calls sharing one pipeline
+or block session are serialized and a panic poisons that session. Tensor pools
+are bound to the stream that first uses them. Direct kernel arguments retain
+referenced allocations through synchronization, so buffer Drop does not wait
+for GPU execution. Allocations use the native device allocator without draining
+pending commands. Native operations already insert their own ordering barriers.
 
-## Library and compiler discovery
-
-At build time, `libhrx.so` is searched for in:
-
-1. `KREA2_RUNTIME`.
-2. The checkout's `build/runtime`.
-3. `${XDG_CACHE_HOME:-$HOME/.cache}/krea2-loom/runtime`.
-
-The linker records runtime search paths, including `runtime/` beside the
-executable or shared library. Keep the `libhrx.so.0` SONAME available at run time;
-`libhrx.so` is the linker name.
-
-The native compiler lookup is: an explicit `--compiler` or API argument,
-`LOOM_COMPILE`, the runtime cache above, then `loom-compile` on `PATH`.
-`KREA2_RUNTIME` selects a library directory, not a compiler executable.
-
-HRX needs a compatible ROCm HSA provider. A system installation may supply it;
-a packaged provider can be placed in the adjacent `runtime/` directory. The
-adapter prefers that adjacent provider unless `IREE_HAL_AMDGPU_LIBHSA_PATH`
-already selects one. Tests combining Torch and HRX must load compatible HSA
-libraries at process startup.
-
-## Checkout build
-
-The packaging scripts expect an HRX build and a directory containing a
-compatible HSA provider and its dependencies:
+The default runtime/ compiler is a pinned prebuilt bundle in the shared HRX
+cache. The initial local candidate has been prepared and tested, but the public
+release URL has not been uploaded yet. Until publication, prepare it explicitly:
 
 ```sh
-export HRX_BUILD=/path/to/hrx-system/build
-export HSA_PROVIDER=/path/to/compatible-hsa-libraries
-source scripts/env.sh
-scripts/build.sh
-build/krea2 -p "a red fox in the snow" --out build/fox.png
+cargo install --locked --git https://github.com/zacharydenton/hrx.rs --features runner hrx
+hrx prepare hrx-linux-x86_64-gfx1151.tar.gz   # from an hrx.rs checkout's artifacts/
+cargo build --release --workspace
+# Or install the model CLI directly:
+cargo install --locked --path cli
 ```
 
-`scripts/env.sh` derives the Loom tool paths from `HRX_BUILD`. Its development
-defaults are `~/code/hrx-system/build-cuda` and `~/.local/rocm-hrx`; override
-them for your installation. `scripts/runtime.sh` lists and stages the provider's
-required libraries in `build/runtime`.
+To develop Krea against a working copy of `hrx.rs`, override the pinned
+revision without editing the manifest. `.cargo/config.toml` is ignored by git:
 
-The build produces the CLI, `libkrea2.so`, generated C headers and test runners.
-For CLI-only installation using a compatible system HSA provider, follow the
-[README](../README.md#install).
+```toml
+[patch."https://github.com/zacharydenton/hrx.rs"]
+hrx = { path = "../hrx.rs" }
+```
 
+The override rewrites `Cargo.lock` to the path source, so remove the file and
+`cargo build` again — or `git checkout Cargo.lock` — before committing.
+
+`HRX_RUNTIME_DIR` chooses a trusted native directory (`KREA2_RUNTIME` remains an
+alias). `HRX_CACHE_DIR` controls the shared cache. `HRX_OFFLINE=1` refuses network
+provisioning. `LOOM_COMPILE` or an explicit model compiler argument overrides
+the compiler. Normal builds do not require `scripts/runtime.sh`; that script
+remains available to stage a developer's native build for an override.
+The shared crate README documents provisioning, native lifetime and bundle format.
+
+Krea's shape/bundle metadata and model-specific operation builders remain here.
+Both auxiliary and block compilation delegate to `hrx::loom`. Cache identity now
+includes the compiler's content hash as well as source, symbol, target and
+configuration. Old compiled bundles can still be loaded explicitly, while newly
+prepared bundles use the corrected identity.
+
+Kernel sources live in `crates/loom/kernels`; tokenizer assets live in
+`crates/tokenizer/assets`. Generators and tests use these paths directly.
+Package builds carry the same assets without depending on files outside the package.
+
+`libkrea2.so` retains both ABI 3 interfaces and their generated headers. cbindgen
+runs during the Cargo build and errors are fatal. Shared FFI helpers validate
+slice arithmetic and alignment and contain panics. H3, Krea and kernel test
+libraries can coexist: HRX initializes under an OS lock across Rust crate copies,
+uses the same native library, and never unloads or globally shuts it down on
+model teardown. An Elixir application can use Rustler directly against
+`krea2_pipeline::Pipeline`; no C or BEAM layer is imposed on Rust model code.
 ## C API
 
 The authoritative declarations and safety requirements are generated by cbindgen:
@@ -73,41 +83,6 @@ Generation returns contiguous RGB8 in HWC order. The progress callback runs
 synchronously and can cancel generation. Errors return a status and a message
 in the supplied buffer; Rust panics are caught at the C boundary.
 
-For working ctypes callers, see [the block wrapper](../krea2_loom.py) and
-[the native pipeline tests](../tests/test_native_pipeline.py). Rust users can
-call `krea2-pipeline` or `krea2-session` directly.
-
-## Caches
-
-The native cache root is `${XDG_CACHE_HOME:-$HOME/.cache}/krea2-loom`:
-
-| Directory | Contents |
-| --- | --- |
-| `blocks-gfx1151-v1` | Transformer bundles for a sequence length and attention configuration |
-| `native-gfx1151-v1` | Auxiliary kernels specialized for tensor shape and launch geometry |
-| `runtime` | Optional installed `libhrx` and `loom-compile` |
-
-Sources and configurations determine kernel keys. Block bundles also include
-compiler identity in their fingerprint. Cached artifact hashes are checked
-before loading. Compilation uses process locks and staging files; populated
-caches can be used without a compiler. Deploy caches for the shapes you need
-or include `loom-compile` for new shapes.
-
-Block metadata (`launch.txt`) records operand pitches, capacity, quantization
-and attention layout. Sessions reject incompatible metadata before loading
-weights. The Python builder uses the same shape rules, but stores its bundles
-under `build/kernels`.
-
-## Troubleshooting
-
-- **Cannot link or load `libhrx`:** check `KREA2_RUNTIME`, `libhrx.so` and
-  `libhrx.so.0`, or package `runtime/` beside the artifact.
-- **HSA initialization or agent-query failure:** check GPU permissions and
-  that the HSA provider is compatible with the HRX build. Use one compatible
-  provider when combining Torch and HRX.
-- **Compiler not found:** set `LOOM_COMPILE` to the executable, or install it
-  in the runtime cache. The first use of a new shape needs compilation.
-- **Invalid bundle metadata or corrupt artifact:** rebuild that bundle with
-  the current sources and compiler. Keep unrelated caches intact.
-
-See [CONTRIBUTING.md](../CONTRIBUTING.md) for runtime and reference tests.
+Rust users call `krea2-pipeline` or `krea2-session` directly. Other languages use
+the generated headers; ABI rejection and error-buffer contracts are exercised
+by Rust tests in `crates/abi`. There is no Python wrapper or test dependency.

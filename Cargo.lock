@@ -176,6 +176,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -879,6 +885,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1217,9 +1233,19 @@ dependencies = [
 [[package]]
 name = "hrx"
 version = "0.1.0"
+source = "git+https://github.com/zacharydenton/hrx.rs?rev=a440e8b23586b1ae88e0f4cb616f8d6755d766dc#a440e8b23586b1ae88e0f4cb616f8d6755d766dc"
 dependencies = [
  "bytemuck",
- "krea2-build-support",
+ "flate2",
+ "libc",
+ "libloading",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "ureq",
 ]
 
 [[package]]
@@ -1601,7 +1627,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "krea2-build-support",
  "krea2-pipeline",
  "png",
 ]
@@ -1611,14 +1636,10 @@ name = "krea2-abi"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
- "krea2-build-support",
+ "krea2-hrx",
  "krea2-pipeline",
  "krea2-session",
 ]
-
-[[package]]
-name = "krea2-build-support"
-version = "0.1.0"
 
 [[package]]
 name = "krea2-checkpoint"
@@ -1630,14 +1651,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "krea2-hrx"
+version = "0.1.0"
+dependencies = [
+ "hrx",
+]
+
+[[package]]
 name = "krea2-models"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "hf-hub",
- "hrx",
- "krea2-build-support",
  "krea2-checkpoint",
+ "krea2-hrx",
  "krea2-numerics",
  "krea2-ops",
  "krea2-tokenizer",
@@ -1654,8 +1681,7 @@ dependencies = [
 name = "krea2-ops"
 version = "0.1.0"
 dependencies = [
- "hrx",
- "krea2-build-support",
+ "krea2-hrx",
  "krea2-numerics",
  "loom",
 ]
@@ -1664,7 +1690,7 @@ dependencies = [
 name = "krea2-pipeline"
 version = "0.1.0"
 dependencies = [
- "hrx",
+ "krea2-hrx",
  "krea2-models",
  "krea2-numerics",
  "krea2-ops",
@@ -1680,25 +1706,9 @@ name = "krea2-session"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "hrx",
  "krea2-checkpoint",
+ "krea2-hrx",
  "loom",
-]
-
-[[package]]
-name = "krea2-testkit"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "half",
- "hrx",
- "krea2-build-support",
- "krea2-numerics",
- "krea2-ops",
- "krea2-pipeline",
- "krea2-session",
- "loom",
- "serde_json",
 ]
 
 [[package]]
@@ -1720,6 +1730,16 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libm"
@@ -1770,9 +1790,12 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "loom"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "half",
  "hrx",
+ "krea2-hrx",
  "serde_json",
- "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
@@ -2493,7 +2516,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6725596c3f2c3a0aef021139e145d4eafe314a6623e4680ca83852b2c67ab2ba"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -2939,6 +2964,17 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
 ]
 
 [[package]]
@@ -3416,6 +3452,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af5546be8f5378d5414f83733f5c9a2526f4645829edbc1c41790aeef1b38e8b"
+dependencies = [
+ "base64 0.23.1",
+ "flate2",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fabc3e92916c89c95b20eef7b06b00b066bc217ef9ea3a4ac9bf1a7e35261e10"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3432,6 +3497,12 @@ name = "urlencoding"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"
@@ -3613,6 +3684,15 @@ name = "webpki-root-certs"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -3887,6 +3967,16 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
+]
 
 [[package]]
 name = "xet-client"

@@ -1,13 +1,13 @@
 //! Transformer kernel bundles with launch metadata and artifact hashes.
 //!
 //! Each bundle is keyed by its sources, configurations and compiler identity.
-//! `scripts/build_kernels.py` uses the same format and shape rules. Verified
-//! cached bundles can be loaded without a compiler.
+//! Launch metadata stays model-specific; compilation and artifact integrity use HRX.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::compile::{digest, Compilation, Lock};
+use crate::compile::digest;
 use crate::{compiler, shape, sources, Error, Result, Settings};
+use hrx::bundle::Lock;
 
 /// The metadata version and the shape knobs that are not in `launch.txt`.
 /// Changing any of it must change every bundle's name.
@@ -225,7 +225,8 @@ impl Shape {
 pub fn prepare(parent: &Path, compiler_path: Option<&str>, shape: &Shape) -> Result<PathBuf> {
     let jobs = shape.jobs();
     let launch = shape.launch_text();
-    let mut signature = format!("{SIGNATURE_PREFIX}{launch}");
+    let shared = compiler(compiler_path)?;
+    let mut signature = format!("{SIGNATURE_PREFIX}compiler={}\n{launch}", shared.identity());
     for job in &jobs {
         let source = sources::block(&job.source)
             .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
@@ -244,34 +245,34 @@ pub fn prepare(parent: &Path, compiler_path: Option<&str>, shape: &Shape) -> Res
     }
     std::fs::create_dir_all(parent)
         .map_err(|e| Error(format!("cannot create {}: {e}", parent.display())))?;
-    let _lock = Lock::acquire(parent, "kernel cache")?;
+    let _lock = Lock::acquire(&parent.join(".lock"))?;
     if out.exists() {
         verify(&out, &jobs, &launch)?;
         return Ok(out);
     }
 
-    let staging = parent.join(format!(".prepare-{}", std::process::id()));
-    // A dead process may have left a staging directory with this recycled id.
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir(&staging)
-        .map_err(|e| Error(format!("cannot create {}: {e}", staging.display())))?;
-    let _cleanup = Staging(staging.clone());
-    let compiler = compiler(compiler_path);
+    let temporary = tempfile::tempdir_in(parent).map_err(|e| Error(e.to_string()))?;
+    let staging = temporary.path();
     let mut hashes = BTreeMap::new();
     for job in &jobs {
         let source = sources::block(&job.source).expect("checked above");
         let artifact = staging.join(format!("{}.hsaco", job.stem));
-        Compilation { compiler: &compiler, name: &job.source, source, config: &job.config }
-            .run(&staging, &artifact)?;
-        let _ = std::fs::remove_file(staging.join(format!("{}.log", job.source)));
-        let _ = std::fs::remove_file(staging.join(format!("{}.loom", job.source)));
+        let symbol = format!("krea2_{}", job.source);
+        let mut request = hrx::loom::Request::new(source, &symbol);
+        request.config = job
+            .config
+            .iter()
+            .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
+            .collect();
+        let compiled = shared.compile(&request, &crate::cache_root()?)?;
+        std::fs::copy(compiled, &artifact).map_err(|e| Error(e.to_string()))?;
         hashes.insert(format!("{}.hsaco", job.stem), digest(&read(&artifact)?));
     }
     write(&staging.join("launch.txt"), launch.as_bytes())?;
     write(&staging.join("signature"), signature.as_bytes())?;
-    write(&staging.join("compiler.txt"), format!("{compiler}\n").as_bytes())?;
+    write(&staging.join("compiler.txt"), format!("{}\n", shared.path().display()).as_bytes())?;
     write(&staging.join("manifest.json"), manifest(&hashes).as_bytes())?;
-    std::fs::rename(&staging, &out)
+    std::fs::rename(staging, &out)
         .map_err(|e| Error(format!("cannot publish {}: {e}", out.display())))?;
     Ok(out)
 }
@@ -311,23 +312,13 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|e| Error(format!("cannot write {}: {e}", path.display())))
 }
 
-/// The staging directory, removed however the preparation ends. A successful
-/// rename leaves nothing to remove.
-struct Staging(PathBuf);
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_launch_text_is_the_line_the_session_pins() {
-        // tests/test_runtime.py's fixture: 4115 tokens of int8 weights.
+        // The metadata regression fixture: 4115 tokens of int8 weights.
         let shape = Shape::new(4115, 8, 16).expect("a shape");
         assert_eq!(shape.launch_text(), "5 4115 256 4 4160 8 6144 16448 16 8 1\n");
     }

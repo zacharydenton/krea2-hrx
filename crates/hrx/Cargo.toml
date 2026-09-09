@@ -1,14 +1,9 @@
 [package]
-name = "hrx"
+name = "krea2-hrx"
 version = "0.1.0"
 edition = "2021"
-description = "gfx1151 dispatch over the public HRX C API"
 license = "MIT"
-publish = false
+description = "Krea compatibility exports for the shared HRX runtime"
 
 [dependencies]
-# Reinterpreting a typed slice as bytes, without hand-written unsafe.
-bytemuck = "1"
-
-[build-dependencies]
-krea2-build-support = { path = "../build-support" }
+hrx-core.workspace = true

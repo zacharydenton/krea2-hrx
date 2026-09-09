@@ -40,31 +40,30 @@ krea2 --width 1504 --height 640 --seed 9 --out canyon.png \
 - Linux with an accessible Radeon 8060S and the amdgpu/KFD driver. Other GPUs
   are not supported by the current kernels.
 - A Rust toolchain and the native build tools required by its dependencies.
-- `libhrx.so`, `loom-compile`, and a compatible ROCm HSA runtime. Build HRX and
-  Loom from [hrx-system](https://github.com/ROCm/hrx-system).
+- The prebuilt HRX/Loom/HSA bundle managed by the shared `hrx.rs` crate.
 - The model files below and enough memory to keep the models and GPU workspace
   resident. The transformer checkpoint alone is about 13 GB.
 
-Python is needed for kernel generation, reference tests and the optional
-Diffusers integration, not native inference. See the
-[runtime guide](docs/hrx-runtime.md) for library discovery and deployment.
+Builds, tests, and model execution use Rust. Kernel sources are maintained directly
+in `crates/loom/kernels`. See the [runtime guide](docs/hrx-runtime.md) for deployment
+and [native tests](docs/testing.md) for validation.
 
 ## Install
 
-From this checkout, with `HRX_BUILD` set to your hrx-system build directory:
+From this checkout. The shared runtime is a pinned dependency, so no sibling
+checkout is needed to build; the `hrx` runner is what stages the native bundle:
 
 ```sh
-export HRX_BUILD=/path/to/hrx-system/build
-runtime_dir="${XDG_CACHE_HOME:-$HOME/.cache}/krea2-loom/runtime"
-mkdir -p "$runtime_dir"
-cp "$HRX_BUILD/libhrx/src/libhrx/libhrx.so" "$runtime_dir/libhrx.so.0"
-ln -sfn libhrx.so.0 "$runtime_dir/libhrx.so"
-cp "$HRX_BUILD/loom/src/loom/tools/loom-compile/loom-compile" "$runtime_dir/"
+cargo install --locked --git https://github.com/zacharydenton/hrx.rs --features runner hrx
+hrx prepare hrx-linux-x86_64-gfx1151.tar.gz
 cargo install --locked --path cli
 ```
 
-The system HSA runtime must be compatible with your HRX build. If you need to
-package a separate provider, use the [checkout build](docs/hrx-runtime.md#checkout-build).
+The native bundle is currently a local, tested release candidate: automatic
+first-use download is implemented, but its public release URL has not been
+uploaded yet, so `hrx prepare` needs the archive from an `hrx.rs` checkout
+(`artifacts/`) until then. See the [runtime guide](docs/hrx-runtime.md) for
+overrides, offline setup and developing against a local `hrx.rs`.
 The first request at a new tensor shape compiles and caches kernels, so it is
 slower than subsequent requests.
 
@@ -134,9 +133,8 @@ library exports two C interfaces:
 
 Headers are generated from the Rust sources. See the
 [API and deployment guide](docs/hrx-runtime.md#c-api) for ownership and calling
-conventions. Rust callers can use the workspace crates directly. For Diffusers,
-[krea2_loom.py](krea2_loom.py) provides the block wrapper used by
-`tools/pipeline.py --backend loom`.
+conventions. Rust callers use the workspace crates directly; other languages use
+the generated C ABI. Elixir applications can wrap the Rust API with Rustler.
 
 ## Performance and accuracy
 
@@ -172,5 +170,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for builds, tests and benchmark requireme
 ## License
 
 Project code is [MIT licensed](LICENSE). The bundled Qwen tokenizer has its
-[own attribution and Apache-2.0 license](assets/README.md). Model weights are
+[own attribution and Apache-2.0 license](crates/tokenizer/assets/README.md). Model weights are
 separate downloads governed by their upstream licenses.

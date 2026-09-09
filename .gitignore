@@ -10,3 +10,6 @@ __pycache__/
 /build_*.done
 /host/block_sources.h
 target/
+
+# Local dependency overrides (see docs/hrx-runtime.md)
+.cargo/config.toml

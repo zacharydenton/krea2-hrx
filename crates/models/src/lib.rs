@@ -1,6 +1,6 @@
 //! Model discovery, dense weight loading, text encoder and VAE graphs.
 //! Transformer block execution is provided by `krea2-session`.
-#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod files;
 pub mod graph;
@@ -24,25 +24,25 @@ impl std::error::Error for Error {}
 
 impl From<hrx::Error> for Error {
     fn from(error: hrx::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 
 impl From<krea2_checkpoint::Error> for Error {
     fn from(error: krea2_checkpoint::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 
 impl From<krea2_ops::Error> for Error {
     fn from(error: krea2_ops::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 
 impl From<krea2_tokenizer::Error> for Error {
     fn from(error: krea2_tokenizer::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 

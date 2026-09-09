@@ -17,6 +17,7 @@ const STAGING_BYTES: usize = 16 << 20;
 pub struct Weights {
     plan: Plan,
     storage: Buffer,
+    pub(crate) stream: std::sync::Arc<hrx::Device>,
 }
 
 impl Weights {
@@ -24,7 +25,9 @@ impl Weights {
     pub fn load(path: &Path) -> Result<Weights> {
         let file = Checkpoint::open(path)?;
         let plan = Plan::for_checkpoint(&file)?;
-        let storage = device().allocate(plan.total_bytes)?;
+        let stream = hrx::Device::current_or_new()?;
+        let _scope = stream.enter();
+        let storage = stream.allocate(plan.total_bytes)?;
         let mut staging = Vec::new();
         for span in plan.spans.values() {
             let base = storage.ptr().offset(span.device_offset);
@@ -60,7 +63,7 @@ impl Weights {
                     .copy_from_host(base.offset(written * pitch), &staging[..staged * pitch])?;
             }
         }
-        Ok(Weights { plan, storage })
+        Ok(Weights { plan, storage, stream: stream.clone() })
     }
 
     pub fn layers(&self) -> usize {

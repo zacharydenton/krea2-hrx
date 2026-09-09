@@ -4,7 +4,7 @@
 use tokenizers::Tokenizer as Inner;
 
 /// Embedded Qwen tokenizer configuration; see `assets/README.md` for attribution.
-pub const EMBEDDED: &[u8] = include_bytes!("../../../assets/tokenizer.json");
+pub const EMBEDDED: &[u8] = include_bytes!("../assets/tokenizer.json");
 
 /// The longest prompt this accepts, in UTF-8 bytes.
 const MAX_BYTES: usize = 65536;
@@ -97,11 +97,8 @@ mod tests {
 
     #[test]
     fn the_embedded_file_is_the_repositorys() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("the crate sits in the repository")
-            .join("assets/tokenizer.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tokenizer.json");
         assert_eq!(EMBEDDED, std::fs::read(path).expect("the tokenizer file"));
     }
 

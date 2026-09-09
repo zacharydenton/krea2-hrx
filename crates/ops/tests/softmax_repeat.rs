@@ -4,20 +4,9 @@
 use krea2_numerics::from_f32;
 use krea2_ops::{config, Args, Ops, Pool};
 
-fn usable() -> bool {
-    let compiler = loom::compiler(None);
-    let found = std::path::Path::new(&compiler).exists()
-        || std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|entry| entry.join(&compiler).exists())
-        });
-    found && hrx::try_device().is_ok()
-}
-
 #[test]
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
-    if !usable() {
-        return;
-    }
     let ops = Ops::new(Pool::new());
     for tokens in [256usize, 33, 257, 1024] {
         for causal in [false, true] {
@@ -43,14 +32,16 @@ fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
             args.i32(rows as i32).ptr(scores.ptr()).ptr(out.ptr());
             let name = if causal { "softmax_causal" } else { "softmax" };
             for repeat in 0..repeats {
-                ops.launch(
-                    name,
-                    config(&[("xsize", count), ("tokens", tokens)]),
-                    &args,
-                    rows,
-                    1,
-                    256,
-                )
+                unsafe {
+                    ops.launch(
+                        name,
+                        config(&[("xsize", count), ("tokens", tokens)]),
+                        &args,
+                        rows,
+                        1,
+                        256,
+                    )
+                }
                 .expect("launch");
                 let actual = out.download().expect("download");
                 if let Some(index) = (0..count).find(|&index| actual[index] != expected[index])

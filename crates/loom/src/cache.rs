@@ -1,20 +1,56 @@
 //! Auxiliary kernel cache, keyed by source and configuration.
 //! Compilation is locked across processes; artifact hashes are verified on load.
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use hrx::Kernel;
 
-use crate::compile::{digest, user_cache_directory, Compilation, Lock, Scratch};
-use crate::{compiler, sources, Config, Error, Result};
-
-const ROOT: &str = "native-gfx1151-v1";
+use crate::compile::compiler;
+use crate::{sources, Config, Error, Result};
 
 static LOADED: Mutex<Option<HashMap<String, Kernel>>> = Mutex::new(None);
 
+type Shapes = BTreeMap<Config, Kernel>;
+type Grids = BTreeMap<(u32, u32), Shapes>;
+
+/// Loaded operations owned by one model instance. Cache hits compare the
+/// existing configuration directly: no compiler lookup or signature formatting.
+#[derive(Default)]
+pub struct PreparedKernels {
+    loaded: Mutex<HashMap<String, Grids>>,
+    compiler: Option<String>,
+}
+
+impl PreparedKernels {
+    pub fn new(compiler: Option<&str>) -> Self {
+        Self { loaded: Mutex::default(), compiler: compiler.map(str::to_owned) }
+    }
+
+    pub fn get(&self, name: &str, config: Config, grid: (u32, u32)) -> Result<Kernel> {
+        let mut loaded =
+            self.loaded.lock().map_err(|_| Error("operation cache poisoned".into()))?;
+        if let Some(kernel) = loaded
+            .get(name)
+            .and_then(|grids| grids.get(&grid))
+            .and_then(|shapes| shapes.get(&config))
+        {
+            return Ok(kernel.clone());
+        }
+        let kernel = auxiliary_kernel(name, &config, grid, self.compiler.as_deref())?;
+        loaded
+            .entry(name.into())
+            .or_default()
+            .entry(grid)
+            .or_default()
+            .insert(config, kernel.clone());
+        Ok(kernel)
+    }
+}
+
 pub fn cache_root() -> Result<PathBuf> {
-    user_cache_directory(ROOT)
+    Ok(hrx::bundle::cache_root()?.join("kernels"))
 }
 
 /// The signature a kernel is cached under: its name, then its configuration in
@@ -42,52 +78,25 @@ pub fn auxiliary_kernel(
         config.insert("grid_x".into(), u64::from(grid.0));
         config.insert("grid_y".into(), u64::from(grid.1));
     }
-    let signature = signature(name, &config);
-    let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
-    let loaded = loaded.get_or_insert_with(HashMap::new);
-    if let Some(kernel) = loaded.get(&signature) {
-        return Ok(kernel.clone());
-    }
     let source = sources::auxiliary(name)
         .ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))?;
-    let key = digest(format!("{source}{signature}").as_bytes());
-    let root = cache_root()?;
-    let path = root.join(format!("{key}.hsaco"));
-    let hash_path = root.join(format!("{key}.sha256"));
-
-    // A populated cache is usable without write access: check before locking.
-    if !(path.exists() && hash_path.exists()) {
-        let _lock = Lock::acquire(&root, "auxiliary kernel cache")?;
-        if !(path.exists() && hash_path.exists()) {
-            let staging = root.join(format!("{key}.tmp"));
-            let _scratch = Scratch(vec![
-                root.join(format!("{name}.loom")),
-                root.join(format!("{name}.log")),
-                staging.clone(),
-            ]);
-            let compiler = compiler(compiler_path);
-            let settings =
-                config.iter().map(|(key, value)| (key.clone(), value.to_string())).collect();
-            Compilation { compiler: &compiler, name, source, config: &settings }
-                .run(&root, &staging)?;
-            let compiled = std::fs::read(&staging)
-                .map_err(|e| Error(format!("cannot read {}: {e}", staging.display())))?;
-            std::fs::write(&hash_path, digest(&compiled))
-                .map_err(|e| Error(format!("cannot write {}: {e}", hash_path.display())))?;
-            std::fs::rename(&staging, &path)
-                .map_err(|e| Error(format!("cannot publish {}: {e}", path.display())))?;
+    let compiler = compiler(compiler_path)?;
+    let signature = format!("{}\n{}", compiler.identity(), signature(name, &config));
+    {
+        let loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;
+        if let Some(kernel) = loaded.as_ref().and_then(|m| m.get(&signature)) {
+            return Ok(kernel.clone());
         }
     }
-    let compiled = std::fs::read(&path)
-        .map_err(|e| Error(format!("cannot read {}: {e}", path.display())))?;
-    let recorded = std::fs::read_to_string(&hash_path)
-        .map_err(|e| Error(format!("cannot read {}: {e}", hash_path.display())))?;
-    if recorded != digest(&compiled) {
-        return Err(Error(format!("corrupt auxiliary kernel: {}", path.display())));
-    }
-    let kernel = Kernel::load(&path, &format!("krea2_{name}"))?;
-    loaded.insert(signature, kernel.clone());
-    Ok(kernel)
+    let symbol = format!("krea2_{name}");
+    let mut request = hrx::loom::Request::new(source, &symbol);
+    request.config =
+        config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
+    let path = compiler.compile(&request, &cache_root()?)?;
+    // Safety: the shared compiler produced this export from embedded model source.
+    let kernel = unsafe { Kernel::load(&path, &symbol)? };
+    let mut loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;
+    Ok(loaded.get_or_insert_with(HashMap::new).entry(signature).or_insert(kernel).clone())
 }
 
 #[cfg(test)]

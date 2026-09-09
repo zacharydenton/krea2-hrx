@@ -34,20 +34,9 @@ unsafe fn guard(
     capacity: usize,
     body: impl FnOnce() -> Result<()> + std::panic::UnwindSafe,
 ) -> c_int {
-    if !error.is_null() && capacity > 0 {
-        *error = 0;
-    }
-    match std::panic::catch_unwind(body) {
-        Ok(Ok(())) => KREA2_OK,
-        Ok(Err(failure)) => {
-            report(error, capacity, &failure.0);
-            KREA2_ERROR
-        }
-        Err(_) => {
-            report(error, capacity, "native inference failed");
-            KREA2_ERROR
-        }
-    }
+    hrx::ffi::boundary(error, capacity, KREA2_ERROR, || {
+        body().map_err(|e| hrx::ffi::Failure::new(KREA2_ERROR, e.0))
+    })
 }
 
 /// # Safety
@@ -68,9 +57,10 @@ unsafe fn pipeline_of<'a>(handle: *const PipelineHandle) -> Result<&'a PipelineH
 /// # Safety
 /// `pointer` must be null or point to `len` readable elements.
 unsafe fn slice_of<'a, T>(pointer: *const T, len: usize) -> Option<&'a [T]> {
-    match pointer.is_null() {
-        true => None,
-        false => Some(std::slice::from_raw_parts(pointer, len)),
+    if pointer.is_null() {
+        None
+    } else {
+        hrx::ffi::slice(pointer, len).ok()
     }
 }
 

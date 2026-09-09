@@ -11,7 +11,7 @@ pub mod sources;
 
 pub use blocks::{prepare, Shape};
 pub use cache::{auxiliary_kernel, cache_root};
-pub use compile::{compiler, user_cache_directory, Compilation};
+pub use compile::{compiler, user_cache_directory};
 
 /// Anything the compiler, the cache or the runtime rejects.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ impl std::error::Error for Error {}
 
 impl From<hrx::Error> for Error {
     fn from(error: hrx::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 

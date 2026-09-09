@@ -18,11 +18,7 @@ mod tests {
     /// The library must carry exactly the repository's kernels: a stale build
     /// directory is otherwise invisible until an image changes.
     fn matches_disk(table: &[(&str, &str)], directory: &str) {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .expect("the crate sits in the repository")
-            .join(directory);
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(directory);
         assert!(!table.is_empty(), "no kernels embedded from {directory}");
         for (name, embedded) in table {
             let path = root.join(format!("{name}.loom"));

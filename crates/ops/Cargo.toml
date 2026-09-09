@@ -10,9 +10,6 @@ publish = false
 name = "krea2_ops"
 
 [dependencies]
-hrx = { path = "../hrx" }
+hrx = { package = "krea2-hrx", path = "../hrx" }
 krea2-numerics = { path = "../numerics" }
 loom = { path = "../loom" }
-
-[build-dependencies]
-krea2-build-support = { path = "../build-support" }

@@ -1,30 +1,36 @@
 //! GPU dispatch, allocation-span and runtime-dependency checks.
-//! Requires HRX, a gfx1151 GPU and a compiler; tests return early when unavailable.
+//! Requires HRX, a gfx1151 GPU and a compiler; run with --ignored.
 use hrx::{device, Args};
 use loom::{auxiliary_kernel, config};
 
-fn usable() -> bool {
-    let compiler = loom::compiler(None);
-    let found = std::path::Path::new(&compiler).exists()
-        || std::env::var_os("PATH").is_some_and(|path| {
-            std::env::split_paths(&path).any(|entry| entry.join(&compiler).exists())
-        });
-    if !found {
-        eprintln!("skipping: no loom-compile ({compiler})");
-        return false;
+#[test]
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
+fn prepared_operations_reuse_both_shapes_and_remain_ordered() {
+    let stream = hrx::Device::open().unwrap();
+    let _scope = stream.enter();
+    let prepared = loom::cache::PreparedKernels::default();
+    for count in [257usize, 1009, 257, 1009] {
+        let grid = (count.div_ceil(256) as u32, 1);
+        let kernel = prepared.get("unary_one", loom::Config::new(), grid).unwrap();
+        let buffer = stream.allocate(count * 2).unwrap();
+        stream.zero(buffer.ptr(), buffer.len()).unwrap();
+        let mut args = Args::new();
+        args.i32(count as i32).ptr(buffer.ptr()).ptr(buffer.ptr());
+        // Safety: unary_one operates independently on count bf16 elements.
+        // Input/output aliasing is intentional; both launches use this stream.
+        unsafe {
+            kernel.launch_2d(grid.0, grid.1, 256, &args).unwrap();
+            kernel.launch_2d(grid.0, grid.1, 256, &args).unwrap();
+        }
+        let mut output = vec![0u16; count];
+        stream.read(&mut output, buffer.ptr()).unwrap();
+        assert!(output.iter().all(|value| *value == 0x4000)); // bf16 2.0
     }
-    if let Err(error) = hrx::try_device() {
-        eprintln!("skipping: no GPU ({error})");
-        return false;
-    }
-    true
 }
 
 #[test]
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn unary_one_writes_one_into_every_element() {
-    if !usable() {
-        return;
-    }
     const COUNT: usize = 1009; // not a multiple of the workgroup size
     let device = device();
     let x = device.allocate(COUNT * 2).expect("input allocation");
@@ -41,7 +47,8 @@ fn unary_one_writes_one_into_every_element() {
     .expect("compiling unary_one");
     let mut args = Args::new();
     args.i32(COUNT as i32).ptr(x.ptr()).ptr(y.ptr());
-    kernel.launch_2d(COUNT.div_ceil(256) as u32, 1, 256, &args).expect("dispatching unary_one");
+    unsafe { kernel.launch_2d(COUNT.div_ceil(256) as u32, 1, 256, &args) }
+        .expect("dispatching unary_one");
     device.synchronize().expect("draining the stream");
 
     let mut bytes = vec![0u8; COUNT * 2];
@@ -53,10 +60,8 @@ fn unary_one_writes_one_into_every_element() {
 }
 
 #[test]
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn a_span_past_the_end_of_an_allocation_is_rejected() {
-    if !usable() {
-        return;
-    }
     let device = device();
     let buffer = device.allocate(1024).expect("allocation");
     let mut host = vec![0u8; 512];
@@ -64,16 +69,14 @@ fn a_span_past_the_end_of_an_allocation_is_rejected() {
     let error = device
         .copy_to_host(&mut host, buffer.ptr().offset(768))
         .expect_err("an over-long span must be rejected");
-    assert_eq!(error.0, "GPU buffer span");
+    assert_eq!(error.to_string(), "span 768+512 exceeds 1024 bytes");
     // The same span inside the allocation is fine.
     device.copy_to_host(&mut host, buffer.ptr().offset(512)).expect("an in-range span");
 }
 
 #[test]
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn the_process_maps_no_hip_torch_or_system_crypto() {
-    if !usable() {
-        return;
-    }
     // Touch the device so the provider is loaded before the maps are read.
     device().synchronize().expect("draining the stream");
     let maps = std::fs::read_to_string("/proc/self/maps").expect("reading /proc/self/maps");
@@ -94,27 +97,18 @@ fn the_process_maps_no_hip_torch_or_system_crypto() {
     }
 }
 
-/// Check source, ordered launch configuration, digest and artifact path together.
+/// The model must populate the shared cache, without the former C++ cache layer.
 #[test]
-fn the_cache_key_matches_the_cpp_host() {
-    if !usable() {
-        return;
-    }
-    // The digest is over source plus signature, and is pure: check it before
-    // anything touches the disk.
-    let source = loom::sources::auxiliary("euler").expect("the euler kernel");
-    let signature = "euler\ngrid_x=4\ngrid_y=1\n";
-    let key = loom::compile::digest(format!("{source}{signature}").as_bytes());
-
-    // Compiling through the normal path must land on exactly that key.
-    auxiliary_kernel("euler", &loom::Config::new(), (4, 1), None).expect("compiling euler");
-    let root = loom::cache_root().expect("a cache directory");
-    let path = root.join(format!("{key}.hsaco"));
-    assert!(
-        path.exists(),
-        "{} is missing: auxiliary_kernel compiled euler for a 4x1 grid, so the C++ \
-         host's key must name the artifact it produced",
-        path.display()
-    );
-    assert!(root.join(format!("{key}.sha256")).exists(), "the hash beside it");
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
+fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
+    let source = loom::sources::auxiliary("euler").unwrap();
+    let compiler = loom::compiler(None).unwrap();
+    let mut request = hrx::loom::Request::new(source, "krea2_euler");
+    request.config.insert("krea2.euler.grid_x".into(), "4".into());
+    request.config.insert("krea2.euler.grid_y".into(), "1".into());
+    auxiliary_kernel("euler", &loom::Config::new(), (4, 1), None).unwrap();
+    let directory = loom::cache_root().unwrap().join(compiler.key(&request).unwrap());
+    let artifact = directory.join("kernel.hsaco");
+    assert!(artifact.is_file());
+    assert_eq!(compiler.compile(&request, &loom::cache_root().unwrap()).unwrap(), artifact);
 }

@@ -11,9 +11,9 @@ name = "krea2"
 crate-type = ["cdylib"]
 
 [dependencies]
+hrx = { package = "krea2-hrx", path = "../hrx" }
 krea2-pipeline = { path = "../pipeline" }
 krea2-session = { path = "../session" }
 
 [build-dependencies]
-krea2-build-support = { path = "../build-support" }
 cbindgen = "0.29.4"

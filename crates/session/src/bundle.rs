@@ -43,11 +43,8 @@ impl Metadata {
     /// derives for the same sequence, so a bundle from other rules is refused
     /// before any weights are read.
     pub fn parse(text: &str, tokens: usize) -> Result<Metadata> {
-        let bad = || {
-            Error::invalid(
-                "invalid kernel launch metadata; rebuild with scripts/build_kernels.py",
-            )
-        };
+        let bad =
+            || Error::invalid("invalid kernel launch metadata; rebuild with loom::prepare");
         let mut fields = text.split_whitespace().map(str::parse::<u64>);
         let mut next =
             || -> Result<u64> { fields.next().transpose().ok().flatten().ok_or_else(bad) };
@@ -140,7 +137,8 @@ pub struct Kernels {
 impl Kernels {
     pub fn load(directory: &Path, metadata: &Metadata) -> Result<Kernels> {
         let load = |stem: &str, symbol: &str| -> Result<Kernel> {
-            Kernel::load(&directory.join(format!("{stem}.hsaco")), symbol).map_err(Error::from)
+            unsafe { Kernel::load(&directory.join(format!("{stem}.hsaco")), symbol) }
+                .map_err(Error::from)
         };
         let width = metadata.width();
         let tile = metadata.tile();
@@ -175,7 +173,7 @@ impl Kernels {
 mod tests {
     use super::*;
 
-    /// The line `tests/test_runtime.py` pins for 4115 tokens of int8 weights.
+    /// The line the Rust metadata tests pins for 4115 tokens of int8 weights.
     const PINNED: &str = "5 4115 256 4 4160 8 6144 16448 16 8 1\n";
 
     #[test]

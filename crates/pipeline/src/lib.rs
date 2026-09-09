@@ -1,7 +1,7 @@
 //! Krea 2 generation from prompts to RGB.
-//! Models remain resident across calls. A block session is rebuilt when the total
-//! text/image sequence length changes.
-#![deny(unsafe_code)]
+//! Models remain resident across calls. Two recent block shapes are retained so
+//! guided generation can alternate conditioning lengths without rebuilding.
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod noise;
 pub mod profile;
@@ -99,15 +99,47 @@ struct Rope {
     sin: Vec<f32>,
 }
 
-/// The block session for one sequence length, rebuilt when that changes.
+/// A prepared sequence length and its geometry-dependent tables.
 struct Blocks {
     session: Session,
-    tokens: usize,
+    rope: Rope,
+}
+
+/// At most two scratch workspaces: the positive and negative guidance shapes.
+/// Evict before constructing a third so peak residency stays bounded.
+struct ShapeCache<T> {
+    entries: Vec<(usize, T)>,
+}
+
+impl<T> Default for ShapeCache<T> {
+    fn default() -> Self {
+        Self { entries: Vec::new() }
+    }
+}
+
+impl<T> ShapeCache<T> {
+    fn get_or_try_insert_with(
+        &mut self,
+        tokens: usize,
+        build: impl FnOnce() -> Result<T>,
+    ) -> Result<&mut T> {
+        if let Some(index) = self.entries.iter().position(|(key, _)| *key == tokens) {
+            let entry = self.entries.remove(index);
+            self.entries.push(entry);
+        } else {
+            if self.entries.len() == 2 {
+                self.entries.remove(0);
+            }
+            self.entries.push((tokens, build()?));
+        }
+        Ok(&mut self.entries.last_mut().expect("prepared shape").1)
+    }
 }
 
 /// Everything resident: the three models, the block weights, and whichever
-/// block session the last image needed.
+/// two most recently used block sessions.
 pub struct Pipeline {
+    stream: Arc<hrx::Device>,
     files: Files,
     compiler: Option<String>,
     cache: PathBuf,
@@ -119,14 +151,16 @@ pub struct Pipeline {
 #[derive(Default)]
 struct State {
     weights: Option<Arc<Weights>>,
-    blocks: Option<Blocks>,
-    rope: Rope,
+    blocks: ShapeCache<Blocks>,
 }
 
 impl Pipeline {
     /// `compiler` of `None` takes `LOOM_COMPILE`, else `loom-compile` on PATH.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
+        let stream = hrx::Device::open()?;
+        let _scope = stream.enter();
         Ok(Pipeline {
+            stream: stream.clone(),
             models: Models::open(&files, compiler)?,
             files,
             compiler: compiler.map(str::to_string),
@@ -158,7 +192,11 @@ impl Pipeline {
 
     /// A prompt encoded through Krea's template: float32 `[tokens][12][2560]`.
     pub fn encode(&self, prompt: &str) -> Result<(usize, Vec<f32>)> {
-        let _serialized = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let _scope = self.stream.enter();
+        let _serialized = self
+            .state
+            .lock()
+            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let ids = self.models.tokenizer.prompt(prompt).map_err(krea2_models::Error::from)?;
         let taps = self.models.encode(&ids)?;
         device().synchronize()?;
@@ -167,8 +205,12 @@ impl Pipeline {
 
     /// Latents to RGB8 HWC.
     pub fn decode(&self, latents: &[f32], width: usize, height: usize) -> Result<Vec<u8>> {
+        let _scope = self.stream.enter();
         dimensions(width, height)?;
-        let _serialized = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let _serialized = self
+            .state
+            .lock()
+            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let packed = self.upload(latents, width / PATCH * (height / PATCH), 64)?;
         let rgb = self.models.decode(&packed, height, width)?;
         device().synchronize()?;
@@ -186,11 +228,15 @@ impl Pipeline {
         height: usize,
         timestep: f32,
     ) -> Result<Vec<f32>> {
+        let _scope = self.stream.enter();
         dimensions(width, height)?;
         if !(1..=512).contains(&text_tokens) || !(0.0..=1.0).contains(&timestep) {
             return Err(Error("invalid transformer arguments".into()));
         }
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let taps = self.upload(text, text_tokens * 12, 2560)?;
         let conditioning = self.models.text_fusion(&taps)?;
         let packed = self.upload(latents, width / PATCH * (height / PATCH), 64)?;
@@ -206,6 +252,7 @@ impl Pipeline {
         request: &Request,
         mut progress: Option<Progress>,
     ) -> Result<Vec<u8>> {
+        let _scope = self.stream.enter();
         let (width, height) = (request.width, request.height);
         dimensions(width, height)?;
         let guidance = request.guidance.unwrap_or(if self.distilled() { 0.0 } else { 3.5 });
@@ -217,7 +264,10 @@ impl Pipeline {
             return Err(Error("invalid generation arguments".into()));
         }
         let image_tokens = width / PATCH * (height / PATCH);
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let began = std::time::Instant::now();
         let mut timing = Profile::new("generate");
 
@@ -293,13 +343,14 @@ impl Pipeline {
         )?;
 
         timing.mark("embeddings")?;
-        self.prepare(state, tokens)?;
+        let blocks = self.prepare(state, tokens)?;
         timing.mark("prepare session")?;
         let mods = self.models.modulation(&modulation)?;
-        self.rope(state, width, height, text.rows());
-        let blocks = state.blocks.as_ref().expect("just prepared");
+        self.rope(&mut blocks.rope, width, height, text.rows());
         timing.mark("modulation and rope")?;
-        blocks.session.run_device(x.ptr(), mods.ptr(), &state.rope.cos, &state.rope.sin)?;
+        unsafe {
+            blocks.session.run_device(x.ptr(), mods.ptr(), &blocks.rope.cos, &blocks.rope.sin)
+        }?;
         timing.mark("blocks")?;
 
         let output = x.view(image_tokens, WIDTH, text.rows() * WIDTH)?;
@@ -308,12 +359,8 @@ impl Pipeline {
         Ok(velocity)
     }
 
-    /// The block session for `tokens`, built if the last image had another
-    /// sequence length. The weights outlive it and are loaded once.
-    fn prepare(&self, state: &mut State, tokens: usize) -> Result<()> {
-        if state.blocks.as_ref().is_some_and(|blocks| blocks.tokens == tokens) {
-            return Ok(());
-        }
+    /// Reuse either guidance shape. Weights are shared by both workspaces.
+    fn prepare<'a>(&self, state: &'a mut State, tokens: usize) -> Result<&'a mut Blocks> {
         let weights = match &state.weights {
             Some(weights) => Arc::clone(weights),
             None => {
@@ -322,21 +369,18 @@ impl Pipeline {
                 loaded
             }
         };
-        // Dropped before the new one is built, so two sessions' scratch buffers
-        // are never resident at once.
-        state.blocks = None;
-        let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
-        let bundle = loom::prepare(&self.cache, self.compiler.as_deref(), &shape)?;
-        let session =
-            Session::with_weights(weights, &bundle, tokens, 28, self.compiler.as_deref())?;
-        state.blocks = Some(Blocks { session, tokens });
-        Ok(())
+        state.blocks.get_or_try_insert_with(tokens, || {
+            let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
+            let bundle = loom::prepare(&self.cache, self.compiler.as_deref(), &shape)?;
+            let session =
+                Session::with_weights(weights, &bundle, tokens, 28, self.compiler.as_deref())?;
+            Ok(Blocks { session, rope: Rope::default() })
+        })
     }
 
     /// The rope tables, rebuilt when the geometry changes. Geometry, not just
     /// the token count: rectangular grids have different phases.
-    fn rope(&self, state: &mut State, width: usize, height: usize, text_tokens: usize) {
-        let rope = &mut state.rope;
+    fn rope(&self, rope: &mut Rope, width: usize, height: usize, text_tokens: usize) {
         if rope.width == width && rope.height == height && rope.text_tokens == text_tokens {
             return;
         }
@@ -412,6 +456,29 @@ pub fn open(checkpoint: &Path, compiler: Option<&str>) -> Result<Pipeline> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guidance_shapes_are_reused_and_a_third_evicts_the_least_recent() {
+        let mut cache = ShapeCache::default();
+        let mut builds = 0;
+        for tokens in [4115, 4097, 4115, 4097, 4115] {
+            let value = cache
+                .get_or_try_insert_with(tokens, || {
+                    builds += 1;
+                    Ok(tokens)
+                })
+                .unwrap();
+            assert_eq!(*value, tokens);
+        }
+        assert_eq!(builds, 2);
+        cache.get_or_try_insert_with(8192, || Ok(8192)).unwrap();
+        assert_eq!(cache.entries.iter().map(|(key, _)| *key).collect::<Vec<_>>(), [4115, 8192]);
+        assert!(cache
+            .get_or_try_insert_with(9000, || Err(Error("failed preparation".into())))
+            .is_err());
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[0].0, 8192);
+    }
 
     #[test]
     fn the_dimensions_the_patching_cannot_serve_are_refused() {

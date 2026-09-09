@@ -10,20 +10,19 @@
 //! one contiguous block. The correction is
 //! `[query heads][ceil(tokens / 64)][capacity]` in float32.
 use hrx::{device, Args, Buffer, DevicePtr};
-use loom::{auxiliary_kernel, Config};
+use loom::{cache::PreparedKernels, Config};
 
 use crate::{Error, Result};
 
 /// Buffers and shapes for one sequence length, reused every block.
 pub struct Sage {
+    kernels: PreparedKernels,
     tokens: usize,
     capacity: usize,
     heads: usize,
     kv_heads: usize,
     tiles: usize,
     bits: u32,
-    /// The compiler the session was opened with, for the preparation kernels.
-    compiler: Option<String>,
     pub q4: Buffer,
     pub k4: Buffer,
     pub q_scale: Buffer,
@@ -63,13 +62,13 @@ impl Sage {
         // One head's codes: a nibble or a byte per channel of 128.
         let row_bytes = if bits == 4 { 64 } else { 128 };
         let sage = Sage {
+            kernels: PreparedKernels::new(compiler),
             tokens,
             capacity,
             heads,
             kv_heads,
             tiles,
             bits,
-            compiler: compiler.map(str::to_string),
             q4: device().allocate(capacity * heads * row_bytes)?,
             k4: device().allocate(capacity * kv_heads * row_bytes)?,
             q_scale: device().allocate(capacity * heads * 4)?,
@@ -250,8 +249,8 @@ impl Sage {
     ) -> Result<()> {
         let config: Config =
             config.iter().map(|(key, value)| ((*key).to_string(), *value as u64)).collect();
-        let kernel = auxiliary_kernel(name, &config, grid, self.compiler.as_deref())?;
-        kernel.launch_2d(grid.0, grid.1, threads, args)?;
+        let kernel = self.kernels.get(name, config, grid)?;
+        unsafe { kernel.launch_2d(grid.0, grid.1, threads, args) }?;
         Ok(())
     }
 }

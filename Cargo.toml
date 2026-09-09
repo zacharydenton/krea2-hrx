@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cli", "crates/hrx", "crates/loom", "crates/tokenizer", "crates/numerics", "crates/checkpoint", "crates/session", "crates/abi", "crates/ops", "crates/models", "crates/pipeline", "crates/testkit", "crates/build-support"]
+members = ["cli", "crates/hrx", "crates/loom", "crates/tokenizer", "crates/numerics", "crates/checkpoint", "crates/session", "crates/abi", "crates/ops", "crates/models", "crates/pipeline"]
 
 [workspace.package]
 edition = "2021"
@@ -9,3 +9,6 @@ publish = false
 
 [profile.release]
 strip = true
+
+[workspace.dependencies]
+hrx-core = { package = "hrx", git = "https://github.com/zacharydenton/hrx.rs", rev = "a440e8b23586b1ae88e0f4cb616f8d6755d766dc", default-features = false, features = ["compat", "download", "ffi", "loom"] }

@@ -1,13 +1,13 @@
 //! Auxiliary Loom operations for encoding, decoding and sampling.
 //! Kernels specialize on tensor shape and launch geometry and are cached on first use.
-#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod tensor;
 
 use std::sync::{Arc, OnceLock};
 
 use hrx::{device, Buffer, DevicePtr};
-use loom::auxiliary_kernel;
+use loom::cache::PreparedKernels;
 
 pub use loom::Config;
 
@@ -27,13 +27,13 @@ impl std::error::Error for Error {}
 
 impl From<hrx::Error> for Error {
     fn from(error: hrx::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 
 impl From<loom::Error> for Error {
     fn from(error: loom::Error) -> Self {
-        Error(error.0)
+        Error(error.to_string())
     }
 }
 
@@ -55,7 +55,8 @@ pub enum Binary {
 }
 
 /// How [`Ops::norm`] scales: `x * (1 + w)` is the DiT convention, `x * w` the
-/// plain one, and the third is GroupNorm-style over the row.
+/// plain one; `Group` is the VAE's L2 normalization with bf16 rounding between
+/// normalization, sqrt(width), and weight multiplication.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Norm {
     OnePlusScale = 0,
@@ -148,18 +149,23 @@ impl Weight {
 /// The operations, over one buffer pool.
 pub struct Ops {
     pool: Arc<Pool>,
+    kernels: PreparedKernels,
     /// Compiler override for this operation set's auxiliary kernels.
     compiler: Option<String>,
 }
 
 impl Ops {
     pub fn new(pool: Arc<Pool>) -> Ops {
-        Ops { pool, compiler: None }
+        Ops { pool, compiler: None, kernels: PreparedKernels::default() }
     }
 
     /// The same, with an explicit compiler instead of `LOOM_COMPILE`/PATH.
     pub fn with_compiler(pool: Arc<Pool>, compiler: Option<&str>) -> Ops {
-        Ops { pool, compiler: compiler.map(str::to_string) }
+        Ops {
+            pool,
+            compiler: compiler.map(str::to_string),
+            kernels: PreparedKernels::new(compiler),
+        }
     }
 
     pub fn compiler(&self) -> Option<&str> {
@@ -201,18 +207,20 @@ impl Ops {
         let name =
             if wave { "norm_2_wave".to_string() } else { format!("norm_{}", mode as u8) };
         let grid = if wave { x.rows().div_ceil(8) } else { x.rows() };
-        self.launch(
-            &name,
-            config(&[("xsize", x.size()), ("cols", x.cols())]),
-            &args,
-            grid,
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                &name,
+                config(&[("xsize", x.size()), ("cols", x.cols())]),
+                &args,
+                grid,
+                1,
+                256,
+            )
+        }?;
         Ok(y)
     }
 
-    /// GroupNorm and SiLU in one pass, for the VAE's residual blocks.
+    /// VAE L2 normalization and SiLU in one pass, preserving its bf16 boundaries.
     pub fn norm_silu(&self, x: &Tensor, w: &Weight) -> Result<Tensor> {
         if w.count != x.cols() {
             return Err(Error("normalization dimensions".into()));
@@ -225,14 +233,16 @@ impl Ops {
         let y = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
         args.i32(x.rows() as i32).f32(1e-5).ptr(x.ptr()).ptr(scales).ptr(y.ptr());
-        self.launch(
-            "norm_2_wave_silu",
-            config(&[("xsize", x.size()), ("cols", x.cols())]),
-            &args,
-            x.rows().div_ceil(8),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                "norm_2_wave_silu",
+                config(&[("xsize", x.size()), ("cols", x.cols())]),
+                &args,
+                x.rows().div_ceil(8),
+                1,
+                256,
+            )
+        }?;
         Ok(y)
     }
 
@@ -245,7 +255,7 @@ impl Ops {
             Unary::Gelu => "unary_gelu",
             Unary::Sigmoid => "unary_sigmoid",
         };
-        self.launch(name, Config::new(), &args, x.size().div_ceil(256), 1, 256)?;
+        unsafe { self.launch(name, Config::new(), &args, x.size().div_ceil(256), 1, 256) }?;
         Ok(y)
     }
 
@@ -261,7 +271,16 @@ impl Ops {
             Binary::Add => "binary_add",
             Binary::Mul => "binary_mul",
         };
-        self.launch(name, config(&[("yn", y.size())]), &args, x.size().div_ceil(256), 1, 256)?;
+        unsafe {
+            self.launch(
+                name,
+                config(&[("yn", y.size())]),
+                &args,
+                x.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(z)
     }
 
@@ -279,14 +298,16 @@ impl Ops {
         let y = self.tensor(x.rows(), x.cols())?;
         let mut args = Args::new();
         args.i32(x.size() as i32).f32(theta).ptr(x.ptr()).ptr(y.ptr());
-        self.launch(
-            "rope",
-            config(&[("dim", x.cols() / heads), ("heads", heads)]),
-            &args,
-            x.size().div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                "rope",
+                config(&[("dim", x.cols() / heads), ("heads", heads)]),
+                &args,
+                x.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(y)
     }
 
@@ -298,7 +319,9 @@ impl Ops {
         }
         let mut args = Args::new();
         args.i32(sample.size() as i32).f32(delta).ptr(sample.ptr()).ptr(velocity.ptr());
-        self.launch("euler", Config::new(), &args, sample.size().div_ceil(256), 1, 256)
+        unsafe {
+            self.launch("euler", Config::new(), &args, sample.size().div_ceil(256), 1, 256)
+        }
     }
 
     /// Krea's guidance in place: `cond += scale * (cond - uncond)`, with
@@ -309,7 +332,9 @@ impl Ops {
         }
         let mut args = Args::new();
         args.i32(cond.size() as i32).f32(scale).ptr(cond.ptr()).ptr(uncond.ptr());
-        self.launch("guidance", Config::new(), &args, cond.size().div_ceil(256), 1, 256)
+        unsafe {
+            self.launch("guidance", Config::new(), &args, cond.size().div_ceil(256), 1, 256)
+        }
     }
 
     /// Multi-head attention over `batch * tokens` rows, softmax in float32.
@@ -350,23 +375,25 @@ impl Ops {
                 let out = self.tensor(rows, dim)?;
                 let mut args = Args::new();
                 args.i32(out.size() as i32).ptr(source.ptr()).ptr(out.ptr());
-                self.launch(
-                    "head_pack",
-                    config(&[
-                        ("dim", dim),
-                        ("tokens", tokens),
-                        ("heads", heads),
-                        // Queries are already one head each; keys and values
-                        // repeat over the group they serve.
-                        ("kv", if index == 0 { heads } else { kv }),
-                        ("xsize", source.size()),
-                        ("ysize", out.size()),
-                    ]),
-                    &args,
-                    out.size().div_ceil(256),
-                    1,
-                    256,
-                )?;
+                unsafe {
+                    self.launch(
+                        "head_pack",
+                        config(&[
+                            ("dim", dim),
+                            ("tokens", tokens),
+                            ("heads", heads),
+                            // Queries are already one head each; keys and values
+                            // repeat over the group they serve.
+                            ("kv", if index == 0 { heads } else { kv }),
+                            ("xsize", source.size()),
+                            ("ysize", out.size()),
+                        ]),
+                        &args,
+                        out.size().div_ceil(256),
+                        1,
+                        256,
+                    )
+                }?;
                 Ok(out)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -389,14 +416,16 @@ impl Ops {
         let probabilities = self.tensor(rows, tokens)?;
         let mut args = Args::new();
         args.i32(rows as i32).ptr(scores.ptr()).ptr(probabilities.ptr());
-        self.launch(
-            if causal { "softmax_causal" } else { "softmax" },
-            config(&[("xsize", count), ("tokens", tokens)]),
-            &args,
-            rows,
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                if causal { "softmax_causal" } else { "softmax" },
+                config(&[("xsize", count), ("tokens", tokens)]),
+                &args,
+                rows,
+                1,
+                256,
+            )
+        }?;
 
         let weighted = self.tensor(rows, dim)?;
         self.matmul(
@@ -415,21 +444,23 @@ impl Ops {
         let out = self.tensor(batch * tokens, heads * dim)?;
         let mut args = Args::new();
         args.i32(weighted.size() as i32).ptr(weighted.ptr()).ptr(out.ptr());
-        self.launch(
-            "head_unpack",
-            config(&[
-                ("dim", dim),
-                ("tokens", tokens),
-                ("heads", heads),
-                ("kv", heads),
-                ("xsize", weighted.size()),
-                ("ysize", out.size()),
-            ]),
-            &args,
-            weighted.size().div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                "head_unpack",
+                config(&[
+                    ("dim", dim),
+                    ("tokens", tokens),
+                    ("heads", heads),
+                    ("kv", heads),
+                    ("xsize", weighted.size()),
+                    ("ysize", out.size()),
+                ]),
+                &args,
+                weighted.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(out)
     }
 
@@ -471,20 +502,22 @@ impl Ops {
         // One workgroup per output pixel when a row of channels is a whole
         // number of 32-lane reads.
         let coalesced = kernel == 3 && x.cols().is_multiple_of(32) && x.cols() <= 1024;
-        self.launch(
-            if coalesced { "im2col_coalesced" } else { "im2col" },
-            config(&[
-                ("xsize", x.size()),
-                ("channels", x.cols()),
-                ("width", width),
-                ("height", height),
-                ("kernel", kernel),
-            ]),
-            &args,
-            if coalesced { height * width } else { patches.size().div_ceil(256) },
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                if coalesced { "im2col_coalesced" } else { "im2col" },
+                config(&[
+                    ("xsize", x.size()),
+                    ("channels", x.cols()),
+                    ("width", width),
+                    ("height", height),
+                    ("kernel", kernel),
+                ]),
+                &args,
+                if coalesced { height * width } else { patches.size().div_ceil(256) },
+                1,
+                256,
+            )
+        }?;
         self.linear(&patches, w, bias)
     }
 
@@ -519,27 +552,29 @@ impl Ops {
             (_, true) => format!("{name}_wide"),
             _ => name.to_string(),
         };
-        self.launch(
-            &name,
-            config(&[
-                ("m", m),
-                ("n", n),
-                ("k", k),
-                // A is the image, not a patch matrix.
-                ("asize", m * x.cols()),
-                ("bsize", n * k),
-                ("csize", m * n),
-                ("astride", m * x.cols()),
-                ("bstride", n * k),
-                ("channels", x.cols()),
-                ("width", width),
-                ("height", height),
-            ]),
-            &args,
-            n.div_ceil(tile_n),
-            m.div_ceil(tile_m),
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                &name,
+                config(&[
+                    ("m", m),
+                    ("n", n),
+                    ("k", k),
+                    // A is the image, not a patch matrix.
+                    ("asize", m * x.cols()),
+                    ("bsize", n * k),
+                    ("csize", m * n),
+                    ("astride", m * x.cols()),
+                    ("bstride", n * k),
+                    ("channels", x.cols()),
+                    ("width", width),
+                    ("height", height),
+                ]),
+                &args,
+                n.div_ceil(tile_n),
+                m.div_ceil(tile_m),
+                256,
+            )
+        }?;
         Ok(y)
     }
 
@@ -551,20 +586,25 @@ impl Ops {
         let y = self.tensor(height * width * 4, x.cols())?;
         let mut args = Args::new();
         args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
-        self.launch(
-            "upsample",
-            config(&[("xsize", x.size()), ("channels", x.cols()), ("width", width)]),
-            &args,
-            y.size().div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.launch(
+                "upsample",
+                config(&[("xsize", x.size()), ("channels", x.cols()), ("width", width)]),
+                &args,
+                y.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(y)
     }
 
     /// Launches one auxiliary kernel: the models graph has kernels of its own
     /// (embedding, layer taps, the modulation table) that are not operations.
-    pub fn launch(
+    /// # Safety
+    /// The argument layout, allocation extents, launch dimensions, and configuration
+    /// must match the embedded kernel. All allocations belong to the current stream.
+    pub unsafe fn launch(
         &self,
         name: &str,
         config: Config,
@@ -573,9 +613,9 @@ impl Ops {
         grid_y: usize,
         threads: u32,
     ) -> Result<()> {
-        let kernel =
-            auxiliary_kernel(name, &config, (grid_x as u32, grid_y as u32), self.compiler())?;
-        kernel.launch_2d(grid_x as u32, grid_y as u32, threads, args)?;
+        self.pool.check_stream()?;
+        let kernel = self.kernels.get(name, config, (grid_x as u32, grid_y as u32))?;
+        unsafe { kernel.launch_2d(grid_x as u32, grid_y as u32, threads, args) }?;
         Ok(())
     }
 
@@ -627,7 +667,16 @@ impl Ops {
             ("astride", m * k),
             ("bstride", n * k),
         ]);
-        self.launch(&name, config, &args, n.div_ceil(tile_n), batches * m.div_ceil(tile_m), 256)
+        unsafe {
+            self.launch(
+                &name,
+                config,
+                &args,
+                n.div_ceil(tile_n),
+                batches * m.div_ceil(tile_m),
+                256,
+            )
+        }
     }
 }
 

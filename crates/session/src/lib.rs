@@ -6,7 +6,7 @@
 //! prepare -> fused gate|up GEMM with the SwiGLU product in its epilogue ->
 //! prepare -> down GEMM with the gated residual. The residual stream stays on
 //! the device between blocks, in bf16, as ComfyUI keeps it.
-#![deny(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod bundle;
 pub mod sage;
@@ -61,13 +61,13 @@ impl std::error::Error for Error {}
 
 impl From<hrx::Error> for Error {
     fn from(error: hrx::Error) -> Self {
-        Error::failed(error.0)
+        Error::failed(error.to_string())
     }
 }
 
 impl From<loom::Error> for Error {
     fn from(error: loom::Error) -> Self {
-        Error::failed(error.0)
+        Error::failed(error.to_string())
     }
 }
 
@@ -75,7 +75,7 @@ impl From<krea2_checkpoint::Error> for Error {
     fn from(error: krea2_checkpoint::Error) -> Self {
         // The checkpoint reader's rejections are all about the file the caller
         // named, so they read as invalid arguments through the C ABI.
-        Error::failed(error.0)
+        Error::failed(error.to_string())
     }
 }
 
@@ -126,6 +126,7 @@ struct Buffers {
 }
 
 pub struct Session {
+    stream: std::sync::Arc<hrx::Device>,
     tokens: usize,
     layers: usize,
     metadata: Metadata,
@@ -186,9 +187,7 @@ impl Session {
         }
         let path = kernels_dir.join("launch.txt");
         let text = std::fs::read_to_string(&path).map_err(|_| {
-            Error::invalid(
-                "invalid kernel launch metadata; rebuild with scripts/build_kernels.py",
-            )
+            Error::invalid("invalid kernel launch metadata; rebuild with loom::prepare")
         })?;
         Metadata::parse(&text, tokens)
     }
@@ -201,6 +200,8 @@ impl Session {
         layers: usize,
         compiler: Option<&str>,
     ) -> Result<Session> {
+        let stream = weights.stream.clone();
+        let _scope = stream.enter();
         if weights.bits() != metadata.gemm_bits {
             return Err(Error::invalid(format!(
                 "kernel bundle built for int{} GEMM operands but the weights are int{}",
@@ -278,6 +279,7 @@ impl Session {
             )?),
         };
         Ok(Session {
+            stream: stream.clone(),
             tokens,
             layers,
             metadata,
@@ -291,6 +293,11 @@ impl Session {
             lock: Mutex::new(()),
             _weights: weights,
         })
+    }
+
+    /// Select the stream that owns this session's weights and buffers.
+    pub fn enter(&self) -> hrx::Scope {
+        self.stream.enter()
     }
 
     pub fn tokens(&self) -> usize {
@@ -319,12 +326,12 @@ impl Session {
         args: &Args,
     ) -> Result<()> {
         if !self.profile.load(Ordering::Relaxed) {
-            kernel.launch_2d(grid_x, grid_y, threads, args)?;
+            unsafe { kernel.launch_2d(grid_x, grid_y, threads, args) }?;
             return Ok(());
         }
         device().synchronize()?;
         let began = std::time::Instant::now();
-        kernel.launch_2d(grid_x, grid_y, threads, args)?;
+        unsafe { kernel.launch_2d(grid_x, grid_y, threads, args) }?;
         device().synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
         Ok(())
@@ -407,7 +414,11 @@ impl Session {
         first_block: usize,
         block_count: Option<usize>,
     ) -> Result<()> {
-        let _serialized = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _scope = self.stream.enter();
+        let _serialized = self
+            .lock
+            .lock()
+            .map_err(|_| Error::failed("session is poisoned; create a new session"))?;
         let count = block_count.unwrap_or(self.layers.saturating_sub(first_block));
         if first_block >= self.layers || count < 1 || count > self.layers - first_block {
             return Err(Error::invalid("block range must be within the loaded layers"));
@@ -445,14 +456,22 @@ impl Session {
     /// `x` is bf16 `[tokens][6144]`, read and written in place; `mods` is f32
     /// `[layers][6][6144]`. The rope tables stay host-side because they change
     /// only when the image geometry does.
-    pub fn run_device(
+    ///
+    /// # Safety
+    /// `x` and `mods` must span the documented shapes on this session's stream.
+    /// Use `enter` when allocating input storage through the compatibility API.
+    pub unsafe fn run_device(
         &self,
         x: DevicePtr,
         mods: DevicePtr,
         cos: &[f32],
         sin: &[f32],
     ) -> Result<()> {
-        let _serialized = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _scope = self.stream.enter();
+        let _serialized = self
+            .lock
+            .lock()
+            .map_err(|_| Error::failed("session is poisoned; create a new session"))?;
         let tokens = self.tokens;
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
@@ -467,7 +486,8 @@ impl Session {
         for index in 0..self.layers {
             self.block(index, mods)?;
         }
-        device().synchronize()?;
+        // The output copy and subsequent consumers are ordered after the
+        // blocks on this session's stream; no host wait is needed here.
         self.report(self.layers);
         device().copy_device_to_device(
             x,
@@ -693,19 +713,12 @@ mod tests {
     use super::*;
 
     /// Host runs must update the RoPE fingerprint when tables change A → B → A.
-    /// Requires a checkpoint, a 4115-token bundle in `KREA2_KERNELS`, and a GPU.
+    /// Requires a local checkpoint and GPU. The bundle is compiled by HRX.
     #[test]
+    #[ignore = "requires Krea checkpoint and gfx1151"]
     fn every_path_that_fills_the_rope_buffers_records_what_it_put_there() {
-        let Some((checkpoint, bundle, tokens)) = fixture() else {
-            return;
-        };
-        let session = match Session::open(&checkpoint, &bundle, tokens, 1) {
-            Ok(session) => session,
-            Err(error) => {
-                eprintln!("skipping: {error}");
-                return;
-            }
-        };
+        let (checkpoint, bundle, tokens) = fixture();
+        let session = Session::open(&checkpoint, &bundle, tokens, 1).expect("resident session");
         let resident = || *session.rope.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(resident(), None, "nothing is resident before the first call");
 
@@ -725,14 +738,24 @@ mod tests {
         assert_eq!(resident(), after_a, "A's second upload was not recorded");
     }
 
-    fn fixture() -> Option<(std::path::PathBuf, std::path::PathBuf, usize)> {
+    fn fixture() -> (std::path::PathBuf, std::path::PathBuf, usize) {
         use std::path::PathBuf;
         let checkpoint =
             std::env::var_os("KREA2_MODEL").map(PathBuf::from).unwrap_or_else(|| {
                 PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
                     .join("comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
             });
-        let bundle = std::env::var_os("KREA2_KERNELS").map(PathBuf::from)?;
-        (checkpoint.is_file() && bundle.is_dir()).then_some((checkpoint, bundle, 4115))
+        assert!(checkpoint.is_file(), "set KREA2_MODEL to a local checkpoint");
+        let tokens = 4115;
+        let bundle =
+            std::env::var_os("KREA2_KERNELS").map(PathBuf::from).unwrap_or_else(|| {
+                loom::prepare(
+                    &loom::user_cache_directory("blocks-gfx1151-v1").unwrap(),
+                    None,
+                    &loom::Shape::new(tokens as i32, 8, 16).unwrap(),
+                )
+                .expect("HRX kernel bundle")
+            });
+        (checkpoint, bundle, tokens)
     }
 }

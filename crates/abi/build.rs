@@ -2,7 +2,6 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    krea2_build_support::emit_rpath();
     headers();
 }
 
@@ -32,8 +31,7 @@ fn headers() {
             .rename_item("ProgressFn", "krea2_progress")
             .generate();
         match generated {
-            // Header generation failures are warnings; the Rust build can continue.
-            Err(error) => println!("cargo:warning=cannot generate {header}: {error}"),
+            Err(error) => panic!("cannot generate {header}: {error}"),
             Ok(bindings) => {
                 bindings.write_to_file(out.join(header));
                 if let Some(include) = repository_include() {
@@ -50,6 +48,8 @@ const BANNER: &str = "// Generated from the Rust sources by crates/abi/build.rs.
 /// `<repo>/build/include`, when this is a build inside the checkout.
 fn repository_include() -> Option<PathBuf> {
     let manifest = std::env::var_os("CARGO_MANIFEST_DIR")?;
-    let root = Path::new(&manifest).ancestors().find(|path| path.join("kernels").is_dir())?;
+    let root = Path::new(&manifest)
+        .ancestors()
+        .find(|path| path.join("crates/loom/kernels").is_dir())?;
     Some(root.join("build/include"))
 }

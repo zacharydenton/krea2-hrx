@@ -249,25 +249,20 @@ fn vector(file: &Checkpoint, name: &str) -> Result<Span> {
 mod tests {
     use super::*;
 
-    fn checkpoint() -> Option<Checkpoint> {
+    fn checkpoint() -> Checkpoint {
         let path = std::env::var_os("KREA2_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"))
                     .join("comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
             });
-        match Checkpoint::open(&path) {
-            Ok(file) => Some(file),
-            Err(error) => {
-                eprintln!("skipping: {error}");
-                None
-            }
-        }
+        Checkpoint::open(&path).expect("set KREA2_MODEL to a local checkpoint")
     }
 
     #[test]
+    #[ignore = "requires a local Krea checkpoint"]
     fn the_plan_lays_out_krea_twos_blocks() {
-        let Some(file) = checkpoint() else { return };
+        let file = checkpoint();
         let plan = Plan::for_checkpoint(&file).expect("a plan");
         assert_eq!(plan.layers, 28);
         assert_eq!(plan.bits, 8);
@@ -300,8 +295,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a local Krea checkpoint"]
     fn the_gate_and_up_rows_interleave_in_sixteens() {
-        let Some(file) = checkpoint() else { return };
+        let file = checkpoint();
         let plan = Plan::for_checkpoint(&file).expect("a plan");
         let gu = plan.span("blocks.0.gu.q").expect("gu");
         let half = gu.rows / 2;
@@ -329,8 +325,9 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a local Krea checkpoint"]
     fn the_concatenated_scales_follow_their_rows() {
-        let Some(file) = checkpoint() else { return };
+        let file = checkpoint();
         let plan = Plan::for_checkpoint(&file).expect("a plan");
         let scales = plan.span("blocks.0.qkvg.s").expect("qkvg scales");
         let mut at = 0;

@@ -10,7 +10,7 @@ use krea2_session::{Session, Weights, HEAD_DIM, HIDDEN};
 
 pub mod pipeline;
 
-/// The block ABI's version; `krea2_loom.py` refuses anything else. These carry
+/// The block ABI's version. Foreign callers check this before using handles. These carry
 /// the names the header has always had, because C callers use them.
 pub const KREA2_ABI_VERSION: u32 = 3;
 
@@ -37,13 +37,7 @@ pub extern "C" fn krea2_abi_version() -> u32 {
 /// # Safety
 /// `error` must be null or point to `capacity` writable bytes.
 pub(crate) unsafe fn report(error: *mut c_char, capacity: usize, message: &str) {
-    if error.is_null() || capacity == 0 {
-        return;
-    }
-    let bytes = message.as_bytes();
-    let room = std::cmp::min(bytes.len(), capacity - 1);
-    std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, error, room);
-    *error.add(room) = 0;
+    hrx::ffi::report(error, capacity, message);
 }
 
 /// Runs `body`, turning its failure — or a panic — into a code and a message.
@@ -55,26 +49,14 @@ unsafe fn guard(
     capacity: usize,
     body: impl FnOnce() -> krea2_session::Result<()> + std::panic::UnwindSafe,
 ) -> c_int {
-    match std::panic::catch_unwind(body) {
-        Ok(Ok(())) => KREA2_OK,
-        Ok(Err(failure)) => {
-            report(error, capacity, &failure.message);
-            if failure.invalid_argument {
-                KREA2_INVALID_ARGUMENT
-            } else {
-                KREA2_ERROR
-            }
-        }
-        Err(panic) => {
-            let message = panic
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_string())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "panic".to_string());
-            report(error, capacity, &message);
-            KREA2_ERROR
-        }
-    }
+    hrx::ffi::boundary(error, capacity, KREA2_ERROR, || {
+        body().map_err(|failure| {
+            hrx::ffi::Failure::new(
+                if failure.invalid_argument { KREA2_INVALID_ARGUMENT } else { KREA2_ERROR },
+                failure.message,
+            )
+        })
+    })
 }
 
 /// # Safety
@@ -226,10 +208,14 @@ pub unsafe extern "C" fn krea2_run_range(
             // The declared counts are checked against the session's shape inside
             // run(); the slices are built from them, so a wrong count is a caller
             // error either way.
-            let stream = std::slice::from_raw_parts_mut(x, x_elements);
-            let modulation = std::slice::from_raw_parts(mods, mods_elements);
-            let cos = std::slice::from_raw_parts(cos, rope_elements);
-            let sin = std::slice::from_raw_parts(sin, rope_elements);
+            let stream = hrx::ffi::slice_mut(x, x_elements)
+                .map_err(|e| krea2_session::Error::invalid(e.to_string()))?;
+            let modulation = hrx::ffi::slice(mods, mods_elements)
+                .map_err(|e| krea2_session::Error::invalid(e.to_string()))?;
+            let cos = hrx::ffi::slice(cos, rope_elements)
+                .map_err(|e| krea2_session::Error::invalid(e.to_string()))?;
+            let sin = hrx::ffi::slice(sin, rope_elements)
+                .map_err(|e| krea2_session::Error::invalid(e.to_string()))?;
             let count = match block_count {
                 -1 => None,
                 n => Some(n as usize),
@@ -349,4 +335,87 @@ pub extern "C" fn krea2_hidden_size() -> c_int {
 #[no_mangle]
 pub extern "C" fn krea2_head_dim() -> c_int {
     HEAD_DIM
+}
+
+#[cfg(test)]
+mod native_contracts {
+    use super::*;
+    use std::ptr::{null, null_mut};
+
+    #[test]
+    fn constructor_failures_clear_output_handles_and_terminate_errors() {
+        for capacity in [1usize, 8, 128] {
+            let mut error = [0x55u8; 128];
+            let mut output = std::ptr::dangling_mut::<SessionHandle>();
+            let status = unsafe {
+                krea2_create(
+                    null(),
+                    null(),
+                    -1,
+                    1,
+                    &mut output,
+                    error.as_mut_ptr().cast(),
+                    capacity,
+                )
+            };
+            assert_eq!(status, KREA2_INVALID_ARGUMENT);
+            assert!(output.is_null());
+            assert!(error[..capacity].contains(&0));
+            assert!(error[capacity..].iter().all(|&v| v == 0x55));
+        }
+    }
+
+    #[test]
+    fn null_session_and_shared_weight_handles_fail_without_gpu_initialization() {
+        let mut error = [0i8; 128];
+        let status = unsafe {
+            krea2_run(
+                null_mut(),
+                null_mut(),
+                0,
+                null(),
+                0,
+                null(),
+                null(),
+                0,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        assert_eq!(status, KREA2_INVALID_ARGUMENT);
+        assert_ne!(error[0], 0);
+        let mut output = std::ptr::dangling_mut::<SessionHandle>();
+        let status = unsafe {
+            krea2_create_shared(
+                null(),
+                null(),
+                16,
+                1,
+                &mut output,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        assert_eq!(status, KREA2_INVALID_ARGUMENT);
+        assert!(output.is_null());
+        assert_eq!(unsafe { krea2_weights_bits(null()) }, 0);
+        unsafe {
+            krea2_destroy(null_mut());
+            krea2_weights_release(null_mut());
+        }
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
+        assert!(!maps.contains("libhrx.so"));
+    }
+
+    #[test]
+    fn panic_containment_uses_the_shared_ffi_boundary() {
+        let mut error = [0i8; 64];
+        let status = unsafe {
+            guard(error.as_mut_ptr(), error.len(), || -> krea2_session::Result<()> {
+                panic!("test model panic")
+            })
+        };
+        assert_eq!(status, KREA2_ERROR);
+        assert_ne!(error[0], 0);
+    }
 }

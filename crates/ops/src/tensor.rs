@@ -21,6 +21,7 @@ struct FreeList {
 #[derive(Default)]
 pub struct Pool {
     free: Mutex<FreeList>,
+    stream: std::sync::OnceLock<Arc<hrx::Device>>,
 }
 
 impl Pool {
@@ -31,7 +32,17 @@ impl Pool {
     /// A buffer of at least `bytes`. A cached block is taken when it is not
     /// more than twice the size asked for, which is what keeps the free list
     /// from returning a 100 MB block for a 1 KB tensor.
+    pub(crate) fn check_stream(&self) -> Result<()> {
+        let current = hrx::try_device()?;
+        let owner = self.stream.get_or_init(|| current.clone());
+        if !Arc::ptr_eq(owner, &current) {
+            return Err(Error("a tensor pool must only be used on its owning stream".into()));
+        }
+        Ok(())
+    }
+
     fn take(self: &Arc<Self>, bytes: usize) -> Result<Pooled> {
+        self.check_stream()?;
         let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
         let reusable = free
             .blocks
@@ -52,7 +63,7 @@ impl Pool {
 
     fn give_back(&self, buffer: Buffer) {
         let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
-        if free.cached + buffer.len() > LIMIT {
+        if buffer.len() > LIMIT.saturating_sub(free.cached) {
             return; // dropping the buffer releases it
         }
         free.cached += buffer.len();
@@ -235,15 +246,9 @@ fn bytes(rows: usize, cols: usize) -> Result<usize> {
 mod tests {
     use super::*;
 
-    fn usable() -> bool {
-        hrx::try_device().is_ok()
-    }
-
     #[test]
+    #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_tensor_round_trips_through_the_device() {
-        if !usable() {
-            return;
-        }
         let pool = Pool::new();
         let values: Vec<u16> = (0..64u16).map(|i| i.wrapping_mul(577)).collect();
         let tensor = Tensor::from_slice(&pool, &values, 8, 8).expect("upload");
@@ -251,10 +256,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_view_reads_the_rows_it_names() {
-        if !usable() {
-            return;
-        }
         let pool = Pool::new();
         let values: Vec<u16> = (0..64u16).collect();
         let tensor = Tensor::from_slice(&pool, &values, 8, 8).expect("upload");
@@ -278,10 +281,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_shared_view_keeps_its_allocation_and_stays_inside_it() {
-        if !usable() {
-            return;
-        }
         let buffer = std::sync::Arc::new(device().allocate(64 * 2).expect("an allocation"));
         let base = buffer.ptr();
         // Past the end, and before the start: both are outside.
@@ -305,10 +306,8 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires gfx1151 and provisioned HRX"]
     fn dropped_storage_comes_back_from_the_pool() {
-        if !usable() {
-            return;
-        }
         let pool = Pool::new();
         let first = Tensor::new(&pool, 16, 16).expect("a tensor").ptr();
         // Dropped above, so the same block should serve the next request.

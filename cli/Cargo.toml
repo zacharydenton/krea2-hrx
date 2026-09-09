@@ -16,6 +16,3 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 krea2-pipeline = { path = "../crates/pipeline" }
 png = "0.17"
-
-[build-dependencies]
-krea2-build-support = { path = "../crates/build-support" }

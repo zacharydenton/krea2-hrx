@@ -99,14 +99,16 @@ impl Models {
         device().write(identifiers.ptr(), ids)?;
         let mut args = Args::new();
         args.i32(x.size() as i32).ptr(embedding.values).ptr(identifiers.ptr()).ptr(x.ptr());
-        self.ops.launch(
-            "embedding",
-            config(&[("wsize", embedding.count), ("rows", count), ("cols", TEXT_WIDTH)]),
-            &args,
-            x.size().div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.ops.launch(
+                "embedding",
+                config(&[("wsize", embedding.count), ("rows", count), ("cols", TEXT_WIDTH)]),
+                &args,
+                x.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
 
         for index in 0..35 {
             let layer = format!("layers.{index}");
@@ -163,18 +165,20 @@ impl Models {
             if index % 3 == 1 {
                 let mut args = Args::new();
                 args.i32((tokens * TEXT_WIDTH) as i32).ptr(x.ptr()).ptr(taps.ptr());
-                self.ops.launch(
-                    "tap",
-                    config(&[
-                        ("xsize", x.size()),
-                        ("ysize", taps.size()),
-                        ("tap1", (index - 1) / 3 + 1),
-                    ]),
-                    &args,
-                    (tokens * TEXT_WIDTH).div_ceil(256),
-                    1,
-                    256,
-                )?;
+                unsafe {
+                    self.ops.launch(
+                        "tap",
+                        config(&[
+                            ("xsize", x.size()),
+                            ("ysize", taps.size()),
+                            ("tap1", (index - 1) / 3 + 1),
+                        ]),
+                        &args,
+                        (tokens * TEXT_WIDTH).div_ceil(256),
+                        1,
+                        256,
+                    )
+                }?;
             }
         }
         Ok(taps)
@@ -271,14 +275,16 @@ impl Models {
             .ptr(x.ptr())
             .ptr(projector.values)
             .ptr(projected.ptr());
-        self.ops.launch(
-            "fuse",
-            config(&[("xsize", x.size()), ("wsize", 12)]),
-            &args,
-            projected.size().div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.ops.launch(
+                "fuse",
+                config(&[("xsize", x.size()), ("wsize", 12)]),
+                &args,
+                projected.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         x = projected;
         for index in 0..2 {
             x =
@@ -332,14 +338,16 @@ impl Models {
             .ptr(vector.ptr())
             .ptr(self.block_tables.ptr())
             .ptr(out.ptr());
-        self.ops.launch(
-            "modulation",
-            config(&[("xsize", vector.size())]),
-            &args,
-            MODULATION_ELEMENTS.div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.ops.launch(
+                "modulation",
+                config(&[("xsize", vector.size())]),
+                &args,
+                MODULATION_ELEMENTS.div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(out)
     }
 
@@ -363,7 +371,7 @@ impl Models {
         let factor = self.ops.tensor(1, WIDTH)?;
         let mut args = Args::new();
         args.i32(WIDTH as i32).ptr(scale.ptr()).ptr(factor.ptr());
-        self.ops.launch("unary_one", Config::new(), &args, WIDTH / 256, 1, 256)?;
+        unsafe { self.ops.launch("unary_one", Config::new(), &args, WIDTH / 256, 1, 256) }?;
         let normed = self.ops.norm(
             x,
             self.transformer.get("last.norm.scale")?,
@@ -464,19 +472,21 @@ impl Models {
         let y = self.ops.tensor(x.rows(), count)?;
         let mut args = Args::new();
         args.i32(y.size() as i32).ptr(x.ptr()).ptr(y.ptr());
-        self.ops.launch(
-            "columns",
-            config(&[
-                ("xsize", x.size()),
-                ("cols", count),
-                ("width", x.cols()),
-                ("start1", start + 1),
-            ]),
-            &args,
-            y.size().div_ceil(256),
-            1,
-            256,
-        )?;
+        unsafe {
+            self.ops.launch(
+                "columns",
+                config(&[
+                    ("xsize", x.size()),
+                    ("cols", count),
+                    ("width", x.cols()),
+                    ("start1", start + 1),
+                ]),
+                &args,
+                y.size().div_ceil(256),
+                1,
+                256,
+            )
+        }?;
         Ok(y)
     }
 
