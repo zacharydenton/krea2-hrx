@@ -45,8 +45,28 @@ release criterion.
 The default fixture directory is `build/quality`; `KREA2_QUALITY_FIXTURE` can point
 to another copy of the same frozen fixture. `KREA2_CHECKPOINT` selects the native
 candidate's checkpoint. Missing fixtures or weights fail explicitly. Reference
-file hashes are pinned in `tests/fixtures/unquantized.json`; the runner never
-creates or updates its own ground truth. The test needs no Python, NumPy or Torch.
+file hashes are pinned in `crates/pipeline/tests/fixtures/unquantized.json`; the
+runner never creates or updates its own ground truth. The test needs no Python,
+NumPy or Torch.
+
+Because it never creates its ground truth, the fixture has to come from somewhere,
+and `build/quality` is not versioned. `scripts/capture_reference.py` is that
+somewhere: the half of the gate that needs Torch, Diffusers and the unquantized
+checkpoint, so it runs in an environment this repository does not otherwise depend
+on. Without it a lost `build/` would end the gate permanently.
+
+```sh
+python3 scripts/capture_reference.py reference               # ground truth: noise, text, bf16 latent and image
+python3 scripts/capture_reference.py accept --latents FILE   # promote a native run to the accepted baseline
+python3 scripts/capture_reference.py manifest --write        # re-pin the hashes after either
+```
+
+`reference` refuses to overwrite an existing fixture without `--force`, because
+re-minting truth from a build that has already drifted is the one mistake this gate
+cannot survive. `accept` takes a `KREA2_QUALITY_OUTPUT` dump and is the only way to
+move the baseline; the pinned hashes make that a deliberate, reviewable commit
+rather than something a passing run can do to itself. A fresh capture is a new
+fixture with new hashes, so `manifest` follows either of the other two.
 
 The fixture contains `job.json`, `noise.npy` (`[4096,64]`), `text.npy`
 (`[19,12,2560]`), `bf16.npy` and accepted `w8a8.npy` (`[1,4096,64]`), plus
