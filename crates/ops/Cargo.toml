@@ -12,7 +12,7 @@ name = "krea2_ops"
 [dependencies]
 hrx.workspace = true
 # Reinterpreting bf16 element slices as bytes for the runtime's transfers,
-# which take &[u8]; compat's write<T: Pod>/read<T: Pod> did this internally.
+# which take &[u8] rather than a Pod element type.
 bytemuck = "1"
 krea2-numerics = { path = "../numerics" }
 krea2-kernels = { path = "../kernels" }

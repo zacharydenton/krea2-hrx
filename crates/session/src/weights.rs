@@ -79,8 +79,10 @@ impl Weights {
                 stream.upload(chunk, &staging[..staged * pitch])?;
             }
         }
-        // Uploads are queued and the runtime holds staging until it is told to
-        // wait; draining here bounds host residency after a 13 GB checkpoint.
+        // Not what bounds host memory: Stream::upload copies into runtime
+        // staging and stops referencing the caller's slice, and it submits and
+        // waits on its own once staging passes 64 MB. Draining here is so a
+        // failed upload surfaces at load rather than at the first dispatch.
         stream.synchronize()?;
         Ok(Weights { plan, storage })
     }
