@@ -100,7 +100,17 @@ pub fn auxiliary_kernel(
     let mut request = hrx::loom::Specialization::new(&symbol);
     request.config =
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
+    request.report = crate::kernel_reports();
     let artifact = compiler.module(source).compile(&request, &cache_root()?)?;
+    for diagnostic in artifact.diagnostics() {
+        eprintln!(
+            "krea2 kernel {name}: {} {}: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+    }
+    if let Some(report) = artifact.report() {
+        eprintln!("krea2 kernel {name} report: {report}");
+    }
     // Safety: the shared compiler produced this export from embedded model source.
     let kernel = Arc::new(unsafe { stream.load_artifact(&artifact)? });
     let mut loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;

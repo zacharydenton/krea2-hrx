@@ -49,3 +49,9 @@ pub type Settings = std::collections::BTreeMap<String, String>;
 pub fn config<const N: usize>(entries: [(&str, u64); N]) -> Config {
     entries.into_iter().map(|(key, value)| (key.to_string(), value)).collect()
 }
+
+/// Whether to ask the compiler for its report on every kernel it builds.
+/// Off by default: the reports are large and only wanted when tuning.
+pub fn kernel_reports() -> bool {
+    std::env::var_os("KREA2_KERNEL_REPORT").is_some_and(|v| v == "1")
+}
