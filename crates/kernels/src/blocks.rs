@@ -219,7 +219,6 @@ pub fn prepare_for_target(
     target: &hrx::Target,
 ) -> Result<PreparedBundle> {
     let shared = crate::cache::compiler_for_target(compiler_path, target)?;
-    let cache = crate::cache_root()?;
     let jobs = shape.jobs();
 
     // A cold shape compiles every block kernel, and the compiler is built for
@@ -238,7 +237,7 @@ pub fn prepare_for_target(
     // compile_all does not short-circuit, so every kernel is attempted and the
     // first failure in job order is the one reported.
     let mut artifacts = BTreeMap::new();
-    for (job, outcome) in jobs.iter().zip(shared.compile_all(&requests, &cache)) {
+    for (job, outcome) in jobs.iter().zip(shared.compile_all(&requests)) {
         let artifact = outcome?;
         crate::report(&job.stem, &artifact);
         artifacts.insert(job.stem.clone(), artifact);

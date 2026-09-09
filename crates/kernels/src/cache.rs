@@ -106,7 +106,7 @@ impl PreparedKernels {
 }
 
 pub fn cache_root() -> Result<PathBuf> {
-    Ok(hrx::bundle::cache_root()?.join("kernels"))
+    Ok(hrx::bundle::kernel_cache()?)
 }
 
 /// The embedded source for an auxiliary kernel, named in the error when there
@@ -139,7 +139,7 @@ pub fn auxiliary_kernel(
     request.config =
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
     request.report = crate::kernel_reports();
-    let artifact = compiler.module(source).compile(&request, &cache_root()?)?;
+    let artifact = compiler.module(source).compile(&request)?;
     crate::report(name, &artifact);
     // Safety: the shared compiler produced this export from embedded model source.
     let kernel = unsafe { stream.load_artifact(&artifact)? };

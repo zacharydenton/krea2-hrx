@@ -126,6 +126,24 @@ struct Buffers {
     sin: Buffer,
 }
 
+/// A recording in progress: the graph, and the node the next launch comes
+/// after. The block loop is a hard serial chain -- every stage reads what the
+/// one before it wrote -- so each launch depends on exactly its predecessor.
+struct Recording<'g> {
+    graph: hrx::Graph<'g>,
+    last: Option<hrx::Node>,
+}
+
+/// Where a block's launches go: straight to the stream, or into a recording.
+///
+/// A graph fixes addresses, constants and grids at record time, so one is valid
+/// only for the session that recorded it and only while that session's buffers
+/// live. Both are the session's own lifetime, which is what `'g` ties together.
+enum Sink<'g, 'r> {
+    Stream(&'r mut Stream),
+    Record(&'r mut Recording<'g>),
+}
+
 /// The gate half of the fused QKVG buffer: from its offset to the end.
 fn gate_half(fused: &Buffer) -> Result<View<'_>> {
     let at = GATE_OFFSET as usize * 2;
@@ -138,6 +156,10 @@ pub struct Session {
     metadata: Metadata,
     kernels: Kernels,
     blocks: Vec<Block>,
+    /// Declared before the buffers and kernels it records, because fields drop
+    /// in declaration order and a graph must be released before the allocations
+    /// it names are.
+    graph: RefCell<Option<hrx::GraphExec>>,
     buffers: Buffers,
     // Calls on one session are serialized: they share the scratch buffers.
     /// The smoothed attention kernels' preparation pass, when the bundle was
@@ -288,6 +310,7 @@ impl Session {
             blocks,
             buffers,
             sage,
+            graph: RefCell::new(None),
             rope: Cell::new(None),
             profile: AtomicBool::new(false),
             stages: RefCell::new(Vec::new()),
@@ -309,19 +332,20 @@ impl Session {
         self.profile.swap(enable, Ordering::Relaxed)
     }
 
-    /// One kernel, timed when profiling is on. The synchronize on either side
-    /// is what makes a stage's number mean anything.
+    /// One kernel, into the stream or into a recording. Timing is only possible
+    /// on the stream: the synchronize on either side is what makes a stage's
+    /// number mean anything, and a replay cannot stop in the middle to take one.
     #[allow(clippy::too_many_arguments)]
-    fn launch(
-        &self,
-        stream: &mut Stream,
-        kernel: &hrx::Kernel,
+    fn launch<'g>(
+        &'g self,
+        sink: &mut Sink<'g, '_>,
+        kernel: &'g hrx::Kernel,
         stage: &'static str,
         grid_x: u32,
         grid_y: u32,
         threads: u32,
         scalars: &Scalars,
-        bindings: &[View<'_>],
+        bindings: &[View<'g>],
     ) -> Result<()> {
         let constants = scalars.pack(stage, kernel)?;
         let compiled = kernel.info().workgroup_size;
@@ -331,6 +355,24 @@ impl Session {
             )));
         }
         let grid = [grid_x, grid_y, 1];
+        let stream = match sink {
+            Sink::Record(recording) => {
+                let after = match &recording.last {
+                    Some(node) => std::slice::from_ref(node),
+                    None => &[],
+                };
+                // Safety: as the direct dispatch below. The bindings borrow this
+                // session, which outlives the graph being recorded.
+                let node = unsafe {
+                    recording
+                        .graph
+                        .dispatch(after, kernel, grid, compiled, &constants, bindings)
+                }?;
+                recording.last = Some(node);
+                return Ok(());
+            }
+            Sink::Stream(stream) => stream,
+        };
         if !self.profile.load(Ordering::Relaxed) {
             unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
             return Ok(());
@@ -448,7 +490,7 @@ impl Session {
         stream.upload(self.buffers.mods.binding(), bytemuck::cast_slice(mods))?;
         self.upload_rope(stream, cos, sin)?;
         for index in first_block..first_block + count {
-            self.block(stream, index, self.buffers.mods.binding())?;
+            self.block(&mut Sink::Stream(stream), index, self.buffers.mods.binding())?;
         }
         stream.read_blocking(self.buffers.x.binding(), bytemuck::cast_slice_mut(x))?;
         self.report(count);
@@ -478,17 +520,59 @@ impl Session {
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
-        // Into the session's own buffer, whose headroom rows are already zero.
+        // Into the session's own buffers, whose headroom rows are already zero.
+        // `mods` is copied rather than bound directly because a recorded graph
+        // fixes its addresses: the caller allocates modulation from a pool and
+        // gets a different address each forward, while this one is the
+        // session's for its whole life. One 4 MB device copy per forward.
         let rows = tokens * HIDDEN as usize * 2;
-        stream.copy(self.buffers.x.binding().slice(0, rows)?, x.slice(0, rows)?)?;
-        self.upload_rope(stream, cos, sin)?;
-        for index in 0..self.layers {
-            self.block(stream, index, mods)?;
+        let table = self.buffers.mods.bytes();
+        if mods.len() < table {
+            return Err(Error::invalid(format!(
+                "mods spans {} bytes, expected at least {table}",
+                mods.len()
+            )));
         }
+        stream.copy(self.buffers.x.binding().slice(0, rows)?, x.slice(0, rows)?)?;
+        stream.copy(self.buffers.mods.binding(), mods.slice(0, table)?)?;
+        self.upload_rope(stream, cos, sin)?;
+        self.blocks_through(stream)?;
         // The output copy and subsequent consumers are ordered after the
         // blocks on this session's stream; no host wait is needed here.
         self.report(self.layers);
         stream.copy(x.slice(0, rows)?, self.buffers.x.binding().slice(0, rows)?)?;
+        Ok(())
+    }
+
+    /// Every block, replayed from a recording when one applies.
+    ///
+    /// The loop is identical every forward -- same kernels, same buffers, same
+    /// constants, same grids -- so it is recorded once per session and replayed
+    /// after. Profiling and the Sage path still dispatch directly: the first
+    /// needs a synchronize between stages, and the second fetches kernels that
+    /// would not outlive the recording.
+    fn blocks_through(&self, stream: &mut Stream) -> Result<()> {
+        if self.profile.load(Ordering::Relaxed) || self.sage.is_some() {
+            for index in 0..self.layers {
+                self.block(&mut Sink::Stream(stream), index, self.buffers.mods.binding())?;
+            }
+            return Ok(());
+        }
+        let mut recorded = self.graph.borrow_mut();
+        if recorded.is_none() {
+            let mut recording = Recording { graph: stream.graph()?, last: None };
+            for index in 0..self.layers {
+                self.block(
+                    &mut Sink::Record(&mut recording),
+                    index,
+                    self.buffers.mods.binding(),
+                )?;
+            }
+            // `finish` ends the graph's borrow of this session and the stream.
+            *recorded = Some(recording.graph.finish()?);
+        }
+        let graph = recorded.as_mut().expect("just recorded");
+        stream.launch(graph)?;
         Ok(())
     }
 
@@ -501,16 +585,16 @@ impl Session {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn gemm(
-        &self,
-        stream: &mut Stream,
-        kernel: &hrx::Kernel,
+    fn gemm<'g>(
+        &'g self,
+        sink: &mut Sink<'g, '_>,
+        kernel: &'g hrx::Kernel,
         stage: &'static str,
-        weights: View<'_>,
-        scales: View<'_>,
+        weights: View<'g>,
+        scales: View<'g>,
         n: i32,
-        out: View<'_>,
-        gate: Option<View<'_>>,
+        out: View<'g>,
+        gate: Option<View<'g>>,
     ) -> Result<()> {
         let scalars = Scalars::new().index(self.tokens);
         let bindings =
@@ -525,7 +609,7 @@ impl Session {
             self.metadata.m_group as i32,
         );
         self.launch(
-            stream,
+            sink,
             kernel,
             stage,
             (n / 128) as u32,
@@ -536,7 +620,12 @@ impl Session {
         )
     }
 
-    fn block(&self, stream: &mut Stream, index: usize, mods: View<'_>) -> Result<()> {
+    fn block<'g>(
+        &'g self,
+        sink: &mut Sink<'g, '_>,
+        index: usize,
+        mods: View<'g>,
+    ) -> Result<()> {
         let w = &self.weights;
         let block = &self.blocks[index];
         let tokens = self.tokens;
@@ -552,7 +641,7 @@ impl Session {
             b.a_s.binding(),
         ];
         self.launch(
-            stream,
+            sink,
             &self.kernels.prepare_norm,
             "prepare",
             tokens as u32,
@@ -563,7 +652,7 @@ impl Session {
         )?;
 
         self.gemm(
-            stream,
+            sink,
             &self.kernels.gemm_qkvg,
             "gemm qkvg",
             w.view(block.qkvg_q),
@@ -585,7 +674,7 @@ impl Session {
             b.v.binding(),
         ];
         self.launch(
-            stream,
+            sink,
             &self.kernels.rope,
             "qk norm + rope",
             tokens as u32,
@@ -600,10 +689,20 @@ impl Session {
             // against their means and works out the correction the kernel adds
             // back to the scores.
             Some(sage) => {
-                // Six launches, so it is timed as one stage rather than each.
-                let preparing = self.timed(stream);
-                sage.run(stream, b.q.binding(), b.k.binding(), b.v.binding())?;
-                self.record(stream, "SA2 preprocessing", preparing)?;
+                // Seven launches, so they are timed as one stage rather than
+                // each. They are not recorded: Sage fetches its kernels from a
+                // cache per call, so they do not outlive a recording, and its
+                // real shape is a DAG rather than this chain.
+                {
+                    let Sink::Stream(stream) = &mut *sink else {
+                        return Err(Error::failed(
+                            "the Sage preparation pass cannot be recorded into a graph",
+                        ));
+                    };
+                    let preparing = self.timed(stream);
+                    sage.run(stream, b.q.binding(), b.k.binding(), b.v.binding())?;
+                    self.record(stream, "SA2 preprocessing", preparing)?;
+                }
                 let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS as usize);
                 let attention = [
                     sage.q4.binding(),
@@ -617,7 +716,7 @@ impl Session {
                 let waves = self.metadata.attention_waves as usize;
                 let rows = 16 * (waves / 4);
                 self.launch(
-                    stream,
+                    sink,
                     &self.kernels.attention,
                     "SA2 attention",
                     tokens.div_ceil(rows) as u32,
@@ -634,7 +733,7 @@ impl Session {
                         let scalars = Scalars::new().index(tokens);
                         let bindings = [b.v.binding(), transposed.binding()];
                         self.launch(
-                            stream,
+                            sink,
                             kernel,
                             "f16 V transpose",
                             tokens.div_ceil(32) as u32,
@@ -651,7 +750,7 @@ impl Session {
                 let attention = [b.q.binding(), b.k.binding(), values, b.attn.binding()];
                 let rows = 16 * self.metadata.fp16_query_tiles as usize;
                 self.launch(
-                    stream,
+                    sink,
                     &self.kernels.attention,
                     "f16 attention",
                     tokens.div_ceil(rows) as u32,
@@ -666,7 +765,7 @@ impl Session {
         let gated_scalars = Scalars::new().index(tokens);
         let gated = [b.attn.binding(), gate_half(&b.fused)?, b.a_q.binding(), b.a_s.binding()];
         self.launch(
-            stream,
+            sink,
             &self.kernels.prepare_gated,
             "prepare gated",
             tokens as u32,
@@ -677,7 +776,7 @@ impl Session {
         )?;
 
         self.gemm(
-            stream,
+            sink,
             &self.kernels.gemm_wo,
             "gemm wo + residual",
             w.view(block.wo_q),
@@ -697,7 +796,7 @@ impl Session {
             b.a_s.binding(),
         ];
         self.launch(
-            stream,
+            sink,
             &self.kernels.prepare_norm,
             "prepare",
             tokens as u32,
@@ -708,7 +807,7 @@ impl Session {
         )?;
 
         self.gemm(
-            stream,
+            sink,
             &self.kernels.gemm_gu,
             "gemm gate|up + swiglu",
             w.view(block.gu_q),
@@ -721,7 +820,7 @@ impl Session {
         let swiglu_scalars = Scalars::new().index(tokens);
         let swiglu = [b.gu.binding(), b.a_q.binding(), b.a_s.binding()];
         self.launch(
-            stream,
+            sink,
             &self.kernels.prepare_swiglu,
             "prepare swiglu",
             tokens as u32,
@@ -732,7 +831,7 @@ impl Session {
         )?;
 
         self.gemm(
-            stream,
+            sink,
             &self.kernels.gemm_down,
             "gemm down + residual",
             w.view(block.down_q),
@@ -775,6 +874,56 @@ mod tests {
 
         session.run(&mut stream, &mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A again");
         assert_eq!(resident(), after_a, "A's second upload was not recorded");
+    }
+
+    /// A recorded replay must produce exactly what direct dispatch produces,
+    /// and must actually be taken: the graph is only populated by the path
+    /// under test, so an empty one means the recording never happened.
+    #[test]
+    #[ignore = "requires Krea checkpoint and gfx1151"]
+    fn a_recorded_block_loop_replays_to_the_same_bytes() {
+        let (checkpoint, tokens) = fixture();
+        let mut stream = Stream::open().expect("a stream");
+        let session =
+            Session::open(&mut stream, &checkpoint, tokens, 2).expect("resident session");
+
+        let mods = vec![0.01f32; 2 * 6 * HIDDEN as usize];
+        let cos = vec![1.0f32; tokens * HEAD_DIM as usize];
+        let sin = vec![0.0f32; tokens * HEAD_DIM as usize];
+        let start: Vec<u16> = (0..tokens * HIDDEN as usize)
+            .map(|i| 0x3c00u16.wrapping_add((i % 97) as u16))
+            .collect();
+
+        // The direct path: profiling forces every launch onto the stream.
+        let mut host = start.clone();
+        session.set_profile(true);
+        session.run(&mut stream, &mut host, &mods, &cos, &sin, 0, None).expect("direct");
+        session.set_profile(false);
+        assert!(session.graph.borrow().is_none(), "profiling must not record");
+
+        // The recorded path, through the device entry point.
+        let x = stream.allocate(tokens * HIDDEN as usize * 2).expect("x");
+        let table = stream.allocate(mods.len() * 4).expect("mods");
+        stream.upload(x.binding(), bytemuck::cast_slice(&start)).expect("x upload");
+        stream.upload(table.binding(), bytemuck::cast_slice(&mods)).expect("mods upload");
+        session
+            .run_device(&mut stream, x.binding(), table.binding(), &cos, &sin)
+            .expect("recorded");
+        assert!(session.graph.borrow().is_some(), "the block loop was not recorded");
+
+        let mut replayed = vec![0u16; start.len()];
+        stream
+            .read_blocking(x.binding(), bytemuck::cast_slice_mut(&mut replayed))
+            .expect("readback");
+        assert_eq!(replayed, host, "replay diverged from direct dispatch");
+
+        // A second forward reuses the recording rather than rebuilding it.
+        session
+            .run_device(&mut stream, x.binding(), table.binding(), &cos, &sin)
+            .expect("replayed");
+        // Nothing drains here on purpose: the session, its graph and the
+        // buffers that graph recorded are all released with the replay still in
+        // flight, which must be safe.
     }
 
     fn fixture() -> (std::path::PathBuf, usize) {

@@ -119,14 +119,7 @@ fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
         kernels::cache_root().unwrap().join(compiler.module(source).key(&request).unwrap());
     let artifact = directory.join("kernel.hsaco");
     assert!(artifact.is_file());
-    assert_eq!(
-        compiler
-            .module(source)
-            .compile(&request, &kernels::cache_root().unwrap())
-            .unwrap()
-            .path(),
-        artifact
-    );
+    assert_eq!(compiler.module(source).compile(&request).unwrap().path(), artifact);
 }
 
 /// A `Kernel` is a value now, not an `Arc`, so nothing outside HRX can observe

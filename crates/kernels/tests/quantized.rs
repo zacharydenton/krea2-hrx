@@ -38,11 +38,7 @@ impl Harness {
             .iter()
             .map(|(key, value)| (format!("krea2.{stem}.{key}"), value.clone()))
             .collect();
-        let path = self
-            .compiler
-            .module(&source)
-            .compile(&request, &hrx::bundle::cache_root().unwrap().join("kernels"))
-            .unwrap();
+        let path = self.compiler.module(&source).compile(&request).unwrap();
         // Safety: trusted checked-in source compiled through HRX. Every test below
         // sizes the bindings from the same dimensions passed as kernel configuration.
         let kernel = unsafe { self.stream.load_artifact(&path).unwrap() };
@@ -310,8 +306,7 @@ fn production_attention_has_no_scratch_spills() {
             request.config.insert(format!("krea2.{stem}.{key}"), value.to_string());
         }
         request.config.insert(format!("krea2.{stem}.scale"), "0.08838834764831845".into());
-        let artifact =
-            compiler.module(source).compile(&request, &kernels::cache_root().unwrap()).unwrap();
+        let artifact = compiler.module(source).compile(&request).unwrap();
         let spills: Vec<_> = artifact
             .diagnostics()
             .iter()

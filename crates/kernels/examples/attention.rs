@@ -29,9 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     spec.report = true;
     let mut loaded = Vec::new();
     for (i, path) in sources.iter().enumerate() {
-        let artifact = compiler
-            .module(&std::fs::read_to_string(path)?)
-            .compile(&spec, &kernels::cache_root()?)?;
+        let artifact = compiler.module(&std::fs::read_to_string(path)?).compile(&spec)?;
         std::fs::write(out.join(format!("{i}.hsaco")), artifact.bytes())?;
         if let Some(report) = artifact.report() {
             std::fs::write(out.join(format!("{i}.json")), report.to_string())?;
