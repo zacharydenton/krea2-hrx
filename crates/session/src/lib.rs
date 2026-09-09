@@ -928,6 +928,79 @@ mod tests {
         // flight, which must be safe.
     }
 
+    /// What overlapping two independent forwards could be worth, before
+    /// building the machinery for it. Two sessions sharing one set of weights
+    /// but with their own activation buffers, recorded into one graph twice:
+    /// once as two chains the runtime may overlap, once as one chain end to
+    /// end. If the block kernels already saturate the GPU the two are equal,
+    /// and stage E has nothing to win.
+    #[test]
+    #[ignore = "requires Krea checkpoint and gfx1151; a benchmark, not an assertion"]
+    fn two_independent_forwards_are_priced_against_one_after_the_other() {
+        let (checkpoint, tokens) = fixture();
+        let mut stream = Stream::open().expect("a stream");
+        let (file, plan) = Session::validate(&checkpoint, tokens, 2).expect("plan");
+        let weights =
+            std::sync::Arc::new(Weights::upload(&mut stream, &file, plan).expect("weights"));
+        let first = Session::with_weights(&mut stream, weights.clone(), tokens, 2, None)
+            .expect("first session");
+        let second = Session::with_weights(&mut stream, weights, tokens, 2, None)
+            .expect("second session");
+
+        let mut timings = Vec::new();
+        for overlapped in [true, false, false, true] {
+            // Scoped so the graph's borrow of the stream ends before the
+            // replay below needs it mutably.
+            let mut graph = {
+                let mut recording =
+                    Recording { graph: stream.graph().expect("graph"), last: None };
+                for index in 0..first.layers {
+                    first
+                        .block(
+                            &mut Sink::Record(&mut recording),
+                            index,
+                            first.buffers.mods.binding(),
+                        )
+                        .expect("record first");
+                }
+                // Overlapped: the second chain names no predecessor, so the runtime
+                // may schedule it alongside the first. Otherwise it follows on.
+                if overlapped {
+                    recording.last = None;
+                }
+                for index in 0..second.layers {
+                    second
+                        .block(
+                            &mut Sink::Record(&mut recording),
+                            index,
+                            second.buffers.mods.binding(),
+                        )
+                        .expect("record second");
+                }
+                recording.graph.finish().expect("instantiate")
+            };
+
+            stream.synchronize().expect("drain");
+            let began = std::time::Instant::now();
+            for _ in 0..4 {
+                stream.launch(&mut graph).expect("replay");
+            }
+            stream.synchronize().expect("drain");
+            let each = began.elapsed().as_secs_f64() * 1e3 / 4.0;
+            eprintln!(
+                "{}: {each:.2} ms for two 2-block forwards",
+                if overlapped { "overlapped" } else { "sequential " }
+            );
+            timings.push((overlapped, each));
+        }
+        let mean = |want: bool| {
+            let taken: Vec<f64> =
+                timings.iter().filter(|(o, _)| *o == want).map(|(_, t)| *t).collect();
+            taken.iter().sum::<f64>() / taken.len() as f64
+        };
+        eprintln!("overlapped {:.2} ms vs sequential {:.2} ms", mean(true), mean(false));
+    }
+
     fn fixture() -> (std::path::PathBuf, usize) {
         use std::path::PathBuf;
         let checkpoint =
