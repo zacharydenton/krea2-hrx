@@ -502,7 +502,6 @@ impl Session {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn gemm(
         &self,
         stream: &mut Stream,
