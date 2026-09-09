@@ -6,6 +6,12 @@
 //! prepare -> fused gate|up GEMM with the SwiGLU product in its epilogue ->
 //! prepare -> down GEMM with the gated residual. The residual stream stays on
 //! the device between blocks, in bf16, as ComfyUI keeps it.
+//!
+//! That chain is identical every forward, so it is recorded once as a graph and
+//! replayed. The chain is also genuinely serial -- each stage reads what the one
+//! before it wrote -- so recording buys nothing on its own; what it buys is the
+//! ability to state where the work is *not* serial, which today is the Sage
+//! preparation pass in [`sage`].
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod bundle;
@@ -129,7 +135,7 @@ struct Buffers {
 /// A recording in progress: the graph, and the node the next launch comes
 /// after. The block loop is a hard serial chain -- every stage reads what the
 /// one before it wrote -- so each launch depends on exactly its predecessor.
-struct Recording<'g> {
+pub(crate) struct Recording<'g> {
     graph: hrx::Graph<'g>,
     last: Option<hrx::Node>,
 }
@@ -548,11 +554,10 @@ impl Session {
     ///
     /// The loop is identical every forward -- same kernels, same buffers, same
     /// constants, same grids -- so it is recorded once per session and replayed
-    /// after. Profiling and the Sage path still dispatch directly: the first
-    /// needs a synchronize between stages, and the second fetches kernels that
-    /// would not outlive the recording.
+    /// after. Profiling still dispatches directly: it synchronizes between
+    /// stages, which a replay cannot stop to do.
     fn blocks_through(&self, stream: &mut Stream) -> Result<()> {
-        if self.profile.load(Ordering::Relaxed) || self.sage.is_some() {
+        if self.profile.load(Ordering::Relaxed) {
             for index in 0..self.layers {
                 self.block(&mut Sink::Stream(stream), index, self.buffers.mods.binding())?;
             }
@@ -689,18 +694,15 @@ impl Session {
             // against their means and works out the correction the kernel adds
             // back to the scores.
             Some(sage) => {
-                // Seven launches, so they are timed as one stage rather than
-                // each. They are not recorded: Sage fetches its kernels from a
-                // cache per call, so they do not outlive a recording, and its
-                // real shape is a DAG rather than this chain.
-                {
-                    let Sink::Stream(stream) = &mut *sink else {
-                        return Err(Error::failed(
-                            "the Sage preparation pass cannot be recorded into a graph",
-                        ));
-                    };
-                    let preparing = self.timed(stream);
-                    sage.run(stream, b.q.binding(), b.k.binding(), b.v.binding())?;
+                // Seven launches, timed as one stage rather than each. Timing
+                // needs a stream to synchronize on, so it applies only to the
+                // direct path -- which is the only one profiling takes anyway.
+                let preparing = match &mut *sink {
+                    Sink::Stream(stream) => self.timed(stream),
+                    Sink::Record(_) => None,
+                };
+                sage.run(sink, b.q.binding(), b.k.binding(), b.v.binding())?;
+                if let Sink::Stream(stream) = &mut *sink {
                     self.record(stream, "SA2 preprocessing", preparing)?;
                 }
                 let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS as usize);
