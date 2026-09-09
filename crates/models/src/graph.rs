@@ -3,7 +3,7 @@
 //! blending preserve the reference's bf16 rounding boundaries.
 use std::sync::Arc;
 
-use hrx::{Buffer, Stream, View};
+use hrx::Stream;
 use krea2_checkpoint::Checkpoint;
 use krea2_numerics::{from_f32, to_f32};
 use krea2_ops::{config, Binary, Config, Norm, Ops, Pool, Scratch, Tensor, Unary};

@@ -6,7 +6,7 @@ pub mod tensor;
 
 use std::sync::{Arc, OnceLock};
 
-use hrx::{Buffer, Constants, Kernel, Stream, View};
+use hrx::{Buffer, Stream, View};
 use loom::cache::PreparedKernels;
 pub use loom::Scalars;
 

@@ -7,11 +7,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use hrx::{Buffer, Stream, View};
+use hrx::{Buffer, Stream};
 use krea2_checkpoint::Checkpoint;
 use krea2_numerics::{fp8_e4m3_to_f32, from_f32_carrying};
 use krea2_ops::Weight;
-use loom::Scalars;
 
 use crate::{Error, Result};
 
