@@ -9,6 +9,8 @@ pub mod compile;
 pub mod shape;
 pub mod sources;
 
+use hrx::{Constants, Kernel};
+
 pub use blocks::{prepare, PreparedBundle, Shape};
 pub use cache::{auxiliary_kernel, cache_root};
 pub use compile::compiler;
@@ -54,4 +56,60 @@ pub fn config<const N: usize>(entries: [(&str, u64); N]) -> Config {
 /// Off by default: the reports are large and only wanted when tuning.
 pub fn kernel_reports() -> bool {
     std::env::var_os("KREA2_KERNEL_REPORT").is_some_and(|v| v == "1")
+}
+
+/// A kernel's scalar arguments: Loom packs the leading indices, then the floats.
+///
+/// Loom picks each index's width by range analysis, so the host cannot know it
+/// from the source. The export declares the total constant size, which is what
+/// recovers the width here — 4 or 8 bytes per index once the floats are taken off.
+#[derive(Clone, Copy, Default)]
+pub struct Scalars {
+    indices: [u64; 4],
+    index_count: usize,
+    floats: [f32; 2],
+    float_count: usize,
+}
+
+impl Scalars {
+    pub fn new() -> Scalars {
+        Scalars::default()
+    }
+
+    pub fn index(mut self, value: usize) -> Scalars {
+        self.indices[self.index_count] = value as u64;
+        self.index_count += 1;
+        self
+    }
+
+    pub fn float(mut self, value: f32) -> Scalars {
+        self.floats[self.float_count] = value;
+        self.float_count += 1;
+        self
+    }
+
+    pub fn pack(&self, name: &str, kernel: &Kernel) -> Result<Constants> {
+        let declared = kernel.info().constant_byte_length as usize;
+        let floats = self.float_count * 4;
+        let width = match declared.checked_sub(floats) {
+            Some(0) if self.index_count == 0 => 0,
+            Some(rest) if self.index_count > 0 && rest % self.index_count == 0 => {
+                rest / self.index_count
+            }
+            _ => return Err(Error(format!("{name}: cannot fit scalars in {declared} bytes"))),
+        };
+        let mut constants = Constants::new();
+        for index in &self.indices[..self.index_count] {
+            match width {
+                4 => constants.push(*index as u32),
+                8 => constants.push(*index),
+                _ => return Err(Error(format!("{name}: odd index width {width}"))),
+            }
+            .map_err(|e| Error(e.to_string()))?;
+        }
+        for value in &self.floats[..self.float_count] {
+            constants.push(*value).map_err(|e| Error(e.to_string()))?;
+        }
+        Ok(constants)
+    }
 }
