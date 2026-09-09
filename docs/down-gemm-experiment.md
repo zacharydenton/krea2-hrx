@@ -1,9 +1,9 @@
 # Wide down-projection experiment
 
 The original hand-written INT4 down-projection candidate is retired. Its
-256×128 tile and raster-tail shortening were incorporated into the generated
-GEMM family in `tools/gen_gemm.py`; production selection now follows
-`crates/loom/src/shape.rs`.
+256×128 tile and raster-tail shortening were incorporated into the GEMM family
+now checked in at `crates/loom/kernels/gemm_*.loom`, which is authoritative since
+its generator was retired; production selection follows `crates/loom/src/shape.rs`.
 
 Early resident-kernel trials reported 1.06–1.09× improvements under contention.
 A later contended run reversed the result, so those samples are not evidence
@@ -28,6 +28,8 @@ probabilities to exercise repeated resident dispatch. The
 [recorded investigation](benchmarks/softmax-race-2026-09-06.json) includes
 failing and corrected runs.
 
-`tools/bench_native.py` also checks repeated RGB and retains differing images,
-settings and error statistics on failure. Kernel microbenchmarks and isolated
-component calls do not replace this repeated-generation check.
+The repeated-generation check that caught this -- repeated RGB hashes, with
+differing images and error statistics retained on failure -- lived in
+`tools/bench_native.py`, retired in e33b171 and recoverable from Git. Kernel
+microbenchmarks and isolated component calls do not replace it, and nothing in
+the Rust suite covers it today.

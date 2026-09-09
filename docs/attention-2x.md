@@ -29,16 +29,13 @@ A candidate must pass synthetic and real-input attention checks, repeated
 resident dispatch, builder/metadata parity, and the complete trajectory gate:
 
 ```sh
-source scripts/env.sh
-scripts/test.sh --quick --quality
+scripts/test.sh --gpu
+scripts/parity.sh
 ```
 
-Set `KREA2_QUALITY_BASELINE` to an accepted run. For retained candidate output:
-
-```sh
-.venv/bin/python tools/quality_vs_bf16.py regression \
-  --baseline /path/to/accepted-run --work build/quality-query32
-```
+`KREA2_QUALITY_FIXTURE` selects the reference fixture and `KREA2_QUALITY_OUTPUT`
+retains the candidate's final latent, which `scripts/capture_reference.py accept`
+can promote once a candidate is adopted.
 
 The gate requires matching reference inputs and permits at most 0.1 dB loss
 in either latent or image PSNR. Additional prompts and seeds are needed to

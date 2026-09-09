@@ -97,6 +97,10 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let size = meta["size"].as_u64().unwrap() as usize;
     let steps = meta["steps"].as_u64().unwrap() as usize;
     let text_tokens = meta["text_tokens"].as_u64().unwrap() as usize;
+    // The schedule is the fixture's, not this test's: a shift the reference was not captured
+    // with would silently compare two different trajectories. Fixtures written before
+    // scripts/capture_reference.py recorded the field carry the value both arms used.
+    let shift = meta["shift"].as_f64().unwrap_or(1.15);
     let tokens = size / 16 * (size / 16);
     let text = array(&fixture.join("text.npy"), &[text_tokens, 12, 2560]);
     let mut state = array(&fixture.join("noise.npy"), &[tokens, 64]);
@@ -120,8 +124,8 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let pipeline =
         Pipeline::open(Files::of(&checkpoint).offline(true).resolve().unwrap(), None).unwrap();
     for step in 0..steps {
-        let sigma = krea2_pipeline::schedule::sigma(step, steps, 1.15);
-        let next = krea2_pipeline::schedule::sigma(step + 1, steps, 1.15);
+        let sigma = krea2_pipeline::schedule::sigma(step, steps, shift);
+        let next = krea2_pipeline::schedule::sigma(step + 1, steps, shift);
         let velocity =
             pipeline.transformer(&text, text_tokens, &state, size, size, sigma).unwrap();
         let velocity: Vec<_> = velocity.into_iter().map(from_f32).collect();

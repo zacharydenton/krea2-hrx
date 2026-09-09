@@ -54,6 +54,10 @@ Use fixed packed float32 latents in a `.npy` file, matching the requested
 resolution. The two paths must run in separate processes because packing is
 selected when weights load.
 
+
+> These commands are recorded as they were run. The Python benchmark
+> tooling and `scripts/env.sh` were retired in e33b171; the measurements
+> stand, but reproducing them means recovering those tools from Git.
 ```sh
 source scripts/env.sh
 scripts/build.sh
@@ -69,8 +73,9 @@ numerical errors against the reference rather than requiring identical RGB.
 Repeat in alternating order on an idle GPU and retain the JSON output, library
 hashes and latent hash.
 
-`tests/test_native_pipeline.py` covers complete decoder comparisons; the Rust
-convolution test covers dispatch for both weight layouts. Changes to packing
+Complete decoder comparisons now come from `scripts/parity.sh`, which decodes
+both trajectories through the native VAE; the Rust convolution test covers
+dispatch for both weight layouts. Changes to packing
 also need loader fixtures for BF16, F32, fp8 and causal convolution weights.
 Larger tiles may reduce overlap work, but need separate memory and quality
 validation before adoption.

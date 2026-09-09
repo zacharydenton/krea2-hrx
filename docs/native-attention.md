@@ -55,12 +55,13 @@ is an empirical choice on gfx1151.
 
 ## Validation
 
-- `tests/test_sage_attention.py`: preprocessing and attention against an
-  independent arithmetic oracle, including padded/partial tiles.
-- `tests/test_attention.py`: fp16 attention reference.
-- `tests/test_blocks.py`: block updates and chained state on real model inputs.
-- `tools/quality_vs_bf16.py`: complete latent and image trajectories.
+- `crates/loom/tests/quantized.rs`: production fp16 attention and quantized
+  preparation against independent softmax and Hadamard references, including
+  padded and partial tiles.
+- `crates/pipeline/tests/unquantized_parity.rs`, via `scripts/parity.sh`:
+  complete latent and image trajectories against the unquantized BF16 model.
 
-`tools/bench_sage_attention.py` measures resident kernels and preparation.
+The Python attention benchmarks were retired with the rest of that layer; the
+measurements below stand and the tooling is recoverable from Git before e33b171.
 Benchmark results must include preparation/transposition costs and must not be
 presented as whole-image speedups. Historical records are in `docs/benchmarks/`.

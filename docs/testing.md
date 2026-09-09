@@ -25,6 +25,8 @@ The GPU oracles compute independent CPU arithmetic; they do not reproduce kernel
 implementations line for line. The scheduler fixture is captured from Diffusers,
 not generated from the Rust scheduler.
 
+## Parity against the unquantized model
+
 The parity gate uses the **original, unquantized BF16 checkpoint** as ground truth,
 not another quantized implementation. Run it explicitly:
 

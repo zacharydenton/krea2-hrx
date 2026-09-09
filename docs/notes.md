@@ -41,8 +41,9 @@ The int4 kernel family remains available for experiments.
 
 Operand rows with an 8192-byte pitch receive padding to avoid cache aliasing.
 The upload plan, kernel configuration and launch metadata must agree on the
-pitch. Shape rules live in `crates/loom/src/shape.rs` and are mirrored by
-`scripts/build_kernels.py`; parity is tested.
+pitch. Shape rules live in `crates/loom/src/shape.rs`, pinned by its own tests. The
+Python kernel builder that once mirrored them, and the parity test between the
+two, were retired with that layer.
 
 ## Precision and sampling
 

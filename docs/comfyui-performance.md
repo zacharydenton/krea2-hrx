@@ -35,9 +35,10 @@ peak excludes DynamicVRAM allocations and is not a total-memory comparison.
 Matching seeds do not produce matching noise across backends. Repeated RGB
 checksums establish repeatability within each backend, not image equivalence.
 For quality comparisons, supply the same initial latents, conditioning and
-schedule. See `tools/comfy_step.py`, `tools/compare_comfy.py` and
-`tools/compare_comfy_steps.py` for stage replay, or `tools/compare_web.py` for
-shared-noise image inspection.
+schedule. ComfyUI is not the accuracy reference: it runs the same quantized
+checkpoint, so agreeing with it measures two approximations against each other.
+The release gate compares against the original unquantized BF16 model instead --
+see [the parity gate](testing.md#parity-against-the-unquantized-model).
 
 ## Reproduce
 
@@ -52,6 +53,10 @@ python /path/to/krea2-loom/tools/bench_comfyui.py \
 
 From the krea2-loom checkout:
 
+
+> These commands are recorded as they were run. The Python benchmark
+> tooling and `scripts/env.sh` were retired in e33b171; the measurements
+> stand, but reproducing them means recovering those tools from Git.
 ```sh
 source scripts/env.sh
 scripts/build.sh
