@@ -62,20 +62,28 @@ Against that reference the current kernels measure:
 | Relative latent RMS error | 0.076912 |
 | Image PSNR | 31.7778 dB |
 
-Almost all of that is the quantization, which is what the gate is for:
+That number is not yet decomposed, and two attempts to decompose it were wrong,
+so what follows is only what has been measured cleanly.
 
-| Contribution to the 0.0769 | rel RMS |
+| Measured | rel RMS |
 | --- | ---: |
-| The unquantized model on the GPU, *same noise and conditioning* | 0.014415 |
-| Our W8A8 kernels against that same-device, same-input control | 0.076855 |
+| Everything on GPU vs everything on CPU (diffusers, unquantized, same noise) | 0.074973 |
+| Text sequence layout alone: 19 compacted rows vs 512 padded rows, same device, same values | 0.035054 |
+| Our own text encoder instead of the reference's, through our transformer | 0.016092 |
+| Our kernels with the reference's text (what the gate reports) | 0.076472 |
 
-Isolating the device term requires holding the conditioning fixed as well as the
-noise: `scripts/capture_reference.py --reuse FIXTURE` takes both from an existing
-fixture so that only the transformer moves. Without `--reuse` the capture re-encodes
-the prompt, and the text encoder on GPU differs from the CPU one by enough
-(cosine 0.999921 on the embeddings) to shift the whole trajectory by 0.0750 —
-roughly the size of the quantization error, which makes a device change look like
-it explains everything when it does not.
+The layout row is the one to be careful about. The reference computes its
+trajectory from 512 padded text rows and a mask; the fixture stores only the 19
+valid rows, and the native transformer consumes those. `prepare_position_ids`
+takes `text_seq_len`, so the two layouts give the image tokens different rotary
+coordinates -- it is a different computation, worth 0.035 on its own, and some of
+the gate's 0.0769 is that rather than quantization.
+
+`scripts/capture_reference.py --reuse FIXTURE` reuses a fixture's noise and
+conditioning, which is how the layout term above was measured, but it feeds the
+compacted rows and so is not a drop-in control for a padded-layout reference.
+Attributing the gate's error properly needs a reference captured at the same text
+layout the native path uses; until then, treat 0.0769 as a single number.
 
 The earlier figures of cosine 0.999717 and 37.00 dB were measured against a
 GPU-captured reference and are not comparable with these: that reference shared
