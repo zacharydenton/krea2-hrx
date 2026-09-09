@@ -1,12 +1,12 @@
 {
   "reference": "Original unquantized krea2_turbo_bf16.safetensors through the Diffusers reference pipeline; 1024x1024, seed 0, eight steps. NPY latents are lossless float32 exports of the original BF16 and accepted W8A8 PT tensors.",
   "files": {
-    "job.json": "882febce883c77f17b188ef1308908f49525ffb73710f56cb3a0f24d17e630cb",
-    "noise.npy": "f6875d440112d9b187bd9e2fb97f4e04a6cbc02d4da589ba86a6a5e7d7330164",
-    "text.npy": "308281bdcab8d3d0a6c6abe6a3b611e76e2381f44be207cea30cb14be256fd5b",
-    "bf16.npy": "e50615583505c12c9e15fdd4aa98b43817b93261aa9fab0d410af34d3e17f895",
-    "bf16.png": "c8f5a3dceaca47bac1b0d11948dd2f7090b92d01b51c2a8208be34ba61ed165c",
-    "w8a8.npy": "52dfc71038e03d379e305beb47959e8a4ee6b5cf5186463c9fcd469aba153a98",
-    "w8a8.png": "7d70acbcad2ea61e8a3c945b58b1ee107da1c5115bbebddf50cb426a670052e3"
+    "job.json": "33a25d574599aefb50f9d27f23e0f84cf8028c9700bf7907f25b68da2aff03b8",
+    "noise.npy": "39afa53dcdc1d67ae29361df49128694572d04af5adad4c0877840b6b5607910",
+    "text.npy": "e12cea8c975330bce5e7d1b41ec476c0246253c58cdbd0d3467abe63899ef9e9",
+    "bf16.npy": "8d7782e476fb04994609b88f1fee87fad6ff3d07c313c7a4190174a5580f9ffc",
+    "bf16.png": "f9f495b940423b4d72f3bd0fa2eb5d7972996b0694b75eeda9bc2eccb88c5aeb",
+    "w8a8.npy": "989899b3bc99a1c0e819d6212b72f015c06251744de708cb6c0e2470eedb21b8",
+    "w8a8.png": "d1d973228a77110aaf8df942d4ac93e40355c77777adae5c6aa403de1202dc05"
   }
 }

@@ -34,15 +34,47 @@ not another quantized implementation. Run it explicitly:
 scripts/parity.sh
 ```
 
-This invokes `crates/pipeline/tests/unquantized_parity.rs`. The saved reference
-uses the original `krea2_turbo_bf16.safetensors` through the Diffusers pipeline at
-1024×1024, seed 0, eight steps. Both implementations receive identical packed
-noise, tapped text states and scheduler settings. The Rust test executes the
-transformer trajectory with the production GPU Euler kernel, then decodes
-its final latent with the native VAE. It checks latent error and RGB PSNR against
-the unquantized reference, allowing at most the existing 0.1 dB loss from the
-accepted baseline in either metric. Agreement with quantized ComfyUI is not a
-release criterion.
+This invokes `crates/pipeline/tests/unquantized_parity.rs`. The reference is the
+official `krea/Krea-2-Turbo` diffusers repository loaded with `from_pretrained`,
+run **on the CPU** at 1024×1024, seed 0, eight steps, guidance 0. Nothing in this
+repository interprets the checkpoint on that path: the pipeline, transformer,
+scheduler and VAE are all stock diffusers, on the published weights. Both
+implementations receive identical packed noise, tapped text states and scheduler
+settings. The Rust test executes the transformer trajectory with the production
+GPU Euler kernel, then decodes its final latent with the native VAE. It checks
+latent error and RGB PSNR, allowing at most 0.1 dB loss from the accepted
+baseline in either metric. Agreement with quantized ComfyUI is not a release
+criterion.
+
+The reference runs on the CPU because that is what makes it reproducible by
+someone who does not have this GPU. It is not about nondeterminism: two GPU
+captures taken back to back are bit-identical, as are two CPU captures. The noise
+is always drawn on the CPU whatever the model runs on, because a CUDA generator
+and a CPU generator produce unrelated streams from one seed (measured at cosine
+0.002), which would otherwise make CPU and GPU captures incomparable rather than
+differently rounded.
+
+Against that reference the current kernels measure:
+
+| Against the official CPU reference | value |
+| --- | ---: |
+| Final-latent cosine | 0.997044 |
+| Relative latent RMS error | 0.076912 |
+| Image PSNR | 31.7778 dB |
+
+Read that number with its decomposition, because most of it is not quantization:
+
+| Contribution to the 0.0769 | rel RMS |
+| --- | ---: |
+| The unquantized model itself, run on GPU instead of CPU | 0.074973 |
+| Our W8A8 kernels against the unquantized model *on the same device* | 0.021376 |
+
+So the gate is dominated by CPU-versus-GPU arithmetic, and the quantization the
+kernels actually introduce is about 0.021. The earlier figures of cosine 0.999717
+and 37.00 dB were measured against a GPU-captured reference and are not comparable
+with these: that reference shared the device arithmetic with the candidate, which
+flattered the result. The kernels did not regress; the measuring stick moved onto
+firmer ground.
 
 The default fixture directory is `build/quality`; `KREA2_QUALITY_FIXTURE` can point
 to another copy of the same frozen fixture. `KREA2_CHECKPOINT` selects the native
@@ -59,9 +91,18 @@ on. Without it a lost `build/` would end the gate permanently.
 
 ```sh
 ./scripts/capture_reference.py reference               # ground truth: noise, text, bf16 latent and image
-./scripts/capture_reference.py accept --latents FILE   # promote a native run to the accepted baseline
+KREA2_QUALITY_MINT=1 scripts/parity.sh                 # mint the accepted baseline for a new fixture
 ./scripts/capture_reference.py manifest --write        # re-pin the hashes after either
 ```
+
+A freshly captured reference has no accepted baseline, and one cannot exist until
+the native trajectory has been run, so the gate mints it — but only when
+`KREA2_QUALITY_MINT` is set. A missing baseline is otherwise a hard failure, never
+a quietly passing gate. `--checkpoint` remains as a labelled fallback that maps a
+local ComfyUI-format file onto the same official modules; it is recorded in
+`job.json` as such. Captured both ways on the same machine, the two agree
+bit-for-bit, so the mapping is exact -- but only the `from_pretrained` path is
+free of this repository's own interpretation of the weights.
 
 It is a `uv run` script: the dependencies, the pinned interpreter and the ROCm
 Torch index live in its own header, and `scripts/capture_reference.py.lock` fixes
@@ -89,12 +130,11 @@ The original BF16 timestep embedding and Euler arithmetic are retained. Kernel
 rounding changes are accepted only if their error against the original model
 does not increase. The quantized ComfyUI parity scripts have been removed.
 
-The verified 1024×1024 fixture improves as follows:
-
-| Against the unquantized BF16 reference | Previous native implementation | Updated kernels |
-| --- | ---: | ---: |
-| Final-latent cosine | 0.998254 | 0.999717 |
-| Relative latent RMS error | 0.059111 | 0.023806 |
-| Image PSNR | 33.6673 dB | 36.9982 dB |
-
-These measurements include the actual GPU Euler kernel and native VAE decoder.
+The kernel improvement that motivated this section was measured against the
+earlier GPU-captured reference, and is recorded here as history rather than as a
+current figure. On that fixture the update moved final-latent cosine from 0.998254
+to 0.999717, relative latent RMS from 0.059111 to 0.023806, and image PSNR from
+33.6673 dB to 36.9982 dB. Those numbers are not comparable with the ones above:
+the reference has since moved to the official repository on the CPU, and the
+GPU-captured reference shared its device arithmetic with the candidate. Both sets
+include the actual GPU Euler kernel and native VAE decoder.

@@ -71,6 +71,35 @@ fn image_psnr(ours: &[u8], truth: &[u8]) -> f64 {
     10.0 * (255.0 * 255.0 / mse).log10()
 }
 
+/// Writes a NumPy v1 f32 array, the format `array` above reads. Minting the accepted
+/// baseline has to produce a fixture file, and the fixture format is deliberately narrow.
+fn write_array(path: &Path, values: &[f32], shape: &[usize]) {
+    let dimensions: String =
+        shape.iter().map(|n| format!("{n}, ")).collect::<Vec<_>>().concat();
+    let mut header =
+        format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({dimensions}), }}");
+    // The header is padded so that the data starts on a 64-byte boundary.
+    while (10 + header.len() + 1) % 64 != 0 {
+        header.push(' ');
+    }
+    header.push('\n');
+    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+    bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(header.as_bytes());
+    bytes.extend(values.iter().flat_map(|v| v.to_le_bytes()));
+    std::fs::write(path, bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
+fn write_rgb(path: &Path, pixels: &[u8], size: usize) {
+    let file =
+        std::fs::File::create(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let mut encoder =
+        png::Encoder::new(std::io::BufWriter::new(file), size as u32, size as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.write_header().unwrap().write_image_data(pixels).unwrap();
+}
+
 #[test]
 #[ignore = "requires gfx1151, local weights and the unquantized BF16 reference fixture"]
 fn unquantized_bf16_reference_quality_does_not_regress() {
@@ -93,7 +122,20 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     }
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.join("job.json")).unwrap()).unwrap();
-    assert!(meta["checkpoint"].as_str().unwrap().contains("bf16"));
+    // The reference must be the unquantized model: the official diffusers repository, or a
+    // bf16 checkpoint mapped onto it, but never the quantized weights the candidate runs.
+    let source = meta["repo"]
+        .as_str()
+        .or_else(|| meta["checkpoint"].as_str())
+        .expect("job.json must record the reference's source");
+    assert!(
+        !source.contains("int8") && !source.contains("convrot"),
+        "reference captured from quantized weights: {source}"
+    );
+    assert!(
+        matches!(meta["dtype"].as_str().unwrap_or("bfloat16"), "bfloat16" | "float32"),
+        "reference captured at an unexpected precision"
+    );
     let size = meta["size"].as_u64().unwrap() as usize;
     let steps = meta["steps"].as_u64().unwrap() as usize;
     let text_tokens = meta["text_tokens"].as_u64().unwrap() as usize;
@@ -105,9 +147,19 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let text = array(&fixture.join("text.npy"), &[text_tokens, 12, 2560]);
     let mut state = array(&fixture.join("noise.npy"), &[tokens, 64]);
     let truth = array(&fixture.join("bf16.npy"), &[1, tokens, 64]);
-    let accepted = array(&fixture.join("w8a8.npy"), &[1, tokens, 64]);
     let truth_rgb = rgb(&fixture.join("bf16.png"), size);
-    let accepted_rgb = rgb(&fixture.join("w8a8.png"), size);
+    // A freshly captured reference has no accepted baseline yet, and one cannot be produced
+    // without running this trajectory. Minting is therefore allowed here, but only when
+    // asked for explicitly: a missing baseline must never be a quietly passing gate.
+    let minting = !fixture.join("w8a8.npy").is_file();
+    assert!(
+        !minting || std::env::var_os("KREA2_QUALITY_MINT").is_some(),
+        "{} has no accepted baseline. Set KREA2_QUALITY_MINT=1 to write one from this run, \
+         then re-pin with scripts/capture_reference.py manifest --write.",
+        fixture.display()
+    );
+    let accepted = (!minting).then(|| array(&fixture.join("w8a8.npy"), &[1, tokens, 64]));
+    let accepted_rgb = (!minting).then(|| rgb(&fixture.join("w8a8.png"), size));
     let checkpoint =
         std::env::var_os("KREA2_CHECKPOINT").map(PathBuf::from).unwrap_or_else(|| {
             PathBuf::from(std::env::var_os("HOME").unwrap())
@@ -139,13 +191,30 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         std::fs::write(path, bytes).unwrap();
     }
     let (cosine, rms) = metrics(&state, &truth);
-    let accepted_rms = metrics(&accepted, &truth).1;
-    let loss_db = 20.0 * (rms / accepted_rms).log10();
-    eprintln!("unquantized BF16: cosine {cosine:.6}, relative RMS {rms:.6}, accepted RMS {accepted_rms:.6}, loss {loss_db:.6} dB");
     let ours_rgb = pipeline.decode(&state, size, size).unwrap();
     let psnr = image_psnr(&ours_rgb, &truth_rgb);
+    eprintln!("unquantized reference: cosine {cosine:.6}, relative RMS {rms:.6}");
+    eprintln!("unquantized reference image: PSNR {psnr:.6} dB");
+    let (Some(accepted), Some(accepted_rgb)) = (accepted, accepted_rgb) else {
+        write_array(&fixture.join("w8a8.npy"), &state, &[1, tokens, 64]);
+        write_rgb(&fixture.join("w8a8.png"), &ours_rgb, size);
+        eprintln!(
+            "minted the accepted baseline in {}; re-pin it with \
+             scripts/capture_reference.py manifest --write",
+            fixture.display()
+        );
+        return;
+    };
+    let accepted_rms = metrics(&accepted, &truth).1;
+    let loss_db = 20.0 * (rms / accepted_rms).log10();
     let accepted_psnr = image_psnr(&accepted_rgb, &truth_rgb);
-    eprintln!("unquantized BF16 image: PSNR {psnr:.6} dB, accepted {accepted_psnr:.6} dB");
-    assert!(loss_db <= 0.1, "quality regressed against unquantized BF16 by {loss_db} dB");
-    assert!(psnr >= accepted_psnr - 0.1, "image quality regressed against unquantized BF16");
+    eprintln!("accepted: relative RMS {accepted_rms:.6}, PSNR {accepted_psnr:.6} dB, loss {loss_db:.6} dB");
+    assert!(
+        loss_db <= 0.1,
+        "quality regressed against the unquantized reference by {loss_db} dB"
+    );
+    assert!(
+        psnr >= accepted_psnr - 0.1,
+        "image quality regressed against the unquantized reference"
+    );
 }

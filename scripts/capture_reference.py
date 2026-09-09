@@ -6,6 +6,9 @@
 #   "torch>=2.13,<2.15",
 #   "triton-rocm",
 #   "diffusers>=0.36",
+#   # The official transformer keeps some modules in fp32, and diffusers refuses to load
+#   # that without accelerate: from_pretrained fails outright, it is not merely slower.
+#   "accelerate>=1.0",
 #   "transformers>=4.57",
 #   "safetensors>=0.6",
 #   "pillow>=11",
@@ -125,35 +128,54 @@ def cast_transformer(transformer, dtype):
     return transformer
 
 
-def build(models: Path, checkpoint: Path, device: str = "cpu", dtype=None):
-    """The official Krea 2 modules with the unquantized ComfyUI-format weights mapped on."""
+def build(a, dtype):
+    """The pipeline the reference is defined by.
+
+    By default this is the official diffusers repository loaded with from_pretrained, so the
+    reference is the stock implementation on the stock weights and nothing here interprets
+    the checkpoint. `--checkpoint` is a labelled fallback that maps a local ComfyUI-format
+    file onto the same official modules; it is recorded in job.json as such, because a
+    reference produced that way rests on this file's name mapping as well as on diffusers.
+    """
     import torch
-    from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler, Krea2Pipeline
+    from diffusers import Krea2Pipeline
+
+    if a.checkpoint is None:
+        pipe = Krea2Pipeline.from_pretrained(a.repo, dtype=dtype)
+        return pipe.to(a.device), {"repo": a.repo}
+
+    from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from safetensors.torch import load_file
     from transformers import AutoTokenizer, Qwen3VLModel
 
-    import torch as _t
-    dtype = dtype or _t.bfloat16
-    # The checkpoint is loaded in one copy and the module is built on the meta device, so no
-    # f32 copy of 12.9B parameters is ever materialised.
-    comfy = load_file(str(checkpoint), device=device)
+    comfy = load_file(str(a.checkpoint), device=a.device)
     with torch.device("meta"):
         transformer = Krea2Transformer2DModel()
-    missing, unexpected = transformer.load_state_dict(diffusers_state(comfy), strict=False,
-                                                      assign=True)
+    mapped = diffusers_state(comfy)
+    # load_state_dict(assign=True) replaces parameters outright and so does not check
+    # shapes: a mis-mapped name would be adopted silently. This mapping is the one part
+    # that is not stock diffusers, so it is checked here.
+    declared = dict(transformer.named_parameters())
+    for name, tensor in mapped.items():
+        want = declared.get(name)
+        assert want is not None, f"{name} is not a parameter of the official module"
+        assert tuple(want.shape) == tuple(tensor.shape), \
+            f"{name}: checkpoint {tuple(tensor.shape)} but the module declares {tuple(want.shape)}"
+    missing, unexpected = transformer.load_state_dict(mapped, strict=False, assign=True)
     assert not unexpected, unexpected[:5]
     assert not missing, missing[:5]
     transformer = cast_transformer(transformer, dtype)
-    vae = AutoencoderKLQwenImage.from_pretrained(str(models / "qwen-image" / "vae"),
-                                                 torch_dtype=dtype).to(device)
+    vae = AutoencoderKLQwenImage.from_pretrained(str(a.models / "qwen-image" / "vae"),
+                                                 torch_dtype=dtype).to(a.device)
     vae.enable_tiling()
-    return Krea2Pipeline(
+    pipe = Krea2Pipeline(
         scheduler=FlowMatchEulerDiscreteScheduler(**SCHEDULER), vae=vae,
-        text_encoder=Qwen3VLModel.from_pretrained(str(models / "qwen3-vl-4b"),
-                                                  torch_dtype=dtype).to(device),
-        tokenizer=AutoTokenizer.from_pretrained(str(models / "qwen3-vl-4b")),
+        text_encoder=Qwen3VLModel.from_pretrained(str(a.models / "qwen3-vl-4b"),
+                                                  torch_dtype=dtype).to(a.device),
+        tokenizer=AutoTokenizer.from_pretrained(str(a.models / "qwen3-vl-4b")),
         transformer=transformer, is_distilled=True)
+    return pipe, {"checkpoint": str(a.checkpoint), "loaded_by": "local ComfyUI name mapping"}
 
 
 def unpack(latents, height, width, vae_scale=8, p=2):
@@ -197,11 +219,10 @@ def command_reference(a) -> int:
             "replace the reference and re-pin the manifest.")
     import torch
 
-    checkpoint = a.checkpoint or a.models / "krea2_turbo_bf16.safetensors"
-    if not Path(checkpoint).is_file():
-        raise SystemExit(f"{checkpoint} does not exist: the unquantized checkpoint is the truth here")
+    if a.checkpoint is not None and not Path(a.checkpoint).is_file():
+        raise SystemExit(f"{a.checkpoint} does not exist")
     dtype = getattr(torch, a.dtype)
-    pipe = build(a.models, Path(checkpoint), a.device, dtype)
+    pipe, source = build(a, dtype)
     with torch.no_grad():
         embeds, mask = pipe.encode_prompt(a.prompt, device=a.device)
         # The noise is always drawn on the CPU, whatever the model runs on. A CUDA
@@ -233,9 +254,8 @@ def command_reference(a) -> int:
     import diffusers
     (a.work / "job.json").write_text(json.dumps(
         dict(prompt=a.prompt, seed=a.seed, size=a.size, steps=a.steps,
-             checkpoint=str(checkpoint), text_tokens=int(text.shape[0]), shift=SHIFT,
-             device=a.device, dtype=a.dtype, torch=torch.__version__,
-             diffusers=diffusers.__version__),
+             text_tokens=int(text.shape[0]), shift=SHIFT, device=a.device, dtype=a.dtype,
+             torch=torch.__version__, diffusers=diffusers.__version__, **source),
         indent=1) + "\n")
     print(f"reference: {text.shape[0]} text tokens, latents {tuple(latents.shape)} -> {a.work}")
     print("the accepted W8A8 baseline is not ground truth and is not written here; "
@@ -256,8 +276,11 @@ def command_accept(a) -> int:
         raise SystemExit(f"{a.latents} holds {raw.size} floats, expected {tokens * 64}")
     latents = torch.from_numpy(raw.reshape(1, tokens, 64).copy())
     np.save(a.work / "w8a8.npy", np.ascontiguousarray(latents.numpy(), np.float32))
-    pipe = build(a.models, Path(meta["checkpoint"]), meta.get("device", "cpu"),
-                 getattr(torch, meta.get("dtype", "bfloat16")))
+    # Decode the accepted baseline with the same VAE the reference image came from.
+    a.device = meta.get("device", "cpu")
+    a.repo = meta.get("repo", a.repo)
+    a.checkpoint = meta.get("checkpoint")
+    pipe, _ = build(a, getattr(torch, meta.get("dtype", "bfloat16")))
     decode(pipe, latents, size, a.work / "w8a8.png")
     truth = np.load(a.work / "bf16.npy").astype(np.float64).ravel()
     got = latents.numpy().astype(np.float64).ravel()
@@ -298,7 +321,11 @@ def main() -> int:
     ap.add_argument("stage", choices=["reference", "accept", "manifest"])
     ap.add_argument("--work", type=Path, default=ROOT / "build/quality")
     ap.add_argument("--models", type=Path, default=MODELS)
-    ap.add_argument("--checkpoint", default=None, help="the unquantized bf16 checkpoint")
+    ap.add_argument("--repo", default="krea/Krea-2-Turbo",
+                    help="the official diffusers repository the reference is defined by")
+    ap.add_argument("--checkpoint", default=None,
+                    help="fallback: a local ComfyUI-format bf16 checkpoint, mapped onto the "
+                         "official modules by this file (recorded in job.json as such)")
     ap.add_argument("--latents", type=Path, default=None,
                     help="accept: a KREA2_QUALITY_OUTPUT dump of the native final latent")
     ap.add_argument("--prompt",
