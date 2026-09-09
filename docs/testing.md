@@ -27,6 +27,29 @@ not generated from the Rust scheduler.
 
 Full-checkpoint comparisons against ComfyUI/Diffusers and image-trajectory quality
 runs formerly driven by Python are not equivalent to these operation tests and
-are not claimed as migrated. They require versioned reference outputs before an
-independent Rust regression can assert whole-model parity. Existing historical
-image and latency results are unchanged by this test migration.
+are not claimed as migrated. Existing historical image and latency results are
+unchanged by this test migration.
+
+## Parity against ComfyUI
+
+Everything above checks that the model agrees with its own earlier output.
+`scripts/parity.py` is the only check against something outside itself, so it is
+worth keeping even though it cannot run unattended: it needs the checkpoint, a
+GPU, and a directory of dumps that `scripts/comfy_dump.py` produces inside the
+ComfyUI environment. It is deliberately not part of `scripts/test.sh`; run it
+before a release.
+
+```sh
+/opt/venv/bin/python scripts/comfy_dump.py --dump-steps --out build/comfy_parity  # in ComfyUI
+python3 scripts/parity.py gate --require    # the release gate
+python3 scripts/parity.py steps             # every evaluation, to localize a failure
+python3 scripts/parity.py image             # our run and ComfyUI's latent, both to PNG
+```
+
+The gate asserts the final latent from a full run on ComfyUI's noise. It does not
+pass today: the last recorded measurement puts that latent at cosine 0.806 while
+the per-evaluation velocity agrees at 0.9981–0.9999, because the Euler step at the
+low sigmas subtracts two large terms and amplifies a 1.4% velocity difference into
+a 55% latent one. The velocity is reported beside the gate to localize a failure,
+never in place of it — the threshold stays on the number that says whether this
+host produces ComfyUI's image.
