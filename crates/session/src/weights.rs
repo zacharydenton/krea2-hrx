@@ -48,13 +48,28 @@ impl Weights {
         let storage = stream.allocate(plan.total_bytes)?;
         let mut staging = Vec::new();
         for span in plan.spans.values() {
-            let base = storage.slice(span.device_offset, span.device_bytes);
+            let base = storage.try_slice(span.device_offset, span.device_bytes)?;
             if !span.host.is_empty() {
                 stream.upload(base.slice(0, span.host.len())?, &span.host)?;
                 continue;
             }
             let pitch = if span.rows > 0 { span.device_row_bytes } else { span.row_bytes };
             let width = span.row_bytes;
+            if pitch == width {
+                // HRX copies each borrowed chunk into its own staging before returning.
+                // Contiguous rows need no second host copy, even across gathered segments.
+                let mut written = 0;
+                for segment in &span.segments {
+                    let tensor = file.get(&segment.tensor)?;
+                    let bytes =
+                        &tensor.bytes[segment.rows.start * width..segment.rows.end * width];
+                    for chunk in bytes.chunks(STAGING_BYTES) {
+                        stream.upload(base.slice(written, chunk.len())?, chunk)?;
+                        written += chunk.len();
+                    }
+                }
+                continue;
+            }
             let rows_per_chunk = std::cmp::max(1, STAGING_BYTES / pitch);
             staging.clear();
             staging.resize(rows_per_chunk * pitch, 0);

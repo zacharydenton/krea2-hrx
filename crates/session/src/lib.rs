@@ -143,8 +143,8 @@ pub struct Session {
     /// The smoothed attention kernels' preparation pass, when the bundle was
     /// built with one (`KREA2_ATTN_QK` of 4 or 8).
     sage: Option<Sage>,
-    /// What the resident rope tables were last filled from. Each upload drains
-    /// the stream, and the tables only change when the image geometry does.
+    /// What the resident RoPE tables were last filled from. Changed tables are
+    /// queued before their next use on this stream.
     rope: Cell<Option<(u64, u64)>>,
     /// Opt-in synchronized wall-clock timing per kernel, off during inference.
     profile: AtomicBool,
@@ -189,7 +189,7 @@ impl Session {
     ) -> Result<Session> {
         Self::validate_dimensions(tokens, layers)?;
         let shape = kernels::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
-        let bundle = kernels::prepare(compiler, &shape)?;
+        let bundle = kernels::prepare_for_target(compiler, &shape, stream.target())?;
         Self::build(stream, weights, &bundle, tokens, layers, compiler)
     }
 
@@ -450,7 +450,6 @@ impl Session {
         for index in first_block..first_block + count {
             self.block(stream, index, self.buffers.mods.binding())?;
         }
-        stream.synchronize()?;
         stream.read(self.buffers.x.binding(), bytemuck::cast_slice_mut(x))?;
         self.report(count);
         Ok(())

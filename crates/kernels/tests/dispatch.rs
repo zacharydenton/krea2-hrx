@@ -128,3 +128,31 @@ fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
         artifact
     );
 }
+
+#[test]
+#[ignore = "requires gfx1151 and the provisioned HRX runtime"]
+fn prepared_kernels_reuse_exports_without_global_retention() {
+    let stream = Stream::open().unwrap();
+    let prepared = kernels::cache::PreparedKernels::default();
+    let config = kernels::config([("count_b", 256)]);
+    let a = prepared.get(&stream, "unary_one", config.clone(), (1, 1)).unwrap();
+    let b = prepared.get(&stream, "unary_one", config, (1, 1)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&a, &b));
+    let weak = std::sync::Arc::downgrade(&a);
+    drop(a);
+    drop(b);
+    drop(prepared);
+    assert!(weak.upgrade().is_none(), "an instance's kernels must be released with it");
+}
+
+#[test]
+#[ignore = "requires the provisioned Loom compiler"]
+fn compiler_cache_separates_device_targets() {
+    let first = hrx::Target::new("gfx1151").unwrap();
+    let second = hrx::Target::new("gfx1100").unwrap();
+    let a = kernels::cache::compiler_for_target(None, &first).unwrap();
+    let b = kernels::cache::compiler_for_target(None, &second).unwrap();
+    assert_eq!(a.target(), &first);
+    assert_eq!(b.target(), &second);
+    assert_eq!(kernels::cache::compiler_for_target(None, &first).unwrap().target(), &first);
+}

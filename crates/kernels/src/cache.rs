@@ -15,13 +15,23 @@ use crate::{sources, Config, Error, Result};
 /// Reuse each selected compiler's pinned identity across model configurations.
 /// Failed resolution is retryable and retains HRX's provisioning diagnostic.
 pub fn compiler(override_path: Option<&str>) -> Result<hrx::loom::Compiler> {
-    static COMPILERS: Mutex<Option<HashMap<Option<String>, hrx::loom::Compiler>>> =
+    compiler_for_target(override_path, &hrx::Target::default())
+}
+
+/// Reuse a compiler for the architecture of the stream that will load its output.
+pub fn compiler_for_target(
+    override_path: Option<&str>,
+    target: &hrx::Target,
+) -> Result<hrx::loom::Compiler> {
+    type CompilerKey = (Option<String>, String);
+    static COMPILERS: Mutex<Option<HashMap<CompilerKey, hrx::loom::Compiler>>> =
         Mutex::new(None);
     let selected =
         override_path.map(str::to_owned).or_else(|| std::env::var("HRX_LOOM_LIBRARY").ok());
     let mut cache = COMPILERS.lock().map_err(|_| Error("compiler cache poisoned".into()))?;
     let cache = cache.get_or_insert_with(HashMap::new);
-    if let Some(compiler) = cache.get(&selected) {
+    let key = (selected.clone(), target.as_str().to_owned());
+    if let Some(compiler) = cache.get(&key) {
         return Ok(compiler.clone());
     }
     // The defaults are tuned for a small consumer: four workers, and room for
@@ -31,17 +41,15 @@ pub fn compiler(override_path: Option<&str>) -> Result<hrx::loom::Compiler> {
     let options = hrx::loom::CompilerOptions {
         workers: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
         module_cache_capacity: 256,
-        ..Default::default()
+        target: target.clone(),
     };
     let compiler =
         hrx::loom::Compiler::with_options(selected.as_deref().map(Path::new), options)?;
-    cache.insert(selected, compiler.clone());
+    cache.insert(key, compiler.clone());
     Ok(compiler)
 }
 
 pub use hrx::bundle::digest;
-
-static LOADED: Mutex<Option<HashMap<String, Arc<Kernel>>>> = Mutex::new(None);
 
 type Shapes = BTreeMap<Config, Arc<Kernel>>;
 type Grids = BTreeMap<(u32, u32), Shapes>;
@@ -90,16 +98,6 @@ pub fn cache_root() -> Result<PathBuf> {
     Ok(hrx::bundle::cache_root()?.join("kernels"))
 }
 
-/// The signature a kernel is cached under: its name, then its configuration in
-/// key order, one `key=value` per line.
-fn signature(name: &str, config: &Config) -> String {
-    let mut text = format!("{name}\n");
-    for (key, value) in config {
-        text.push_str(&format!("{key}={value}\n"));
-    }
-    text
-}
-
 /// The embedded source for an auxiliary kernel, named in the error when there
 /// is none. Separate from the compile so the lookup can be tested without a
 /// device: naming a kernel now takes a stream, resolving it does not.
@@ -124,14 +122,7 @@ pub fn auxiliary_kernel(
         config.insert("grid_y".into(), u64::from(grid.1));
     }
     let source = auxiliary_source(name)?;
-    let compiler = compiler(compiler_path)?;
-    let signature = format!("{}\n{}", compiler.identity(), signature(name, &config));
-    {
-        let loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;
-        if let Some(kernel) = loaded.as_ref().and_then(|m| m.get(&signature)) {
-            return Ok(kernel.clone());
-        }
-    }
+    let compiler = compiler_for_target(compiler_path, stream.target())?;
     let symbol = format!("krea2_{name}");
     let mut request = hrx::loom::Specialization::new(&symbol);
     request.config =
@@ -149,19 +140,12 @@ pub fn auxiliary_kernel(
     }
     // Safety: the shared compiler produced this export from embedded model source.
     let kernel = Arc::new(unsafe { stream.load_artifact(&artifact)? });
-    let mut loaded = LOADED.lock().map_err(|_| Error("kernel cache poisoned".into()))?;
-    Ok(loaded.get_or_insert_with(HashMap::new).entry(signature).or_insert(kernel).clone())
+    Ok(kernel)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_signature_is_the_name_then_the_configuration_in_key_order() {
-        let config = crate::config([("tokens", 4115), ("cols", 6144)]);
-        assert_eq!(signature("unary_one", &config), "unary_one\ncols=6144\ntokens=4115\n");
-    }
 
     #[test]
     fn an_unknown_kernel_is_named_in_the_error() {

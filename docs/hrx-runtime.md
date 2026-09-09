@@ -7,52 +7,49 @@ graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
 There is no link-time libhrx dependency or runtime rpath in the binary.
 
-A pipeline selects its own ordered stream. Nested block sessions inherit it;
-standalone block sessions open a stream of their own. Calls sharing one pipeline
-or block session are serialized and a panic poisons that session. Tensor pools
-are bound to the stream that first uses them. Direct kernel arguments retain
-referenced allocations through synchronization, so buffer Drop does not wait
-for GPU execution. Allocations use the native device allocator without draining
-pending commands. Native operations already insert their own ordering barriers.
+Each pipeline owns an ordered stream. Block sessions and their tensor pools use
+that same stream; a standalone session uses its caller's stream. Calls sharing
+one pipeline are serialized. Native command buffers retain recorded resources,
+so releasing an ordinary buffer does not wait for GPU execution.
 
-The default runtime and in-process compiler come from HRX's pinned native bundle.
-The HRX repository is currently private, so download with an authenticated GitHub
-CLI and prepare the verified cache:
+Transfers and dispatch use HRX `View` regions. Uploads copy into HRX-owned staging
+and queue work on the stream. Weight loading uses chunks of at most 16 MiB;
+unpadded checkpoint rows go directly from the mapping to HRX staging, while
+padded rows are assembled in a reusable host buffer. Blocking reads wait for
+completion. Profiling and progress callbacks add explicit waits when needed.
+
+Tensor storage returns to the model's pool when its final owner is dropped.
+This pool is intentional: HRX's `Stream::recycle` needs mutable stream access,
+which tensor destructors do not have. Keep a pool with its original stream.
+
+The compiler and runtime come from HRX's public, verified native bundle:
 
 ```sh
-cargo install --locked --git https://github.com/zacharydenton/hrx.rs --rev be89b44652af6adf17c5c950d0759f92c2e88582 --features runner hrx
-mkdir -p build
-gh release download native-ecaaf7376f7d-loomc --repo zacharydenton/hrx.rs \
-  --pattern hrx-linux-x86_64-gfx1151.tar.gz --dir build
-hrx prepare build/hrx-linux-x86_64-gfx1151.tar.gz
+cargo install --locked hrx-rs --features runner
+hrx prepare
 cargo build --release --workspace
-cargo install --locked --path cli
 ```
 
-To develop Krea against a working copy of `hrx.rs`, override the pinned
-revision without editing the manifest. `.cargo/config.toml` is ignored by git:
+For local HRX development, use an ignored `.cargo/config.toml`:
 
 ```toml
-[patch."https://github.com/zacharydenton/hrx.rs"]
-hrx = { path = "../hrx.rs" }
+[patch.crates-io]
+hrx-rs = { path = "../hrx.rs" }
 ```
 
-The override rewrites `Cargo.lock` to the path source, so remove the file and
-`cargo build` again — or `git checkout Cargo.lock` — before committing.
-
-`HRX_RUNTIME_DIR` chooses a trusted native directory (`KREA2_RUNTIME` remains an
-alias). `HRX_CACHE_DIR` controls the shared cache. `HRX_OFFLINE=1` refuses network
-provisioning. `HRX_LOOM_LIBRARY` or an explicit model compiler argument overrides
-the compiler. Normal builds do not require `scripts/runtime.sh`; that script
-remains available to stage a developer's native build for an override.
-The shared crate README documents provisioning, native lifetime and bundle format.
+Cargo updates the lockfile for a path override. Restore the registry dependency
+before committing that lockfile. `HRX_RUNTIME_DIR` selects a trusted native
+directory; `HRX_CACHE_DIR` selects the cache, and `HRX_OFFLINE=1` refuses network
+provisioning. `HRX_LOOM_LIBRARY` or an explicit model compiler argument selects
+a compiler override.
 
 Krea's shape/bundle metadata and model-specific operation builders remain here.
-Both auxiliary and block compilation delegate to `hrx::loom`. Cache identity now
-includes the compiler's content hash as well as source, symbol, target and
-configuration. Sessions receive typed prepared artifacts and load their owned
-executable bytes directly. There is no precompiled-directory interface or
-compiler subprocess.
+Both auxiliary and block compilation use the stream's target and `hrx::loom`.
+Compiler selection is cached by library and target. Its bounded module cache is
+kept across guidance shapes, avoiding repeated parsing and indexing. Prepared
+operation sets retain loaded kernels for their lifetime; there is no global
+loaded-kernel cache holding model resources after teardown. Artifacts load from
+owned bytes without a compiler subprocess or an extra filesystem round trip.
 
 Kernel sources live in `crates/kernels/kernels`; tokenizer assets live in
 `crates/tokenizer/assets`. Generators and tests use these paths directly.
@@ -78,3 +75,25 @@ returns contiguous RGB8 in HWC order. Progress is a per-call closure rather than
 a registered callback; returning false abandons the image. It runs on the calling
 thread while the pipeline's lock is held, so it must not call back into the same
 pipeline.
+
+## Integration checks, 2026-09-09
+
+Workspace CPU tests, clippy with warnings denied, and rustdoc passed. The 21
+selected native tests cover operation-cache lifetime, compiler targets, uploads
+crossing a 16 MiB boundary, gathered and padded weights, pooled storage, and
+numerical operations. Repeat them with:
+
+```sh
+HRX_OFFLINE=1 cargo test -p krea2-kernels --test dispatch -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo test -p krea2-session --test uploads -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo test -p krea2-ops -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo run --release -p krea2-kernels --example dispatch_cost
+```
+
+On Ryzen AI MAX+ 395 / gfx1151 with Rust 1.95 nightly and hrx-rs 0.1.0, three
+release runs measured 127–137 ns of host time per direct dispatch and 227–243 ns
+including prepared-cache lookup, configuration construction and scalar packing.
+Each run takes the median of nine 2,048-launch batches after three warmups and
+checks the output. Completed batches averaged 2.1–2.25 µs per tiny kernel.
+These are wall-clock costs, not GPU timestamps or whole-model latency. Image
+quality, checkpoint-scale load time and peak memory were not remeasured.

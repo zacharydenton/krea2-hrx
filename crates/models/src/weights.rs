@@ -128,14 +128,20 @@ impl Weights {
             };
             // The F32 and BF16 copies must use the same packed layout.
             let bytes = packed.as_deref().unwrap_or(bytes);
-            stream.upload(storage.slice(base, bytes.len()), bytes)?;
+            for (i, chunk) in bytes.chunks(16 << 20).enumerate() {
+                stream.upload(storage.try_slice(base + i * (16 << 20), chunk.len())?, chunk)?;
+            }
             let (bf16, holder) = if item.dtype == "F32" {
                 // Everything but the norms consumes a float32 tensor as bf16,
                 // rounded the way the checkpoint's own conversion rounds.
                 let floats = read_f32(bytes, item.count);
                 let rounded: Vec<u16> = floats.iter().map(|&v| from_f32_carrying(v)).collect();
                 let buffer = Arc::new(stream.allocate(rounded.len() * 2)?);
-                stream.upload(buffer.binding(), bytemuck::cast_slice(&rounded))?;
+                for (i, chunk) in
+                    bytemuck::cast_slice::<u16, u8>(&rounded).chunks(16 << 20).enumerate()
+                {
+                    stream.upload(buffer.try_slice(i * (16 << 20), chunk.len())?, chunk)?;
+                }
                 float_storage.push(Arc::clone(&buffer));
                 (0, buffer)
             } else {

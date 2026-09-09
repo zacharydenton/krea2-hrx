@@ -325,10 +325,15 @@ mod tests {
         let stream = Stream::open().expect("a stream");
         let pool = Pool::new();
         let first = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
-        let first = first.binding().expect("a binding").owner().binding().len();
-        // Dropped above, so the same block should serve the next request.
-        let second = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
-        let second = second.binding().expect("a binding").owner().binding().len();
-        assert_eq!(second, first, "the pool did not reuse the block");
+        let shared = first.clone();
+        drop(first);
+        assert_eq!(pool.free.lock().unwrap().cached, 0, "a live alias prevents recycling");
+        drop(shared);
+        assert_eq!(pool.free.lock().unwrap().cached, 512);
+        let second = Tensor::new(&pool, &stream, 8, 16).expect("a smaller tensor");
+        assert_eq!(second.binding().unwrap().owner().bytes(), 512);
+        assert_eq!(pool.free.lock().unwrap().cached, 0, "the cached block was consumed");
+        drop(second);
+        assert_eq!(pool.free.lock().unwrap().cached, 512);
     }
 }

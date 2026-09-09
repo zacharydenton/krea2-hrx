@@ -11,7 +11,7 @@ pub mod sources;
 
 use hrx::{Constants, Kernel};
 
-pub use blocks::{prepare, PreparedBundle, Shape};
+pub use blocks::{prepare, prepare_for_target, PreparedBundle, Shape};
 pub use cache::{auxiliary_kernel, cache_root, compiler, digest};
 
 /// Anything the compiler, the cache or the runtime rejects.

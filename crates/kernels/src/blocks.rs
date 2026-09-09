@@ -1,7 +1,7 @@
 //! Typed transformer artifacts. HRX owns compilation, caching and integrity.
 use std::collections::BTreeMap;
 
-use crate::{compiler, shape, sources, Error, Result, Settings};
+use crate::{shape, sources, Error, Result, Settings};
 
 /// One kernel to compile: a source, and the file name it takes in the bundle.
 struct Job {
@@ -209,7 +209,16 @@ impl PreparedBundle {
 
 /// Prepare all block exports, reusing HRX's indexed modules and verified cache.
 pub fn prepare(compiler_path: Option<&str>, shape: &Shape) -> Result<PreparedBundle> {
-    let shared = compiler(compiler_path)?;
+    prepare_for_target(compiler_path, shape, &hrx::Target::default())
+}
+
+/// Prepare block exports for the device that will execute them.
+pub fn prepare_for_target(
+    compiler_path: Option<&str>,
+    shape: &Shape,
+    target: &hrx::Target,
+) -> Result<PreparedBundle> {
+    let shared = crate::cache::compiler_for_target(compiler_path, target)?;
     let cache = crate::cache_root()?;
     let jobs = shape.jobs();
 
@@ -255,9 +264,7 @@ pub fn prepare(compiler_path: Option<&str>, shape: &Shape) -> Result<PreparedBun
 
     let artifacts: BTreeMap<String, hrx::loom::Artifact> =
         compiled.into_iter().flatten().collect();
-    // The compiler retains parsed sources; a resolution needs them only while it
-    // is being built.
-    shared.trim();
+    // Keep HRX's bounded module cache: another guidance shape uses these same sources.
     Ok(PreparedBundle { shape: shape.clone(), artifacts })
 }
 
