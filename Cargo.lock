@@ -1632,6 +1632,7 @@ dependencies = [
  "krea2-numerics",
  "krea2-ops",
  "krea2-tokenizer",
+ "loom",
 ]
 
 [[package]]
