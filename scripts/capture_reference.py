@@ -1,4 +1,32 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.13,<3.14"
+# dependencies = [
+#   "numpy>=2",
+#   "torch>=2.13,<2.15",
+#   "triton-rocm",
+#   "diffusers>=0.36",
+#   "transformers>=4.57",
+#   "safetensors>=0.6",
+#   "pillow>=11",
+# ]
+#
+# # Torch must be the ROCm build: PyPI's default wheels are CUDA and would give
+# # this script a GPU it cannot use. This index matches the HIP 7.2 runtime on the
+# # 8060S, and only publishes cp313 wheels, which is why requires-python is pinned
+# # below 3.14 -- uv fetches a matching interpreter itself.
+# [[tool.uv.index]]
+# name = "pytorch-rocm"
+# url = "https://download.pytorch.org/whl/rocm7.2"
+# explicit = true
+#
+# [tool.uv.sources]
+# torch = { index = "pytorch-rocm" }
+# # Torch's ROCm build needs triton-rocm from this index; PyPI carries only an
+# # unrelated 3.0.0rc1. It is named as a direct dependency because uv applies
+# # tool.uv.sources to declared dependencies, not to ones reached through torch.
+# triton-rocm = { index = "pytorch-rocm" }
+# ///
 """Capture the unquantized BF16 ground truth that `scripts/parity.sh` gates against.
 
 This is the half of the parity check that cannot live in the Rust test: it needs Torch,
@@ -7,9 +35,12 @@ repository depends on. The Rust gate only ever reads what this writes, and never
 updates its own ground truth -- which is exactly why the fixture has to be reproducible from
 here rather than existing only as files somebody once made.
 
-    python3 scripts/capture_reference.py reference          the ground truth: noise, text, bf16 latent and image
-    python3 scripts/capture_reference.py accept --latents F  mint a new accepted W8A8 baseline (deliberate)
-    python3 scripts/capture_reference.py manifest            the hashes for crates/pipeline/tests/fixtures/unquantized.json
+    ./scripts/capture_reference.py reference           the ground truth: noise, text, bf16 latent and image
+    ./scripts/capture_reference.py accept --latents F  mint a new accepted W8A8 baseline (deliberate)
+    ./scripts/capture_reference.py manifest            the hashes for crates/pipeline/tests/fixtures/unquantized.json
+
+A `uv run` script: dependencies and the ROCm Torch index are in the header above and the
+resolution is pinned by capture_reference.py.lock, so there is no environment to set up.
 
 `reference` refuses to overwrite an existing fixture without --force: re-minting ground truth
 from a build that has already drifted is the one mistake this gate cannot survive. A fresh

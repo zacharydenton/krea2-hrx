@@ -58,10 +58,17 @@ checkpoint, so it runs in an environment this repository does not otherwise depe
 on. Without it a lost `build/` would end the gate permanently.
 
 ```sh
-python3 scripts/capture_reference.py reference               # ground truth: noise, text, bf16 latent and image
-python3 scripts/capture_reference.py accept --latents FILE   # promote a native run to the accepted baseline
-python3 scripts/capture_reference.py manifest --write        # re-pin the hashes after either
+./scripts/capture_reference.py reference               # ground truth: noise, text, bf16 latent and image
+./scripts/capture_reference.py accept --latents FILE   # promote a native run to the accepted baseline
+./scripts/capture_reference.py manifest --write        # re-pin the hashes after either
 ```
+
+It is a `uv run` script: the dependencies, the pinned interpreter and the ROCm
+Torch index live in its own header, and `scripts/capture_reference.py.lock` fixes
+the resolution, so there is no environment to create and nothing to activate.
+Torch comes from the ROCm index rather than PyPI, whose default wheels are CUDA;
+that index publishes cp313 wheels only, which is why the script pins Python below
+3.14 and lets uv fetch a matching interpreter.
 
 `reference` refuses to overwrite an existing fixture without `--force`, because
 re-minting truth from a build that has already drifted is the one mistake this gate
