@@ -12,9 +12,9 @@ pub mod bundle;
 pub mod sage;
 pub mod weights;
 
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 
 use hrx::{Buffer, Stream, View};
 use loom::Scalars;
@@ -145,11 +145,10 @@ pub struct Session {
     sage: Option<Sage>,
     /// What the resident rope tables were last filled from. Each upload drains
     /// the stream, and the tables only change when the image geometry does.
-    rope: Mutex<Option<(u64, u64)>>,
+    rope: Cell<Option<(u64, u64)>>,
     /// Opt-in synchronized wall-clock timing per kernel, off during inference.
     profile: AtomicBool,
-    stages: Mutex<Vec<(&'static str, f64)>>,
-    lock: Mutex<()>,
+    stages: RefCell<Vec<(&'static str, f64)>>,
     weights: std::sync::Arc<Weights>,
 }
 
@@ -289,10 +288,9 @@ impl Session {
             blocks,
             buffers,
             sage,
-            rope: Mutex::new(None),
+            rope: Cell::new(None),
             profile: AtomicBool::new(false),
-            stages: Mutex::new(Vec::new()),
-            lock: Mutex::new(()),
+            stages: RefCell::new(Vec::new()),
             weights,
         })
     }
@@ -349,15 +347,14 @@ impl Session {
     /// fingerprint stays consistent with the shared device buffers.
     fn upload_rope(&self, stream: &mut Stream, cos: &[f32], sin: &[f32]) -> Result<()> {
         let fingerprint = (fingerprint(cos), fingerprint(sin));
-        let mut resident = self.rope.lock().unwrap_or_else(|e| e.into_inner());
-        if *resident == Some(fingerprint) {
+        if self.rope.get() == Some(fingerprint) {
             return Ok(());
         }
         // Cleared first: a failed upload must not leave the tables claimed.
-        *resident = None;
+        self.rope.set(None);
         stream.upload(self.buffers.cos.binding(), bytemuck::cast_slice(cos))?;
         stream.upload(self.buffers.sin.binding(), bytemuck::cast_slice(sin))?;
-        *resident = Some(fingerprint);
+        self.rope.set(Some(fingerprint));
         Ok(())
     }
 
@@ -386,7 +383,7 @@ impl Session {
     }
 
     fn accumulate(&self, stage: &'static str, micros: f64) {
-        let mut stages = self.stages.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stages = self.stages.borrow_mut();
         match stages.iter_mut().find(|(name, _)| *name == stage) {
             Some(entry) => entry.1 += micros,
             None => stages.push((stage, micros)),
@@ -398,7 +395,7 @@ impl Session {
         if !self.profile.load(Ordering::Relaxed) {
             return;
         }
-        let mut stages = self.stages.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stages = self.stages.borrow_mut();
         let total: f64 = stages.iter().map(|(_, micros)| micros).sum();
         stages.sort_by(|a, b| b.1.total_cmp(&a.1));
         eprintln!("stage profile over {blocks} block(s), {} tokens:", self.tokens);
@@ -429,10 +426,6 @@ impl Session {
         first_block: usize,
         block_count: Option<usize>,
     ) -> Result<()> {
-        let _serialized = self
-            .lock
-            .lock()
-            .map_err(|_| Error::failed("session is poisoned; create a new session"))?;
         let count = block_count.unwrap_or(self.layers.saturating_sub(first_block));
         if first_block >= self.layers || count < 1 || count > self.layers - first_block {
             return Err(Error::invalid("block range must be within the loaded layers"));
@@ -471,10 +464,9 @@ impl Session {
     /// `[layers][6][6144]`. The rope tables stay host-side because they change
     /// only when the image geometry does.
     ///
-    /// # Safety
-    /// `x` and `mods` must span the documented shapes on this session's stream.
-    /// The spans must cover the documented shapes and belong to `stream`; both
-    /// are now checked, which is why this no longer has to be unsafe.
+    /// Both views must belong to `stream` and cover the shapes above. The
+    /// runtime checks the first and this checks the second, which is why the
+    /// address-based version's `unsafe` is gone.
     pub fn run_device(
         &self,
         stream: &mut Stream,
@@ -483,10 +475,6 @@ impl Session {
         cos: &[f32],
         sin: &[f32],
     ) -> Result<()> {
-        let _serialized = self
-            .lock
-            .lock()
-            .map_err(|_| Error::failed("session is poisoned; create a new session"))?;
         let tokens = self.tokens;
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
@@ -772,7 +760,7 @@ mod tests {
         let mut stream = Stream::open().expect("a stream");
         let session =
             Session::open(&mut stream, &checkpoint, tokens, 1).expect("resident session");
-        let resident = || *session.rope.lock().unwrap_or_else(|e| e.into_inner());
+        let resident = || session.rope.get();
         assert_eq!(resident(), None, "nothing is resident before the first call");
 
         let mods = vec![0.01f32; 6 * HIDDEN as usize];
