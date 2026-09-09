@@ -34,8 +34,9 @@ scripts/parity.sh
 ```
 
 `KREA2_QUALITY_FIXTURE` selects the reference fixture and `KREA2_QUALITY_OUTPUT`
-retains the candidate's final latent, which `scripts/capture_reference.py accept`
-can promote once a candidate is adopted.
+retains the candidate's final latent, native decoded PNG, and a receipt binding
+both to the reference. `scripts/capture_reference.py accept` can promote this
+pair once a candidate is adopted; see [the fixture workflow](testing.md).
 
 The gate requires matching reference inputs and permits at most 0.1 dB loss
 in either latent or image PSNR. Additional prompts and seeds are needed to

@@ -111,14 +111,20 @@ on. Without it a lost `build/` would end the gate permanently.
 
 ```sh
 ./scripts/capture_reference.py reference               # ground truth: noise, text, bf16 latent and image
+./scripts/capture_reference.py manifest --reference-only --write  # pin the new reference first
 KREA2_QUALITY_MINT=1 scripts/parity.sh                 # mint the accepted baseline for a new fixture
-./scripts/capture_reference.py manifest --write        # re-pin the hashes after either
+./scripts/capture_reference.py manifest --write        # pin the complete fixture, including the baseline
+scripts/parity.sh                                    # run the ordinary regression gate
 ```
 
 A freshly captured reference has no accepted baseline, and one cannot exist until
 the native trajectory has been run, so the gate mints it — but only when
-`KREA2_QUALITY_MINT` is set. A missing baseline is otherwise a hard failure, never
-a quietly passing gate. `--checkpoint` remains as a labelled fallback that maps a
+`KREA2_QUALITY_MINT=1` is set, both baseline files are absent, and the five reference
+files match a reference-only manifest. The ordinary gate requires all seven pinned
+files. Minting creates a baseline; it does not check for a regression. For separate
+fixtures, use `--work DIR` and `--manifest FILE` on the capture commands and
+`KREA2_QUALITY_FIXTURE=DIR KREA2_QUALITY_MANIFEST=FILE` on the Rust runner.
+`--checkpoint` remains as a labelled fallback that maps a
 local ComfyUI-format file onto the same official modules; it is recorded in
 `job.json` as such. Captured both ways on the same machine, the two agree
 bit-for-bit, so the mapping is exact -- but only the `from_pretrained` path is
@@ -127,16 +133,29 @@ free of this repository's own interpretation of the weights.
 It is a `uv run` script: the dependencies, the pinned interpreter and the ROCm
 Torch index live in its own header, and `scripts/capture_reference.py.lock` fixes
 the resolution, so there is no environment to create and nothing to activate.
+The official model is pinned to commit
+`98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7`; new captures record that revision in
+`job.json`. `--revision` accepts a full commit SHA and is required for custom
+repositories. Existing frozen fixtures retain their original provenance.
 Torch comes from the ROCm index rather than PyPI, whose default wheels are CUDA;
 that index publishes cp313 wheels only, which is why the script pins Python below
 3.14 and lets uv fetch a matching interpreter.
 
 `reference` refuses to overwrite an existing fixture without `--force`, because
 re-minting truth from a build that has already drifted is the one mistake this gate
-cannot survive. `accept` takes a `KREA2_QUALITY_OUTPUT` dump and is the only way to
-move the baseline; the pinned hashes make that a deliberate, reviewable commit
-rather than something a passing run can do to itself. A fresh capture is a new
-fixture with new hashes, so `manifest` follows either of the other two.
+cannot survive. Capture stages all new reference files before replacing the old
+ones and removes both old baseline files on successful recapture. A failed capture
+leaves the existing fixture intact; interrupted publication fails hash validation.
+
+To deliberately promote a candidate, run
+`KREA2_QUALITY_OUTPUT=/tmp/candidate.f32 scripts/parity.sh`, then
+`./scripts/capture_reference.py accept --latents /tmp/candidate.f32` and
+`./scripts/capture_reference.py manifest --write`. The runner exports the raw
+latent, its native decoded image (`.f32.png`), and a receipt (`.f32.json`) binding
+both to the verified reference hashes. `accept` validates the pair and copies the
+native image without invoking Torch or another decoder. Legacy latent-only dumps
+must be exported again. Review the quality measurements before promoting a run;
+exports are available even when the regression assertions fail.
 
 The fixture contains `job.json`, `noise.npy` (`[4096,64]`), `text.npy`
 (`[19,12,2560]`), `bf16.npy` and accepted `w8a8.npy` (`[1,4096,64]`), plus

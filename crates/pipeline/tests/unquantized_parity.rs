@@ -6,6 +6,42 @@ use std::path::{Path, PathBuf};
 use krea2_models::Files;
 use krea2_pipeline::Pipeline;
 
+const REFERENCE: [&str; 5] = ["job.json", "noise.npy", "text.npy", "bf16.npy", "bf16.png"];
+const BASELINE: [&str; 2] = ["w8a8.npy", "w8a8.png"];
+
+/// Minting is a separate workflow, against an explicitly pinned reference with no baseline.
+/// An ordinary gate always requires all seven hashes and files, before opening the GPU.
+fn validate_fixture(
+    fixture: &Path,
+    manifest: &serde_json::Value,
+    minting: bool,
+) -> Result<(), String> {
+    let files = manifest["files"].as_object().ok_or("manifest must contain file hashes")?;
+    let required: Vec<_> = REFERENCE
+        .iter()
+        .chain(if minting { [].iter() } else { BASELINE.iter() })
+        .copied()
+        .collect();
+    if files.len() != required.len() || required.iter().any(|name| !files.contains_key(*name)) {
+        return Err(if minting {
+            "minting requires a reference-only manifest; run capture_reference.py manifest --reference-only --write"
+        } else {
+            "the quality gate requires a complete manifest with both accepted baseline hashes"
+        }.into());
+    }
+    if minting && BASELINE.iter().any(|name| fixture.join(name).exists()) {
+        return Err("minting requires both accepted baseline files absent".into());
+    }
+    for name in required {
+        let bytes = std::fs::read(fixture.join(name))
+            .map_err(|e| format!("reference fixture {name}: {e}"))?;
+        if Some(hrx::bundle::digest(&bytes).as_str()) != files[name].as_str() {
+            return Err(format!("reference fixture changed: {name}"));
+        }
+    }
+    Ok(())
+}
+
 // The fixture format is deliberately narrow: NumPy v1/v2, little-endian f32,
 // C order, with exact expected dimensions. No Python runtime is involved.
 fn array(path: &Path, shape: &[usize]) -> Vec<f32> {
@@ -100,6 +136,126 @@ fn write_rgb(path: &Path, pixels: &[u8], size: usize) {
     encoder.write_header().unwrap().write_image_data(pixels).unwrap();
 }
 
+fn sidecar(path: &Path, extension: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(extension);
+    PathBuf::from(name)
+}
+
+/// The receipt is published last so interrupted exports cannot be promoted as a pair.
+fn export_candidate(
+    path: &Path,
+    state: &[f32],
+    pixels: &[u8],
+    size: usize,
+    manifest: &serde_json::Value,
+) {
+    let receipt = sidecar(path, ".json");
+    if receipt.exists() {
+        std::fs::remove_file(&receipt).unwrap();
+    }
+    let bytes: Vec<_> = state.iter().flat_map(|x| x.to_le_bytes()).collect();
+    std::fs::write(path, &bytes).unwrap();
+    let image = sidecar(path, ".png");
+    write_rgb(&image, pixels, size);
+    let reference: serde_json::Map<_, _> = REFERENCE
+        .iter()
+        .map(|name| ((*name).into(), manifest["files"][name].clone()))
+        .collect();
+    let record = serde_json::json!({
+        "version": 1,
+        "size": size,
+        "reference": reference,
+        "latents_sha256": hrx::bundle::digest(&bytes),
+        "image_sha256": hrx::bundle::digest(&std::fs::read(image).unwrap()),
+    });
+    std::fs::write(receipt, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn fresh_baseline_requires_explicit_minting_and_verified_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path();
+    let mut files = serde_json::Map::new();
+    for name in REFERENCE {
+        std::fs::write(fixture.join(name), name).unwrap();
+        files.insert(name.into(), hrx::bundle::digest(name.as_bytes()).into());
+    }
+    let manifest = serde_json::json!({ "files": files });
+    assert!(validate_fixture(fixture, &manifest, true).is_ok());
+    assert!(validate_fixture(fixture, &manifest, false).is_err());
+    assert!(validate_fixture(fixture, &serde_json::json!({"files": {}}), true).is_err());
+    for name in REFERENCE {
+        std::fs::remove_file(fixture.join(name)).unwrap();
+        assert!(validate_fixture(fixture, &manifest, true).is_err(), "missing {name}");
+        std::fs::write(fixture.join(name), "changed").unwrap();
+        assert!(validate_fixture(fixture, &manifest, true).is_err(), "changed {name}");
+        std::fs::write(fixture.join(name), name).unwrap();
+    }
+    // Either leftover baseline file is enough to refuse minting, including an orphan PNG.
+    for name in BASELINE {
+        std::fs::write(fixture.join(name), name).unwrap();
+        assert!(validate_fixture(fixture, &manifest, true).is_err());
+        std::fs::remove_file(fixture.join(name)).unwrap();
+    }
+}
+
+#[test]
+fn ordinary_gate_requires_complete_unchanged_baseline() {
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = directory.path();
+    let mut files = serde_json::Map::new();
+    for name in REFERENCE.into_iter().chain(BASELINE) {
+        std::fs::write(fixture.join(name), name).unwrap();
+        files.insert(name.into(), hrx::bundle::digest(name.as_bytes()).into());
+    }
+    let manifest = serde_json::json!({ "files": files });
+    assert!(validate_fixture(fixture, &manifest, false).is_ok());
+    assert!(validate_fixture(fixture, &manifest, true).is_err());
+    for name in BASELINE {
+        std::fs::remove_file(fixture.join(name)).unwrap();
+        assert!(validate_fixture(fixture, &manifest, false).is_err());
+        std::fs::write(fixture.join(name), "changed").unwrap();
+        assert!(validate_fixture(fixture, &manifest, false).is_err());
+        std::fs::write(fixture.join(name), name).unwrap();
+    }
+}
+
+#[test]
+fn candidate_export_preserves_native_pixels_and_binds_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("candidate.f32");
+    let state: Vec<f32> = (0..64).map(|v| v as f32 / 16.0).collect();
+    let pixels: Vec<u8> = (0..16 * 16 * 3).map(|v| (v % 256) as u8).collect();
+    let mut files = serde_json::Map::new();
+    for name in REFERENCE.into_iter().chain(BASELINE) {
+        files.insert(name.into(), hrx::bundle::digest(name.as_bytes()).into());
+    }
+    let manifest = serde_json::json!({ "files": files });
+    export_candidate(&path, &state, &pixels, 16, &manifest);
+    assert_eq!(rgb(&sidecar(&path, ".png"), 16), pixels);
+    let raw = std::fs::read(&path).unwrap();
+    let restored: Vec<f32> =
+        raw.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
+    assert_eq!(restored, state);
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(sidecar(&path, ".json")).unwrap()).unwrap();
+    assert_eq!(record["version"], 1);
+    assert_eq!(record["size"], 16);
+    assert_eq!(record["latents_sha256"], hrx::bundle::digest(&raw));
+    assert_eq!(
+        record["image_sha256"],
+        hrx::bundle::digest(&std::fs::read(sidecar(&path, ".png")).unwrap())
+    );
+    assert_eq!(record["reference"].as_object().unwrap().len(), REFERENCE.len());
+    for name in REFERENCE {
+        assert_eq!(record["reference"][name], manifest["files"][name]);
+    }
+    let npy = directory.path().join("w8a8.npy");
+    write_array(&npy, &state, &[1, 1, 64]);
+    assert_eq!(array(&npy, &[1, 1, 64]), state);
+}
+
 #[test]
 #[ignore = "requires gfx1151, local weights and the unquantized BF16 reference fixture"]
 fn unquantized_bf16_reference_quality_does_not_regress() {
@@ -109,17 +265,16 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let fixture = std::env::var_os("KREA2_QUALITY_FIXTURE")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("build/quality"));
-    let manifest: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/unquantized.json")).unwrap();
-    for (name, expected) in manifest["files"].as_object().unwrap() {
-        let bytes = std::fs::read(fixture.join(name))
-            .unwrap_or_else(|e| panic!("reference fixture {name}: {e}"));
-        assert_eq!(
-            hrx::bundle::digest(&bytes),
-            expected.as_str().unwrap(),
-            "reference fixture changed: {name}"
-        );
-    }
+    let manifest_text = std::env::var_os("KREA2_QUALITY_MANIFEST")
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .unwrap_or_else(|| include_str!("fixtures/unquantized.json").into());
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_text).unwrap();
+    let minting = match std::env::var("KREA2_QUALITY_MINT") {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(value) if value == "1" => true,
+        _ => panic!("KREA2_QUALITY_MINT must be unset or exactly 1"),
+    };
+    validate_fixture(&fixture, &manifest, minting).unwrap_or_else(|e| panic!("{e}"));
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.join("job.json")).unwrap()).unwrap();
     // The reference must be the unquantized model: the official diffusers repository, or a
@@ -148,16 +303,6 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let mut state = array(&fixture.join("noise.npy"), &[tokens, 64]);
     let truth = array(&fixture.join("bf16.npy"), &[1, tokens, 64]);
     let truth_rgb = rgb(&fixture.join("bf16.png"), size);
-    // A freshly captured reference has no accepted baseline yet, and one cannot be produced
-    // without running this trajectory. Minting is therefore allowed here, but only when
-    // asked for explicitly: a missing baseline must never be a quietly passing gate.
-    let minting = !fixture.join("w8a8.npy").is_file();
-    assert!(
-        !minting || std::env::var_os("KREA2_QUALITY_MINT").is_some(),
-        "{} has no accepted baseline. Set KREA2_QUALITY_MINT=1 to write one from this run, \
-         then re-pin with scripts/capture_reference.py manifest --write.",
-        fixture.display()
-    );
     let accepted = (!minting).then(|| array(&fixture.join("w8a8.npy"), &[1, tokens, 64]));
     let accepted_rgb = (!minting).then(|| rgb(&fixture.join("w8a8.png"), size));
     let checkpoint =
@@ -186,12 +331,11 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         state = resident.download().unwrap().into_iter().map(to_f32).collect();
         eprintln!("BF16 reference: step {}/{}", step + 1, steps);
     }
-    if let Some(path) = std::env::var_os("KREA2_QUALITY_OUTPUT") {
-        let bytes: Vec<_> = state.iter().flat_map(|x| x.to_le_bytes()).collect();
-        std::fs::write(path, bytes).unwrap();
-    }
     let (cosine, rms) = metrics(&state, &truth);
     let ours_rgb = pipeline.decode(&state, size, size).unwrap();
+    if let Some(path) = std::env::var_os("KREA2_QUALITY_OUTPUT") {
+        export_candidate(Path::new(&path), &state, &ours_rgb, size, &manifest);
+    }
     let psnr = image_psnr(&ours_rgb, &truth_rgb);
     eprintln!("unquantized reference: cosine {cosine:.6}, relative RMS {rms:.6}");
     eprintln!("unquantized reference image: PSNR {psnr:.6} dB");

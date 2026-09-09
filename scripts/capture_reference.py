@@ -55,9 +55,11 @@ Weights live outside the repository (`~/krea2-models` by default, `--models` to 
 """
 import argparse
 import hashlib
+import io
 import json
-import math
+import re
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -65,6 +67,10 @@ import numpy as np
 # stay runnable on a box that has neither Torch nor Diffusers installed.
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = Path.home() / "krea2-models"
+REPO = "krea/Krea-2-Turbo"
+# Immutable official snapshot present in the capture machine's Hugging Face cache.
+# This pins future captures; it does not retroactively attribute older fixtures.
+REVISION = "98e0fe118d17c9e3547fbb2e25acdbae2cadf7c7"
 
 # diffusers' FlowMatchEulerDiscreteScheduler settings for Krea 2; `max_shift` is the
 # exponential shift the sampler resolves to at this sequence length, and is written into
@@ -76,6 +82,16 @@ SHIFT = SCHEDULER["max_shift"]
 
 # The files the Rust gate reads, in the order it reads them.
 FIXTURE = ("job.json", "noise.npy", "text.npy", "bf16.npy", "bf16.png", "w8a8.npy", "w8a8.png")
+REFERENCE = FIXTURE[:5]
+BASELINE = FIXTURE[5:]
+
+
+def model_revision(a):
+    revision = a.revision or (REVISION if a.repo == REPO else None)
+    if revision is None or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise SystemExit("--revision must be a full, immutable model commit SHA; "
+                         "custom repositories require an explicit revision")
+    return revision
 
 
 def diffusers_state(comfy, layers: int = 28):
@@ -141,8 +157,9 @@ def build(a, dtype):
     from diffusers import Krea2Pipeline
 
     if a.checkpoint is None:
-        pipe = Krea2Pipeline.from_pretrained(a.repo, dtype=dtype)
-        return pipe.to(a.device), {"repo": a.repo}
+        revision = model_revision(a)
+        pipe = Krea2Pipeline.from_pretrained(a.repo, revision=revision, dtype=dtype)
+        return pipe.to(a.device), {"repo": a.repo, "revision": revision}
 
     from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
@@ -209,6 +226,20 @@ def digests(work: Path) -> dict:
             for name in FIXTURE if (work / name).is_file()}
 
 
+def publish(stage, work, names):
+    # All expensive or fallible generation and validation happens before publication.
+    # Replace individual files so unrelated archives in the fixture directory survive.
+    for name in names:
+        if not (stage / name).is_file():
+            raise SystemExit(f"capture did not produce {name}")
+    work.mkdir(parents=True, exist_ok=True)
+    if names == REFERENCE:
+        for name in BASELINE:
+            (work / name).unlink(missing_ok=True)
+    for name in names:
+        (stage / name).replace(work / name)
+
+
 def command_reference(a) -> int:
     present = [name for name in FIXTURE if (a.work / name).is_file()]
     if present and not a.force:
@@ -217,6 +248,21 @@ def command_reference(a) -> int:
             "Re-capturing ground truth from a build that has already drifted is the one\n"
             "mistake this gate cannot survive, so pass --force only when you mean to\n"
             "replace the reference and re-pin the manifest.")
+    a.work.parent.mkdir(parents=True, exist_ok=True)
+    # Failed model loads, inference or decoding must leave the old fixture intact.
+    # Staging also permits --reuse to point at the fixture being replaced.
+    with TemporaryDirectory(prefix=".reference-", dir=a.work.parent) as temporary:
+        staged = argparse.Namespace(**vars(a))
+        staged.work = Path(temporary)
+        capture_reference(staged)
+        publish(staged.work, a.work, REFERENCE)
+    print(f"reference -> {a.work}; old accepted baseline removed")
+    print("pin with `manifest --reference-only --write`, run "
+          "`KREA2_QUALITY_MINT=1 scripts/parity.sh`, then `manifest --write`")
+    return 0
+
+
+def capture_reference(a):
     import torch
 
     if a.checkpoint is not None and not Path(a.checkpoint).is_file():
@@ -271,33 +317,50 @@ def command_reference(a) -> int:
              torch=torch.__version__, diffusers=diffusers.__version__, **source),
         indent=1) + "\n")
     print(f"reference: {text.shape[0]} text tokens, latents {tuple(latents.shape)} -> {a.work}")
-    print("the accepted W8A8 baseline is not ground truth and is not written here; "
-          "mint one with `accept`, then re-run `manifest`")
-    return 0
 
 
 def command_accept(a) -> int:
     """Promote a native run to the accepted baseline the gate must not regress against."""
-    import torch
+    from PIL import Image
 
     if a.latents is None:
         raise SystemExit("--latents must name a KREA2_QUALITY_OUTPUT dump from the native run")
     meta = json.loads((a.work / "job.json").read_text())
     size, tokens = meta["size"], (meta["size"] // 16) ** 2
-    raw = np.fromfile(a.latents, dtype="<f4")
-    if raw.size != tokens * 64:
-        raise SystemExit(f"{a.latents} holds {raw.size} floats, expected {tokens * 64}")
-    latents = torch.from_numpy(raw.reshape(1, tokens, 64).copy())
-    np.save(a.work / "w8a8.npy", np.ascontiguousarray(latents.numpy(), np.float32))
-    # Decode the accepted baseline with the same VAE the reference image came from.
-    a.device = meta.get("device", "cpu")
-    a.repo = meta.get("repo", a.repo)
-    a.checkpoint = meta.get("checkpoint")
-    pipe, _ = build(a, getattr(torch, meta.get("dtype", "bfloat16")))
-    decode(pipe, latents, size, a.work / "w8a8.png")
+    # The native runner writes the receipt last, after exporting both final latents and
+    # its own decoded RGB. Hashes bind those outputs to each other and to the reference.
+    receipt_path = Path(str(a.latents) + ".json")
+    if not receipt_path.is_file():
+        raise SystemExit("missing native export receipt; re-run with KREA2_QUALITY_OUTPUT")
+    receipt = json.loads(receipt_path.read_text())
+    reference = {name: hashlib.sha256((a.work / name).read_bytes()).hexdigest()
+                 for name in REFERENCE}
+    if (receipt.get("version") != 1 or receipt.get("size") != size
+            or receipt.get("reference") != reference):
+        raise SystemExit("native export was not produced against this reference")
+    raw_bytes = a.latents.read_bytes()
+    image_bytes = Path(str(a.latents) + ".png").read_bytes()
+    if (hashlib.sha256(raw_bytes).hexdigest() != receipt.get("latents_sha256")
+            or hashlib.sha256(image_bytes).hexdigest() != receipt.get("image_sha256")):
+        raise SystemExit("native export hashes do not match; latents/image pair changed")
+    if len(raw_bytes) != tokens * 64 * 4:
+        raise SystemExit(f"{a.latents} holds {len(raw_bytes)} bytes, expected {tokens * 64 * 4}")
+    raw = np.frombuffer(raw_bytes, dtype="<f4")
+    if not np.isfinite(raw).all():
+        raise SystemExit(f"{a.latents} contains non-finite values")
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        if image.format != "PNG" or image.mode != "RGB" or image.size != (size, size):
+            raise SystemExit("native export must contain an RGB8 PNG at the fixture resolution")
+        image.load()
+    latents = raw.reshape(1, tokens, 64)
     truth = np.load(a.work / "bf16.npy").astype(np.float64).ravel()
-    got = latents.numpy().astype(np.float64).ravel()
+    got = latents.astype(np.float64).ravel()
     cosine = float(got @ truth / (np.linalg.norm(got) * np.linalg.norm(truth)))
+    with TemporaryDirectory(prefix=".accept-", dir=a.work.parent) as temporary:
+        stage = Path(temporary)
+        np.save(stage / "w8a8.npy", latents)
+        (stage / "w8a8.png").write_bytes(image_bytes)
+        publish(stage, a.work, BASELINE)
     print(f"accepted baseline: cosine {cosine:.6f}  "
           f"relative RMS {np.linalg.norm(got - truth) / np.linalg.norm(truth):.6f}")
     print("re-run `manifest` and commit the new hashes: the gate pins these files on purpose")
@@ -305,11 +368,14 @@ def command_accept(a) -> int:
 
 
 def command_manifest(a) -> int:
-    target = ROOT / "crates/pipeline/tests/fixtures/unquantized.json"
+    target = a.manifest
     found = digests(a.work)
-    missing = [name for name in FIXTURE if name not in found]
+    required = REFERENCE if a.reference_only else FIXTURE
+    missing = [name for name in required if name not in found]
     if missing:
-        print(f"warning: {a.work} is missing {', '.join(missing)}")
+        raise SystemExit(f"{a.work} is missing {', '.join(missing)}")
+    if a.reference_only and any(name in found for name in BASELINE):
+        raise SystemExit("reference-only pinning requires both accepted baseline files absent")
     # The prose says what the fixture is, which no hash can. Carry the existing note forward
     # rather than dropping it, so re-pinning after a capture does not silently lose provenance.
     note = a.note
@@ -334,13 +400,15 @@ def main() -> int:
     ap.add_argument("stage", choices=["reference", "accept", "manifest"])
     ap.add_argument("--work", type=Path, default=ROOT / "build/quality")
     ap.add_argument("--models", type=Path, default=MODELS)
-    ap.add_argument("--repo", default="krea/Krea-2-Turbo",
+    ap.add_argument("--repo", default=REPO,
                     help="the official diffusers repository the reference is defined by")
+    ap.add_argument("--revision", default=None,
+                    help=f"immutable model commit SHA (official repo default: {REVISION})")
     ap.add_argument("--checkpoint", default=None,
                     help="fallback: a local ComfyUI-format bf16 checkpoint, mapped onto the "
                          "official modules by this file (recorded in job.json as such)")
     ap.add_argument("--latents", type=Path, default=None,
-                    help="accept: a KREA2_QUALITY_OUTPUT dump of the native final latent")
+                    help="accept: a KREA2_QUALITY_OUTPUT dump with its .png and .json sidecars")
     ap.add_argument("--prompt",
                     default="a red fox sitting in fresh snow at dawn, soft light, photograph")
     ap.add_argument("--seed", type=int, default=0)
@@ -355,6 +423,11 @@ def main() -> int:
                          "capture on a different device isolates the transformer alone")
     ap.add_argument("--force", action="store_true", help="reference: replace an existing fixture")
     ap.add_argument("--write", action="store_true", help="manifest: write the pinned file in place")
+    ap.add_argument("--reference-only", action="store_true",
+                    help="manifest: pin only the reference before minting a fresh baseline")
+    ap.add_argument("--manifest", type=Path,
+                    default=ROOT / "crates/pipeline/tests/fixtures/unquantized.json",
+                    help="manifest: destination (Rust override: KREA2_QUALITY_MANIFEST)")
     ap.add_argument("--note", default=None,
                     help="manifest: replace the provenance line describing the fixture")
     a = ap.parse_args()
