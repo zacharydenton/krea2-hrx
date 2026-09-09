@@ -16,9 +16,10 @@ hardware, compiler, or runtime is a failure, never a silent pass. HRX provisions
 and caches the compiler and runtime. `HRX_OFFLINE=1` requires an existing bundle.
 
 Use the shared HRX crate for native loading, allocation, scalar packing, dispatch,
-compilation, caching and FFI guards. Model code owns its source selection, shapes,
-weight layout and numerical semantics. Preserve the generated C ABI and keep
-Rustler adapters in the consuming application.
+compilation and caching. Model code owns its source selection, shapes, weight
+layout and numerical semantics. The workspace crates are the public interface:
+consuming applications depend on them directly, and a Rustler adapter lives in
+the application rather than behind a C boundary here.
 
 See [test coverage](docs/testing.md) for the numerical cases and remaining limits.
 Record dimensions, precision, toolchain and GPU when reporting performance.

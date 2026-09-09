@@ -57,6 +57,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// Called after each sampling step with the seconds spent so far. Returning
 /// false abandons the image.
+///
+/// It runs on the calling thread while the pipeline's lock is held, so it must
+/// not call back into the same pipeline: `encode`, `decode`, `transformer` and
+/// `generate` would all deadlock on a lock this closure is already inside.
 pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, f64) -> bool;
 
 /// What one image asks for. `guidance` and `steps` of `None` take the

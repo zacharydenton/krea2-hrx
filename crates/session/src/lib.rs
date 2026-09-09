@@ -33,8 +33,8 @@ pub const QKVG: i32 = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN;
 pub const GATE_OFFSET: i32 = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 const THREADS: u32 = 256;
 
-/// A failure, and whether the caller could have prevented it. The C ABI maps
-/// these onto `KREA2_INVALID_ARGUMENT` and `KREA2_ERROR`.
+/// A failure, and whether the caller could have prevented it. Callers use the
+/// flag to separate their own mistakes from a genuine runtime failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     pub message: String,
@@ -74,7 +74,7 @@ impl From<loom::Error> for Error {
 impl From<krea2_checkpoint::Error> for Error {
     fn from(error: krea2_checkpoint::Error) -> Self {
         // The checkpoint reader's rejections are all about the file the caller
-        // named, so they read as invalid arguments through the C ABI.
+        // named, so they read as invalid arguments.
         Error::failed(error.to_string())
     }
 }

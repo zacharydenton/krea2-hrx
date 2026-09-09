@@ -29,10 +29,15 @@ fn checkpoint(path: &Path, header: &str, payload: usize) {
     std::fs::write(path, bytes).expect("the checkpoint");
 }
 
-/// The HSA provider, and therefore the GPU, was never opened.
+/// Neither the native runtime nor the HSA provider, and therefore not the GPU,
+/// was ever loaded. `libhrx.so` is checked as well as the provider because the
+/// runtime is loaded first: a constructor that reached it has already done more
+/// than reject its arguments.
 fn no_device_was_opened() -> bool {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
-    !maps.contains("libhsa-runtime") && !maps.contains("hrx_provider")
+    !maps.contains("libhsa-runtime")
+        && !maps.contains("hrx_provider")
+        && !maps.contains("libhrx.so")
 }
 
 #[test]
@@ -60,7 +65,7 @@ fn an_incomplete_checkpoint_and_invalid_dimensions_are_refused_before_the_gpu() 
     let error = refused(Session::open(&root, 16, 1), "a directory");
     assert!(error.message.contains(".safetensors"), "{error}");
 
-    assert!(no_device_was_opened(), "a rejected constructor opened the GPU");
+    assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -104,6 +109,6 @@ fn the_interleaved_gate_and_up_rows_are_validated_before_any_allocation() {
         assert!(error.message.contains(wanted), "{zero_rows}: {error}");
     }
 
-    assert!(no_device_was_opened(), "a rejected constructor opened the GPU");
+    assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");
     std::fs::remove_dir_all(root).ok();
 }

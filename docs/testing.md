@@ -15,8 +15,7 @@ are errors when GPU tests are requested. There is no Python environment.
 | INT4/INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `crates/loom/tests/quantized.rs` |
 | Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `crates/loom/tests/quantized.rs` |
 | Shared compiled artifact identity, allocation bounds and native library loading | `crates/loom/tests/dispatch.rs` |
-| Invalid checkpoint/metadata rejected before GPU startup | `crates/session/tests/constructor.rs` |
-| C ABI null handles, output clearing, bounded error buffers and panic containment | `crates/abi` |
+| Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `crates/session/tests/constructor.rs` |
 
 Checked-in Loom source is authoritative. The former Python generators, model
 wrappers, benchmark orchestration and reference implementations are retired.

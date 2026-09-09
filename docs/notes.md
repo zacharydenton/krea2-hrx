@@ -18,12 +18,10 @@ Qwen3-VL-4B encodes the prompt; Qwen-Image VAE decodes the resulting latents.
 | `krea2-session` | Resident transformer blocks and attention preparation |
 | `krea2-models` | Model discovery, text encoder, outer transformer graph and VAE |
 | `krea2-pipeline` | Conditioning, noise, scheduling and image generation |
-| `krea2-abi` | C interfaces in `libkrea2.so` |
-| `krea2-build-support` | Runtime library discovery for build scripts |
-| `krea2-testkit` | Test and benchmark runners |
 
-`cli/` provides argument handling and image output. `kernels/` contains checked-in
-Loom sources; `tools/gen_*.py` generates them. `assets/tokenizer.json` is embedded
+`cli/` provides argument handling and image output. `crates/loom/kernels/`
+contains the checked-in Loom sources, which are authoritative since their
+generators were retired. `crates/tokenizer/assets/tokenizer.json` is embedded
 and read by the Rust `tokenizers` crate.
 
 ## Transformer

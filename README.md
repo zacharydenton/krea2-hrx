@@ -119,18 +119,15 @@ lists all options. `KREA2_NATIVE_PROFILE=1` enables diagnostic stage timings.
 
 ## Libraries
 
-A checkout build produces `build/krea2` and `build/libkrea2.so`. The shared
-library exports two C interfaces:
+A checkout build produces `build/krea2`. The workspace crates are the interface:
+`krea2-pipeline` for prompt-to-RGB generation and the individual pipeline
+components, `krea2-session` for resident transformer block sessions. Both are
+ordinary Rust libraries, usable as a git dependency.
 
-| Generated header | Interface |
-| --- | --- |
-| `build/include/krea2_pipeline.h` | Prompt-to-RGB generation and individual pipeline components |
-| `build/include/krea2.h` | Resident transformer block sessions |
-
-Headers are generated from the Rust sources. See the
-[API and deployment guide](docs/hrx-runtime.md#c-api) for ownership and calling
-conventions. Rust callers use the workspace crates directly; other languages use
-the generated C ABI. Elixir applications can wrap the Rust API with Rustler.
+There is no C ABI. Consuming applications bind the Rust crates directly — an
+Elixir application wraps `krea2_pipeline::Pipeline` with Rustler, which needs no
+C boundary, no generated headers and no error-buffer protocol. See the
+[runtime and deployment guide](docs/hrx-runtime.md) for lifetimes and threading.
 
 ## Performance and accuracy
 

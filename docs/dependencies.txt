@@ -1,11 +1,9 @@
-# Every crate reaching the shipped artifacts: the krea2 binary and the libkrea2.so
-# cdylib, normal edges only. scripts/test.sh fails when this and `cargo tree`
-# disagree, so an upstream default cannot enlarge libkrea2.so unseen.
-# Regenerate deliberately:
+# Every crate reaching the shipped artifact, the krea2 binary, normal edges only.
+# scripts/test.sh fails when this and `cargo tree` disagree, so an upstream default
+# cannot enlarge the binary unseen. Regenerate deliberately:
 #
-#   { cargo tree -p krea2 --edges normal --prefix none;
-#     cargo tree -p krea2-abi --edges normal --prefix none; } |
-#     cut -d' ' -f1 | grep -v '^$' | sort -u
+#   cargo tree -p krea2 --edges normal --prefix none |
+#     cut -d' ' -f1 | grep -v '^$' | LC_ALL=C sort -u
 #
 adler2
 ahash
@@ -23,9 +21,9 @@ atomic-waker
 aws-lc-rs
 aws-lc-sys
 base64
-bitflags
 bit-set
 bit-vec
+bitflags
 blake3
 block-buffer
 bon
@@ -44,10 +42,10 @@ clap_lex
 colorchoice
 colored
 compact_str
-constant_time_eq
 const-oid
-const_panic
 const-str
+const_panic
+constant_time_eq
 core_detect
 countio
 cpufeatures
@@ -106,9 +104,9 @@ hf-hub
 hf-xet
 hrx
 http
-httparse
 http-body
 http-body-util
+httparse
 humantime
 hybrid-array
 hyper
@@ -133,7 +131,6 @@ itoa
 konst
 konst_proc_macros
 krea2
-krea2-abi
 krea2-checkpoint
 krea2-hrx
 krea2-models
@@ -214,8 +211,8 @@ rustls-platform-verifier
 rustls-webpki
 rustversion
 ryu
-safetensors
 safe-transmute
+safetensors
 scopeguard
 serde
 serde_core
@@ -276,19 +273,19 @@ twox-hash
 typenum
 typewit
 unicase
-unicode_categories
 unicode-ident
 unicode-normalization
 unicode-normalization-alignments
 unicode-segmentation
+unicode_categories
 untrusted
 ureq
 ureq-proto
 url
 urlencoding
+utf8-zero
 utf8_iter
 utf8parse
-utf8-zero
 uuid
 want
 webpki-roots

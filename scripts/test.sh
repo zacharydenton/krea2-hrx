@@ -6,10 +6,9 @@ case "${1:---cpu}" in --cpu) gpu=0;; --gpu|--quick) gpu=1;; *) echo 'usage: scri
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 # A statically linked crate never shows up in /proc/self/maps, so the dependency
-# set is pinned instead: an upstream default cannot enlarge libkrea2.so unseen.
+# set is pinned instead: an upstream default cannot enlarge the binary unseen.
 shipped=$(mktemp) && allowed=$(mktemp) && trap 'rm -f "$shipped" "$allowed"' EXIT
-{ cargo tree -p krea2 --edges normal --prefix none
-  cargo tree -p krea2-abi --edges normal --prefix none; } |
+cargo tree -p krea2 --edges normal --prefix none |
   cut -d' ' -f1 | grep -v '^$' | LC_ALL=C sort -u > "$shipped"
 grep -v '^#' docs/dependencies.txt | grep -v '^$' | LC_ALL=C sort -u > "$allowed"
 diff -u "$allowed" "$shipped"
