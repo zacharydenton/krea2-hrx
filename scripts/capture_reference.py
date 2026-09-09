@@ -224,15 +224,28 @@ def command_reference(a) -> int:
     dtype = getattr(torch, a.dtype)
     pipe, source = build(a, dtype)
     with torch.no_grad():
-        embeds, mask = pipe.encode_prompt(a.prompt, device=a.device)
+        if a.reuse is not None:
+            # Take another fixture's exact conditioning and noise, so that a capture on a
+            # different device isolates the transformer and nothing else. Encoding the prompt
+            # again would also move the text encoder, which is a second difference.
+            prior = np.load(Path(a.reuse) / "text.npy")
+            embeds = torch.from_numpy(prior).to(a.device, dtype)[None]
+            mask = torch.ones(1, prior.shape[0], dtype=torch.bool, device=a.device)
+            source["conditioning_from"] = str(a.reuse)
+        else:
+            embeds, mask = pipe.encode_prompt(a.prompt, device=a.device)
         # The noise is always drawn on the CPU, whatever the model runs on. A CUDA
         # generator and a CPU generator produce entirely different streams from the same
         # seed -- measured here at cosine 0.002, i.e. unrelated -- so tying the noise to
         # the compute device would make a CPU capture and a GPU capture incomparable
         # rather than merely differently rounded.
-        noise = pipe.prepare_latents(1, 16, a.size, a.size, dtype, "cpu",
-                                     torch.Generator("cpu").manual_seed(a.seed))
-        noise = noise.to(a.device)
+        if a.reuse is not None:
+            prior = np.load(Path(a.reuse) / "noise.npy")
+            noise = torch.from_numpy(prior).to(a.device, dtype)[None]
+        else:
+            noise = pipe.prepare_latents(1, 16, a.size, a.size, dtype, "cpu",
+                                         torch.Generator("cpu").manual_seed(a.seed))
+            noise = noise.to(a.device)
         a.work.mkdir(parents=True, exist_ok=True)
         # The native transformer takes the valid text rows only; the reference masks the rest.
         text = embeds[0][mask[0].bool()].float().cpu().numpy()
@@ -337,6 +350,9 @@ def main() -> int:
                     help="reference: where to compute the truth (default cpu, so the "
                          "reference can be reproduced without this vendor's GPU stack)")
     ap.add_argument("--dtype", default="bfloat16", choices=["bfloat16", "float32"])
+    ap.add_argument("--reuse", type=Path, default=None,
+                    help="reference: take noise and conditioning from another fixture, so a "
+                         "capture on a different device isolates the transformer alone")
     ap.add_argument("--force", action="store_true", help="reference: replace an existing fixture")
     ap.add_argument("--write", action="store_true", help="manifest: write the pinned file in place")
     ap.add_argument("--note", default=None,

@@ -62,19 +62,25 @@ Against that reference the current kernels measure:
 | Relative latent RMS error | 0.076912 |
 | Image PSNR | 31.7778 dB |
 
-Read that number with its decomposition, because most of it is not quantization:
+Almost all of that is the quantization, which is what the gate is for:
 
 | Contribution to the 0.0769 | rel RMS |
 | --- | ---: |
-| The unquantized model itself, run on GPU instead of CPU | 0.074973 |
-| Our W8A8 kernels against the unquantized model *on the same device* | 0.021376 |
+| The unquantized model on the GPU, *same noise and conditioning* | 0.014415 |
+| Our W8A8 kernels against that same-device, same-input control | 0.076855 |
 
-So the gate is dominated by CPU-versus-GPU arithmetic, and the quantization the
-kernels actually introduce is about 0.021. The earlier figures of cosine 0.999717
-and 37.00 dB were measured against a GPU-captured reference and are not comparable
-with these: that reference shared the device arithmetic with the candidate, which
-flattered the result. The kernels did not regress; the measuring stick moved onto
-firmer ground.
+Isolating the device term requires holding the conditioning fixed as well as the
+noise: `scripts/capture_reference.py --reuse FIXTURE` takes both from an existing
+fixture so that only the transformer moves. Without `--reuse` the capture re-encodes
+the prompt, and the text encoder on GPU differs from the CPU one by enough
+(cosine 0.999921 on the embeddings) to shift the whole trajectory by 0.0750 —
+roughly the size of the quantization error, which makes a device change look like
+it explains everything when it does not.
+
+The earlier figures of cosine 0.999717 and 37.00 dB were measured against a
+GPU-captured reference and are not comparable with these: that reference shared
+device arithmetic *and* its conditioning with the candidate. The kernels did not
+regress; the measuring stick moved onto firmer ground.
 
 The default fixture directory is `build/quality`; `KREA2_QUALITY_FIXTURE` can point
 to another copy of the same frozen fixture. `KREA2_CHECKPOINT` selects the native
