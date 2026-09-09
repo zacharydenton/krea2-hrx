@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use hrx::{Buffer, Stream, View};
-use loom::Scalars;
+use kernels::Scalars;
 
 pub use bundle::{Kernels, Metadata};
 pub use sage::Sage;
@@ -66,8 +66,8 @@ impl From<hrx::Error> for Error {
     }
 }
 
-impl From<loom::Error> for Error {
-    fn from(error: loom::Error) -> Self {
+impl From<kernels::Error> for Error {
+    fn from(error: kernels::Error) -> Self {
         Error::failed(error.to_string())
     }
 }
@@ -188,8 +188,8 @@ impl Session {
         compiler: Option<&str>,
     ) -> Result<Session> {
         Self::validate_dimensions(tokens, layers)?;
-        let shape = loom::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
-        let bundle = loom::prepare(compiler, &shape)?;
+        let shape = kernels::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
+        let bundle = kernels::prepare(compiler, &shape)?;
         Self::build(stream, weights, &bundle, tokens, layers, compiler)
     }
 
@@ -203,7 +203,7 @@ impl Session {
     fn build(
         stream: &mut Stream,
         weights: std::sync::Arc<Weights>,
-        bundle: &loom::PreparedBundle,
+        bundle: &kernels::PreparedBundle,
         tokens: usize,
         layers: usize,
         compiler: Option<&str>,
@@ -521,7 +521,7 @@ impl Session {
         if let Some(gate) = gate {
             bindings.push(gate);
         }
-        let grid_y = loom::shape::gemm_grid_rows(
+        let grid_y = kernels::shape::gemm_grid_rows(
             self.tokens as i32,
             self.metadata.gemm_rows as i32,
             self.metadata.m_group as i32,

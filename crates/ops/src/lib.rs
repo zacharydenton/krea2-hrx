@@ -7,10 +7,10 @@ pub mod tensor;
 use std::sync::{Arc, OnceLock};
 
 use hrx::{Buffer, Stream, View};
-use loom::cache::PreparedKernels;
-pub use loom::Scalars;
+use kernels::cache::PreparedKernels;
+pub use kernels::Scalars;
 
-pub use loom::Config;
+pub use kernels::Config;
 
 pub use tensor::{Pool, Scratch, Tensor};
 
@@ -31,8 +31,8 @@ impl From<hrx::Error> for Error {
     }
 }
 
-impl From<loom::Error> for Error {
-    fn from(error: loom::Error) -> Self {
+impl From<kernels::Error> for Error {
+    fn from(error: kernels::Error) -> Self {
         Error(error.to_string())
     }
 }

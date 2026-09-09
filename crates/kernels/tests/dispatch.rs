@@ -1,16 +1,16 @@
 //! GPU dispatch, allocation-span and runtime-dependency checks.
 //! Requires HRX, a gfx1151 GPU and a compiler; run with --ignored.
 use hrx::Stream;
-use loom::{auxiliary_kernel, config, Scalars};
+use kernels::{auxiliary_kernel, config, Scalars};
 
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn prepared_operations_reuse_both_shapes_and_remain_ordered() {
     let mut stream = Stream::open().unwrap();
-    let prepared = loom::cache::PreparedKernels::default();
+    let prepared = kernels::cache::PreparedKernels::default();
     for count in [257usize, 1009, 257, 1009] {
         let grid = (count.div_ceil(256) as u32, 1);
-        let kernel = prepared.get(&stream, "unary_one", loom::Config::new(), grid).unwrap();
+        let kernel = prepared.get(&stream, "unary_one", kernels::Config::new(), grid).unwrap();
         let buffer = stream.allocate(count * 2).unwrap();
         stream.fill(buffer.binding(), 0).unwrap();
         let constants = Scalars::new().index(count).pack("unary_one", &kernel).unwrap();
@@ -109,18 +109,22 @@ fn the_process_maps_no_hip_torch_or_system_crypto() {
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
     let stream = Stream::open().expect("a stream");
-    let source = loom::sources::auxiliary("euler").unwrap();
-    let compiler = loom::compiler(None).unwrap();
+    let source = kernels::sources::auxiliary("euler").unwrap();
+    let compiler = kernels::compiler(None).unwrap();
     let mut request = hrx::loom::Specialization::new("krea2_euler");
     request.config.insert("krea2.euler.grid_x".into(), "4".into());
     request.config.insert("krea2.euler.grid_y".into(), "1".into());
-    auxiliary_kernel(&stream, "euler", &loom::Config::new(), (4, 1), None).unwrap();
+    auxiliary_kernel(&stream, "euler", &kernels::Config::new(), (4, 1), None).unwrap();
     let directory =
-        loom::cache_root().unwrap().join(compiler.module(source).key(&request).unwrap());
+        kernels::cache_root().unwrap().join(compiler.module(source).key(&request).unwrap());
     let artifact = directory.join("kernel.hsaco");
     assert!(artifact.is_file());
     assert_eq!(
-        compiler.module(source).compile(&request, &loom::cache_root().unwrap()).unwrap().path(),
+        compiler
+            .module(source)
+            .compile(&request, &kernels::cache_root().unwrap())
+            .unwrap()
+            .path(),
         artifact
     );
 }

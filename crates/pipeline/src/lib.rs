@@ -47,7 +47,7 @@ macro_rules! from_error {
 
 from_error!(
     hrx::Error,
-    loom::Error,
+    kernels::Error,
     krea2_models::Error,
     krea2_ops::Error,
     krea2_session::Error

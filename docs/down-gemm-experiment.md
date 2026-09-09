@@ -3,7 +3,7 @@
 The original hand-written INT4 down-projection candidate is retired. Its
 256×128 tile and raster-tail shortening were incorporated into the GEMM family
 now checked in at `crates/loom/kernels/gemm_*.loom`, which is authoritative since
-its generator was retired; production selection follows `crates/loom/src/shape.rs`.
+its generator was retired; production selection follows `crates/kernels/src/shape.rs`.
 
 Early resident-kernel trials reported 1.06–1.09× improvements under contention.
 A later contended run reversed the result, so those samples are not evidence

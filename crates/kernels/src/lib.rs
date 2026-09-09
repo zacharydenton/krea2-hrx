@@ -1,19 +1,18 @@
-//! Compiling and caching Loom kernels for gfx1151.
+//! The Krea 2 kernel catalogue: which Loom kernel the model wants at which
+//! shape, and the source it is compiled from.
 //!
-//! Auxiliary kernels are keyed by source and configuration; transformer bundles
-//! also track compiler identity. Both caches verify artifact hashes and serialize
-//! publication with process locks. Sources are embedded from `kernels/` at build time.
+//! Compilation itself belongs to `hrx::loom`; this crate chooses the
+//! specialization, keys the cache on it and holds the tiling rules the shape
+//! follows. Sources are embedded from `kernels/` at build time.
 pub mod blocks;
 pub mod cache;
-pub mod compile;
 pub mod shape;
 pub mod sources;
 
 use hrx::{Constants, Kernel};
 
 pub use blocks::{prepare, PreparedBundle, Shape};
-pub use cache::{auxiliary_kernel, cache_root};
-pub use compile::compiler;
+pub use cache::{auxiliary_kernel, cache_root, compiler, digest};
 
 /// Anything the compiler, the cache or the runtime rejects.
 #[derive(Debug, Clone, PartialEq, Eq)]

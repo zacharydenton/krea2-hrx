@@ -15,7 +15,7 @@ krea2-models = { path = "../models" }
 krea2-numerics = { path = "../numerics" }
 krea2-ops = { path = "../ops" }
 krea2-session = { path = "../session" }
-loom = { path = "../loom" }
+krea2-kernels = { path = "../kernels" }
 rand = "0.9"
 rand_chacha = "0.9"
 rand_distr = "0.5"

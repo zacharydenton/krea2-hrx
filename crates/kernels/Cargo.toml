@@ -1,10 +1,13 @@
 [package]
-name = "loom"
+name = "krea2-kernels"
 version = "0.1.0"
 edition = "2021"
-description = "Compiling and caching Loom kernels for gfx1151"
+description = "The Krea 2 kernel catalogue: which Loom kernel at which shape, and its embedded source"
 license = "MIT"
 publish = false
+
+[lib]
+name = "kernels"
 
 [dependencies]
 hrx.workspace = true

@@ -4,11 +4,11 @@
 use std::sync::Arc;
 
 use hrx::Stream;
+use kernels::Scalars;
 use krea2_checkpoint::Checkpoint;
 use krea2_numerics::{from_f32, to_f32};
 use krea2_ops::{config, Binary, Config, Norm, Ops, Pool, Scratch, Tensor, Unary};
 use krea2_tokenizer::Tokenizer;
-use loom::Scalars;
 
 use crate::files::Files;
 use crate::weights::Weights;

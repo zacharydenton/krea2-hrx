@@ -10,8 +10,8 @@
 //! one contiguous block. The correction is
 //! `[query heads][ceil(tokens / 64)][capacity]` in float32.
 use hrx::{Buffer, Stream, View};
-use loom::Scalars;
-use loom::{cache::PreparedKernels, Config};
+use kernels::Scalars;
+use kernels::{cache::PreparedKernels, Config};
 
 use crate::{Error, Result};
 

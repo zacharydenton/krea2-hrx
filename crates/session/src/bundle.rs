@@ -2,7 +2,7 @@
 //! that says it was built by the same rules this host derives.
 
 use hrx::Kernel;
-use loom::{shape, Shape};
+use kernels::{shape, Shape};
 
 use crate::{Error, Result, HIDDEN, INTER};
 
@@ -100,7 +100,7 @@ pub struct Kernels {
 impl Kernels {
     pub fn load(
         stream: &hrx::Stream,
-        bundle: &loom::PreparedBundle,
+        bundle: &kernels::PreparedBundle,
         metadata: &Metadata,
     ) -> Result<Kernels> {
         Self::load_with(metadata, |stem, symbol| {

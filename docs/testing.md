@@ -12,9 +12,9 @@ are errors when GPU tests are requested. There is no Python environment.
 | Exact BF16 Euler and guidance arithmetic; activations, broadcast, normalization and fused SiLU | `crates/ops/tests/arithmetic.rs` |
 | Dense matmul, bias, ragged tiles, convolution layouts, grouped/causal attention, rotary embedding and upsampling | `crates/ops/tests/arithmetic.rs` |
 | Repeated resident softmax, including causal masking and non-tile-aligned lengths | `crates/ops/tests/softmax_repeat.rs` |
-| INT4/INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `crates/loom/tests/quantized.rs` |
-| Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `crates/loom/tests/quantized.rs` |
-| Shared compiled artifact identity, allocation bounds and native library loading | `crates/loom/tests/dispatch.rs` |
+| INT4/INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `crates/kernels/tests/quantized.rs` |
+| Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `crates/kernels/tests/quantized.rs` |
+| Shared compiled artifact identity, allocation bounds and native library loading | `crates/kernels/tests/dispatch.rs` |
 | Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `crates/session/tests/constructor.rs` |
 
 Checked-in Loom source is authoritative. The former Python generators, model

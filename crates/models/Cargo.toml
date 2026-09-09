@@ -13,7 +13,7 @@ name = "krea2_models"
 bytemuck = "1"
 hf-hub = { version = "1.0", default-features = false, features = ["blocking", "rustls-tls"] }
 hrx.workspace = true
-loom = { path = "../loom" }
+krea2-kernels = { path = "../kernels" }
 krea2-checkpoint = { path = "../checkpoint" }
 krea2-numerics = { path = "../numerics" }
 krea2-ops = { path = "../ops" }

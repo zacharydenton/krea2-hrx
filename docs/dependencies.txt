@@ -132,6 +132,7 @@ konst
 konst_proc_macros
 krea2
 krea2-checkpoint
+krea2-kernels
 krea2-models
 krea2-numerics
 krea2-ops
@@ -147,7 +148,6 @@ linktime-proc-macro
 linux-raw-sys
 litemap
 log
-loom
 lz4_flex
 macro_rules_attribute
 macro_rules_attribute-proc_macro

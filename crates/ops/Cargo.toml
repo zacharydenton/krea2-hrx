@@ -15,4 +15,4 @@ hrx.workspace = true
 # which take &[u8]; compat's write<T: Pod>/read<T: Pod> did this internally.
 bytemuck = "1"
 krea2-numerics = { path = "../numerics" }
-loom = { path = "../loom" }
+krea2-kernels = { path = "../kernels" }

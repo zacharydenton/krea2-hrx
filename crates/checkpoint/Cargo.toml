@@ -10,6 +10,6 @@ publish = false
 name = "krea2_checkpoint"
 
 [dependencies]
-loom = { path = "../loom" }
+krea2-kernels = { path = "../kernels" }
 memmap2 = "0.9"
 safetensors = "0.8"

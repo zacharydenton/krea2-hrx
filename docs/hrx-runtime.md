@@ -1,11 +1,10 @@
 # Shared HRX runtime
 
-Krea uses the [`hrx.rs`](https://github.com/zacharydenton/hrx.rs) crate through
-the small `crates/hrx` compatibility export, pinned by revision in
-the workspace `Cargo.toml` so that a clone builds without a sibling checkout.
-Its features are explicit and `Cargo.lock` pins the complete dependency graph.
-The shared implementation owns native loading, status conversion,
-allocation, streams, dispatch lifetimes, compiler caching and C boundary helpers.
+Krea depends on the published [`hrx-rs`](https://crates.io/crates/hrx-rs) crate
+directly, renamed to `hrx` in the workspace `Cargo.toml` so call sites read
+`hrx::`. Its features are explicit and `Cargo.lock` pins the complete dependency
+graph. The shared implementation owns native loading, status conversion,
+allocation, streams, dispatch lifetimes and compiler caching.
 There is no link-time libhrx dependency or runtime rpath in the binary.
 
 A pipeline selects its own ordered stream. Nested block sessions inherit it;
@@ -55,7 +54,7 @@ configuration. Sessions receive typed prepared artifacts and load their owned
 executable bytes directly. There is no precompiled-directory interface or
 compiler subprocess.
 
-Kernel sources live in `crates/loom/kernels`; tokenizer assets live in
+Kernel sources live in `crates/kernels/kernels`; tokenizer assets live in
 `crates/tokenizer/assets`. Generators and tests use these paths directly.
 Package builds carry the same assets without depending on files outside the package.
 
