@@ -62,28 +62,34 @@ Against that reference the current kernels measure:
 | Relative latent RMS error | 0.076912 |
 | Image PSNR | 31.7778 dB |
 
-That number is not yet decomposed, and two attempts to decompose it were wrong,
-so what follows is only what has been measured cleanly.
+Quantization is the dominant term, and the cleanest way to see it is a single
+transformer forward rather than a trajectory. Given identical latents, identical
+compacted text and the same device, our W8A8 transformer and the unquantized
+diffusers one agree at **cosine 0.999885, relative RMS 0.015220**. Nothing
+accumulates in that measurement and nothing else varies.
 
-| Measured | rel RMS |
+Eight Euler steps turn that 1.5% per-forward difference into the 0.0769 the gate
+reports. The amplification is expected: at the low sigmas the step subtracts two
+large terms, so a small velocity difference becomes a large latent one. The
+unquantized model moved to the GPU stays within 0.0144 of the CPU reference over
+the same eight steps, because its per-step difference is much smaller and
+compounds far less.
+
+Two other terms exist and are worth knowing, but neither explains the gate:
+
+| Change, everything else held fixed | rel RMS |
 | --- | ---: |
-| Everything on GPU vs everything on CPU (diffusers, unquantized, same noise) | 0.074973 |
-| Text sequence layout alone: 19 compacted rows vs 512 padded rows, same device, same values | 0.035054 |
-| Our own text encoder instead of the reference's, through our transformer | 0.016092 |
-| Our kernels with the reference's text (what the gate reports) | 0.076472 |
+| Per transformer forward: our W8A8 vs unquantized | 0.015220 |
+| Text sequence layout: 19 compacted rows vs 512 padded, same device and values | 0.035054 |
+| Transformer device, CPU to GPU, at the compacted layout | 0.033368 |
+| Unquantized on GPU vs the CPU reference, eight steps | 0.014415 |
 
-The layout row is the one to be careful about. The reference computes its
-trajectory from 512 padded text rows and a mask; the fixture stores only the 19
-valid rows, and the native transformer consumes those. `prepare_position_ids`
-takes `text_seq_len`, so the two layouts give the image tokens different rotary
-coordinates -- it is a different computation, worth 0.035 on its own, and some of
-the gate's 0.0769 is that rather than quantization.
-
-`scripts/capture_reference.py --reuse FIXTURE` reuses a fixture's noise and
-conditioning, which is how the layout term above was measured, but it feeds the
-compacted rows and so is not a drop-in control for a padded-layout reference.
-Attributing the gate's error properly needs a reference captured at the same text
-layout the native path uses; until then, treat 0.0769 as a single number.
+The layout row deserves attention on its own account. The reference samples from
+512 padded text rows and a mask while the native transformer consumes the 19 valid
+rows, and `prepare_position_ids` takes `text_seq_len`. Measured separately the
+layout and device terms are each about 0.034, yet combined they leave the
+trajectory only 0.0144 from the reference, so they substantially cancel. That is
+worth understanding before either number is quoted alone.
 
 The earlier figures of cosine 0.999717 and 37.00 dB were measured against a
 GPU-captured reference and are not comparable with these: that reference shared
