@@ -102,7 +102,7 @@ heapify
 heck
 hf-hub
 hf-xet
-hrx
+hrx-rs
 http
 http-body
 http-body-util
@@ -132,7 +132,6 @@ konst
 konst_proc_macros
 krea2
 krea2-checkpoint
-krea2-hrx
 krea2-models
 krea2-numerics
 krea2-ops

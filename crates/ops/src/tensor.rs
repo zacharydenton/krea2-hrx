@@ -263,20 +263,22 @@ mod tests {
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_tensor_round_trips_through_the_device() {
+        let mut stream = Stream::open().expect("a stream");
         let pool = Pool::new();
         let values: Vec<u16> = (0..64u16).map(|i| i.wrapping_mul(577)).collect();
-        let tensor = Tensor::from_slice(&pool, &values, 8, 8).expect("upload");
-        assert_eq!(tensor.download().expect("download"), values);
+        let tensor = Tensor::from_slice(&pool, &mut stream, &values, 8, 8).expect("upload");
+        assert_eq!(tensor.download(&mut stream).expect("download"), values);
     }
 
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_view_reads_the_rows_it_names() {
+        let mut stream = Stream::open().expect("a stream");
         let pool = Pool::new();
         let values: Vec<u16> = (0..64u16).collect();
-        let tensor = Tensor::from_slice(&pool, &values, 8, 8).expect("upload");
+        let tensor = Tensor::from_slice(&pool, &mut stream, &values, 8, 8).expect("upload");
         let second = tensor.view(1, 8, 8).expect("the second row");
-        assert_eq!(second.download().expect("download"), &values[8..16]);
+        assert_eq!(second.download(&mut stream).expect("download"), &values[8..16]);
         assert!(tensor.view(2, 8, 56).is_err(), "a view past the end is refused");
     }
 
@@ -297,38 +299,36 @@ mod tests {
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_shared_view_keeps_its_allocation_and_stays_inside_it() {
-        let buffer = std::sync::Arc::new(device().allocate(64 * 2).expect("an allocation"));
-        let base = buffer.ptr();
-        // Past the end, and before the start: both are outside.
-        assert!(Tensor::shared(&buffer, base, 8, 9).is_err(), "past the end");
-        assert!(Tensor::shared(&buffer, base.offset(4), 8, 8).is_err(), "past the end");
-        assert!(
-            Tensor::shared(&buffer, DevicePtr::from_address(base.address() - 8), 1, 1).is_err(),
-            "before the start"
-        );
+        let stream = Stream::open().expect("a stream");
+        let buffer = std::sync::Arc::new(stream.allocate(64 * 2).expect("an allocation"));
+        // Past the end, from the base and from an offset. There is no longer a
+        // "before the start" case to test: the base is an unsigned offset into
+        // the allocation, so an address before it cannot be named at all.
+        assert!(Tensor::shared(&buffer, 0, 8, 9).is_err(), "past the end");
+        assert!(Tensor::shared(&buffer, 8, 8, 8).is_err(), "past the end");
 
         // The byte count, not the element count, is what the bound is
         // against: 2^63 elements is a usize but 2^64 bytes is not.
-        assert!(Tensor::shared(&buffer, base, 1, 1 << 63).is_err(), "byte count wraps");
+        assert!(Tensor::shared(&buffer, 0, 1, 1 << 63).is_err(), "byte count wraps");
 
-        let view = Tensor::shared(&buffer, base.offset(16), 4, 4).expect("a view");
-        assert_eq!((view.rows(), view.cols(), view.ptr()), (4, 4, base.offset(16)));
+        let view = Tensor::shared(&buffer, 32, 4, 4).expect("a view");
+        assert_eq!((view.rows(), view.cols(), view.at()), (4, 4, 32));
         // The view owns a share, so dropping the caller's handle keeps the
-        // memory mapped and the address valid.
+        // allocation mapped and the binding valid.
         drop(buffer);
-        assert_eq!(view.ptr(), base.offset(16));
+        assert_eq!(view.binding().expect("a binding").len(), 32);
     }
 
     #[test]
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn dropped_storage_comes_back_from_the_pool() {
+        let stream = Stream::open().expect("a stream");
         let pool = Pool::new();
-        let first = Tensor::new(&pool, 16, 16).expect("a tensor").ptr();
+        let first = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
+        let first = first.binding().expect("a binding").owner().binding().len();
         // Dropped above, so the same block should serve the next request.
-        let second = Tensor::new(&pool, 16, 16).expect("a tensor");
-        assert_eq!(second.ptr(), first, "the pool did not reuse the block");
-        // A much smaller request must not take a much larger block.
-        let small = Tensor::new(&pool, 1, 4).expect("a small tensor");
-        assert_ne!(small.ptr(), first);
+        let second = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
+        let second = second.binding().expect("a binding").owner().binding().len();
+        assert_eq!(second, first, "the pool did not reuse the block");
     }
 }

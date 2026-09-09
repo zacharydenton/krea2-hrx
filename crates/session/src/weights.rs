@@ -28,10 +28,23 @@ pub struct At {
 }
 
 impl Weights {
-    /// Reads the checkpoint and uploads it.
-    pub fn load(stream: &mut Stream, path: &Path) -> Result<Weights> {
+    /// Reads the checkpoint's header and derives the layout, which is every
+    /// check a malformed checkpoint fails. No device is touched, so a rejection
+    /// costs nothing and can be tested without a GPU.
+    pub fn plan(path: &Path) -> Result<(Checkpoint, Plan)> {
         let file = Checkpoint::open(path)?;
         let plan = Plan::for_checkpoint(&file)?;
+        Ok((file, plan))
+    }
+
+    /// Reads the checkpoint and uploads it.
+    pub fn load(stream: &mut Stream, path: &Path) -> Result<Weights> {
+        let (file, plan) = Self::plan(path)?;
+        Self::upload(stream, &file, plan)
+    }
+
+    /// Walks a derived plan, filling one allocation row by row.
+    pub fn upload(stream: &mut Stream, file: &Checkpoint, plan: Plan) -> Result<Weights> {
         let storage = stream.allocate(plan.total_bytes)?;
         let mut staging = Vec::new();
         for span in plan.spans.values() {

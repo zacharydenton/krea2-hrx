@@ -312,12 +312,13 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         });
     // Run the production GPU Euler kernel, including its BF16 rounding, rather
     // than substituting a host sampler in the parity check.
-    let stream = hrx::Device::open().unwrap();
-    let _scope = stream.enter();
+    // Its own stream: the pipeline owns one internally, and these tensors are
+    // only ever read back to the host between steps, never shared with it.
+    let mut stream = hrx::Stream::open().unwrap();
     let pool = Pool::new();
     let ops = Ops::new(pool.clone());
     let initial: Vec<_> = state.iter().map(|&v| from_f32(v)).collect();
-    let resident = Tensor::from_slice(&pool, &initial, tokens, 64).unwrap();
+    let resident = Tensor::from_slice(&pool, &mut stream, &initial, tokens, 64).unwrap();
     let pipeline =
         Pipeline::open(Files::of(&checkpoint).offline(true).resolve().unwrap(), None).unwrap();
     for step in 0..steps {
@@ -326,9 +327,9 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         let velocity =
             pipeline.transformer(&text, text_tokens, &state, size, size, sigma).unwrap();
         let velocity: Vec<_> = velocity.into_iter().map(from_f32).collect();
-        let velocity = Tensor::from_slice(&pool, &velocity, tokens, 64).unwrap();
-        ops.euler_step(&resident, &velocity, next - sigma).unwrap();
-        state = resident.download().unwrap().into_iter().map(to_f32).collect();
+        let velocity = Tensor::from_slice(&pool, &mut stream, &velocity, tokens, 64).unwrap();
+        ops.euler_step(&mut stream, &resident, &velocity, next - sigma).unwrap();
+        state = resident.download(&mut stream).unwrap().into_iter().map(to_f32).collect();
         eprintln!("BF16 reference: step {}/{}", step + 1, steps);
     }
     let (cosine, rms) = metrics(&state, &truth);

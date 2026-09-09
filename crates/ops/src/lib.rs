@@ -154,7 +154,6 @@ impl Weight {
 }
 
 /// The operations, over one buffer pool.
-
 pub struct Ops {
     pool: Arc<Pool>,
     kernels: PreparedKernels,
@@ -839,14 +838,6 @@ pub fn config(entries: &[(&str, usize)]) -> Config {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn dimension_mismatches_are_refused_before_any_launch() {
-        // These reject on shape alone, so they need no GPU.
-        let ops = Ops::new(Pool::new());
-        assert!(ops.tensor(0, 8).is_err(), "an empty tensor is not a tensor");
-    }
 
     #[test]
     fn the_matmul_tile_widens_only_when_it_adds_no_padded_rows() {

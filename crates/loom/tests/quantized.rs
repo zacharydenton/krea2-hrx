@@ -2,7 +2,6 @@
 //! Run explicitly with --ignored on gfx1151.
 use half::{bf16, f16};
 use hrx::{Buffer, Constants, Stream};
-use hrx_core as hrx;
 use std::path::Path;
 
 struct Harness {
@@ -50,7 +49,7 @@ impl Harness {
         let buffers: Vec<Buffer> =
             data.iter().map(|bytes| self.stream.allocate(bytes.len()).unwrap()).collect();
         for (buffer, bytes) in buffers.iter().zip(data) {
-            self.stream.upload_queued(buffer, 0, bytes).unwrap();
+            self.stream.upload(buffer.binding(), bytes).unwrap();
         }
         let indices: Vec<_> = scalars.iter().map(|&v| u32::try_from(v).unwrap()).collect();
         let constants = Constants::indices(&kernel, &indices).unwrap();

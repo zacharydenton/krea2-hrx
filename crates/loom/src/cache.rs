@@ -70,6 +70,13 @@ fn signature(name: &str, config: &Config) -> String {
     text
 }
 
+/// The embedded source for an auxiliary kernel, named in the error when there
+/// is none. Separate from the compile so the lookup can be tested without a
+/// device: naming a kernel now takes a stream, resolving it does not.
+fn auxiliary_source(name: &str) -> Result<&'static str> {
+    sources::auxiliary(name).ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))
+}
+
 /// Compiles `name` for `config` if needed and returns the loaded kernel.
 ///
 /// `grid_x` and `grid_y` join the configuration for every kernel but
@@ -86,8 +93,7 @@ pub fn auxiliary_kernel(
         config.insert("grid_x".into(), u64::from(grid.0));
         config.insert("grid_y".into(), u64::from(grid.1));
     }
-    let source = sources::auxiliary(name)
-        .ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))?;
+    let source = auxiliary_source(name)?;
     let compiler = compiler(compiler_path)?;
     let signature = format!("{}\n{}", compiler.identity(), signature(name, &config));
     {
@@ -129,8 +135,7 @@ mod tests {
 
     #[test]
     fn an_unknown_kernel_is_named_in_the_error() {
-        let error =
-            auxiliary_kernel("no_such_kernel", &Config::new(), (1, 1), None).unwrap_err();
+        let error = auxiliary_source("no_such_kernel").unwrap_err();
         assert_eq!(error.0, "no auxiliary kernel named no_such_kernel");
     }
 }

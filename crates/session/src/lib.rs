@@ -161,9 +161,22 @@ impl Session {
         tokens: usize,
         layers: usize,
     ) -> Result<Session> {
-        Self::validate_dimensions(tokens, layers)?;
-        let weights = std::sync::Arc::new(Weights::load(stream, checkpoint)?);
+        let (file, plan) = Self::validate(checkpoint, tokens, layers)?;
+        let weights = std::sync::Arc::new(Weights::upload(stream, &file, plan)?);
         Self::with_weights(stream, weights, tokens, layers, None)
+    }
+
+    /// Everything [`Session::open`] checks before it touches the device: the
+    /// dimensions this build can serve, and the checkpoint's layout. It takes
+    /// no stream, so an invalid argument is refused without a GPU ever being
+    /// opened; `open` calls exactly this and then uploads what it returns.
+    pub fn validate(
+        checkpoint: &Path,
+        tokens: usize,
+        layers: usize,
+    ) -> Result<(krea2_checkpoint::Checkpoint, krea2_checkpoint::Plan)> {
+        Self::validate_dimensions(tokens, layers)?;
+        Weights::plan(checkpoint)
     }
 
     /// Share resident weights and prepare artifacts for this sequence length.
@@ -405,6 +418,7 @@ impl Session {
     /// `x` is bf16 `[tokens][6144]`, in and out. `mods` is f32
     /// `[layers][6][6144]`, already including each block's table; `cos` and
     /// `sin` are f32 `[tokens][128]`.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         stream: &mut Stream,
@@ -620,7 +634,7 @@ impl Session {
                     stream,
                     &self.kernels.attention,
                     "SA2 attention",
-                    ((tokens + rows - 1) / rows) as u32,
+                    tokens.div_ceil(rows) as u32,
                     KV_HEADS as u32,
                     32 * waves as u32,
                     &attention_scalars,
@@ -637,7 +651,7 @@ impl Session {
                             stream,
                             kernel,
                             "f16 V transpose",
-                            tokens.div_euclid(32) as u32 + u32::from(tokens % 32 != 0),
+                            tokens.div_ceil(32) as u32,
                             (KV_HEADS * HEAD_DIM / 32) as u32,
                             256,
                             &scalars,
@@ -654,7 +668,7 @@ impl Session {
                     stream,
                     &self.kernels.attention,
                     "f16 attention",
-                    ((tokens + rows - 1) / rows) as u32,
+                    tokens.div_ceil(rows) as u32,
                     KV_HEADS as u32,
                     128 * self.metadata.fp16_query_tiles,
                     &attention_scalars,
@@ -755,7 +769,9 @@ mod tests {
     #[ignore = "requires Krea checkpoint and gfx1151"]
     fn every_path_that_fills_the_rope_buffers_records_what_it_put_there() {
         let (checkpoint, tokens) = fixture();
-        let session = Session::open(&checkpoint, tokens, 1).expect("resident session");
+        let mut stream = Stream::open().expect("a stream");
+        let session =
+            Session::open(&mut stream, &checkpoint, tokens, 1).expect("resident session");
         let resident = || *session.rope.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(resident(), None, "nothing is resident before the first call");
 
@@ -764,14 +780,14 @@ mod tests {
         let b = (vec![0.0f32; tokens * 128], vec![1.0f32; tokens * 128]);
         let mut x = vec![0x3f00u16; tokens * HIDDEN as usize];
 
-        session.run(&mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A");
+        session.run(&mut stream, &mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A");
         let after_a = resident();
         assert!(after_a.is_some(), "A left nothing recorded");
 
-        session.run(&mut x, &mods, &b.0, &b.1, 0, Some(1)).expect("B");
+        session.run(&mut stream, &mut x, &mods, &b.0, &b.1, 0, Some(1)).expect("B");
         assert_ne!(resident(), after_a, "B's upload was not recorded, so A looks resident");
 
-        session.run(&mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A again");
+        session.run(&mut stream, &mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A again");
         assert_eq!(resident(), after_a, "A's second upload was not recorded");
     }
 

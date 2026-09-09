@@ -305,8 +305,8 @@ impl Pipeline {
         for step in 0..steps {
             let sigma = schedule::sigma(step, steps, mu);
             let next = schedule::sigma(step + 1, steps, mu);
-            let velocity = self
-                .forward(stream, weights, blocks, &latents, &text, sigma, width, height)?;
+            let velocity =
+                self.forward(stream, weights, blocks, &latents, &text, sigma, width, height)?;
             if let Some(uncond) = &uncond {
                 let unguided = self
                     .forward(stream, weights, blocks, &latents, uncond, sigma, width, height)?;
@@ -356,10 +356,8 @@ impl Pipeline {
         // The residual stream is the conditioning followed by the image.
         let x = self.models.ops.tensor(stream, tokens, WIDTH)?;
         stream.copy(x.binding()?.slice(0, text.size() * 2)?, text.binding()?)?;
-        stream.copy(
-            x.binding()?.slice(text.size() * 2, image.size() * 2)?,
-            image.binding()?,
-        )?;
+        stream
+            .copy(x.binding()?.slice(text.size() * 2, image.size() * 2)?, image.binding()?)?;
 
         timing.mark(stream, "embeddings")?;
         let mods = self.models.modulation(stream, &modulation)?;

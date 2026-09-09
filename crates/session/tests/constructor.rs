@@ -1,11 +1,16 @@
 //! Invalid constructors must fail before initializing the GPU.
 //! Tests inspect process mappings to check that the HSA provider was not loaded.
+//!
+//! `Session::open` now takes the caller's stream, so it cannot itself be the
+//! subject: holding a stream means the runtime is already mapped. What it does
+//! first is [`Session::validate`], which takes no stream — so these run that,
+//! and the mapping assertions still hold over the whole validation path.
 use std::path::{Path, PathBuf};
 
 use krea2_session::{Error, Session};
 
-/// The session a rejection never returns.
-fn refused(result: krea2_session::Result<Session>, what: &str) -> Error {
+/// The checkpoint a rejection never returns.
+fn refused<T>(result: krea2_session::Result<T>, what: &str) -> Error {
     match result {
         Ok(_) => panic!("{what} was accepted"),
         Err(error) => error,
@@ -52,17 +57,17 @@ fn an_incomplete_checkpoint_and_invalid_dimensions_are_refused_before_the_gpu() 
         98304,
     );
     for _ in 0..3 {
-        let error = refused(Session::open(&path, 16, 1), "an incomplete checkpoint");
+        let error = refused(Session::validate(&path, 16, 1), "an incomplete checkpoint");
         assert!(error.message.contains("missing tensor"), "{error}");
     }
 
     for (tokens, layers) in [(0, 1), (15, 1), (16897, 1), (16, 0), (16, 29), (usize::MAX, 1)] {
-        let error = refused(Session::open(&path, tokens, layers), "invalid dimensions");
+        let error = refused(Session::validate(&path, tokens, layers), "invalid dimensions");
         assert!(error.invalid_argument, "{tokens}/{layers}: {error}");
     }
 
     // A path that is not a checkpoint at all.
-    let error = refused(Session::open(&root, 16, 1), "a directory");
+    let error = refused(Session::validate(&root, 16, 1), "a directory");
     assert!(error.message.contains(".safetensors"), "{error}");
 
     assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");
@@ -103,7 +108,7 @@ fn the_interleaved_gate_and_up_rows_are_validated_before_any_allocation() {
             offset += scales * 4;
         }
         checkpoint(&path, &format!("{{{}}}", entries.join(",")), offset);
-        let error = refused(Session::open(&path, 16, 1), "a malformed operand");
+        let error = refused(Session::validate(&path, 16, 1), "a malformed operand");
         let wanted =
             if zero_rows { "invalid weight shape" } else { "scale count in blocks.0.mlp.up" };
         assert!(error.message.contains(wanted), "{zero_rows}: {error}");

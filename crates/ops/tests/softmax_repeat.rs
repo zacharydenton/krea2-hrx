@@ -2,11 +2,12 @@
 //! dispatch exposes an LDS read/write race with no model, no random data and
 //! no reference implementation to disagree with.
 use krea2_numerics::from_f32;
-use krea2_ops::{config, Args, Ops, Pool};
+use krea2_ops::{config, Ops, Pool, Scalars};
 
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
+    let mut stream = hrx::Stream::open().expect("a stream");
     let ops = Ops::new(Pool::new());
     for tokens in [256usize, 33, 257, 1024] {
         for causal in [false, true] {
@@ -16,9 +17,11 @@ fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
             // it gets the long repeat.
             let repeats = if tokens == 256 { 256 } else { 32 };
 
-            let scores = ops.pool().scratch(count * 4).expect("scores");
-            hrx::device().write(scores.ptr(), &vec![20f32; count]).expect("upload");
-            let out = ops.tensor(rows, tokens).expect("probabilities");
+            let scores = ops.pool().scratch(&stream, count * 4).expect("scores");
+            stream
+                .upload(scores.binding(), bytemuck::cast_slice(&vec![20f32; count]))
+                .expect("upload");
+            let out = ops.tensor(&stream, rows, tokens).expect("probabilities");
 
             let expected: Vec<u16> = (0..count)
                 .map(|index| {
@@ -28,22 +31,24 @@ fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
                 })
                 .collect();
 
-            let mut args = Args::new();
-            args.i32(rows as i32).ptr(scores.ptr()).ptr(out.ptr());
+            let scalars = Scalars::new().index(rows);
             let name = if causal { "softmax_causal" } else { "softmax" };
             for repeat in 0..repeats {
+                let bindings = [scores.binding(), out.binding().expect("a binding")];
                 unsafe {
                     ops.launch(
+                        &mut stream,
                         name,
                         config(&[("xsize", count), ("tokens", tokens)]),
-                        &args,
+                        &scalars,
+                        &bindings,
                         rows,
                         1,
                         256,
                     )
                 }
                 .expect("launch");
-                let actual = out.download().expect("download");
+                let actual = out.download(&mut stream).expect("download");
                 if let Some(index) = (0..count).find(|&index| actual[index] != expected[index])
                 {
                     panic!(

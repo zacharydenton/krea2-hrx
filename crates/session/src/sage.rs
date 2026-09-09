@@ -37,6 +37,31 @@ pub struct Sage {
     centered_k: Buffer,
 }
 
+/// The shapes these kernels serve, checked before anything is allocated, and
+/// the tile count that follows from them. Separate from [`Sage::new`] so it can
+/// be tested without a stream, which naming a buffer now requires.
+fn dimensions(
+    tokens: usize,
+    capacity: usize,
+    heads: usize,
+    kv_heads: usize,
+    bits: u32,
+) -> Result<usize> {
+    let tiles = tokens.div_ceil(64);
+    if !(16..=16896).contains(&tokens)
+        || capacity < tiles * 64
+        || !capacity.is_multiple_of(32)
+        || heads < 1
+        || kv_heads < 1
+        || !heads.is_multiple_of(kv_heads)
+        || heads / kv_heads != 4
+        || (bits != 4 && bits != 8)
+    {
+        return Err(Error::invalid("unsupported Sage dimensions"));
+    }
+    Ok(tiles)
+}
+
 impl Sage {
     /// `bits` is 4 (codes -7..7, 64 bytes per head row) or 8 (-127..127, 128);
     /// the attention kernel of the same width consumes the output.
@@ -49,18 +74,7 @@ impl Sage {
         bits: u32,
         compiler: Option<&str>,
     ) -> Result<Sage> {
-        let tiles = tokens.div_ceil(64);
-        if !(16..=16896).contains(&tokens)
-            || capacity < tiles * 64
-            || !capacity.is_multiple_of(32)
-            || heads < 1
-            || kv_heads < 1
-            || !heads.is_multiple_of(kv_heads)
-            || heads / kv_heads != 4
-            || (bits != 4 && bits != 8)
-        {
-            return Err(Error::invalid("unsupported Sage dimensions"));
-        }
+        let tiles = dimensions(tokens, capacity, heads, kv_heads, bits)?;
         // One head's codes: a nibble or a byte per channel of 128.
         let row_bytes = if bits == 4 { 64 } else { 128 };
         let sage = Sage {
@@ -259,6 +273,7 @@ impl Sage {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         &self,
         stream: &mut Stream,
@@ -292,7 +307,8 @@ mod tests {
 
     #[test]
     fn the_shapes_the_kernels_cannot_serve_are_refused() {
-        // No device is touched: these fail on arithmetic alone.
+        // No device is touched: these fail on arithmetic alone, which is why
+        // the check is a free function rather than the first act of `new`.
         for (tokens, capacity, heads, kv, bits, why) in [
             (8usize, 64usize, 48usize, 12usize, 4u32, "too few tokens"),
             (64, 64, 48, 12, 5, "an unsupported width"),
@@ -300,10 +316,11 @@ mod tests {
             (64, 66, 48, 12, 4, "a capacity off the 32-row grid"),
             (64, 64, 24, 12, 4, "a group size that is not four"),
         ] {
-            let Err(error) = Sage::new(tokens, capacity, heads, kv, bits, None) else {
+            let Err(error) = dimensions(tokens, capacity, heads, kv, bits) else {
                 panic!("{why} was accepted");
             };
             assert!(error.message.contains("unsupported Sage dimensions"), "{why}");
         }
+        assert!(dimensions(4115, 4160, 48, 12, 4).is_ok(), "the session's own shape");
     }
 }
