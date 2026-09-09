@@ -144,7 +144,7 @@ impl Weight {
             return Ok(buffer.binding());
         }
         let mut bits = vec![0u16; self.count];
-        stream.read(self.values()?, bytemuck::cast_slice_mut(&mut bits))?;
+        stream.read_blocking(self.values()?, bytemuck::cast_slice_mut(&mut bits))?;
         let floats: Vec<f32> = bits.into_iter().map(krea2_numerics::to_f32).collect();
         let buffer = stream.allocate(floats.len() * 4)?;
         stream.upload(buffer.binding(), bytemuck::cast_slice(&floats))?;
@@ -190,7 +190,7 @@ impl Ops {
     /// `y = x wᵀ (+ bias)`, the shape every linear layer here takes.
     pub fn linear(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         w: &Weight,
         bias: Option<View<'_>>,
@@ -282,7 +282,7 @@ impl Ops {
         Ok(y)
     }
 
-    pub fn unary(&self, stream: &mut Stream, x: &Tensor, op: Unary) -> Result<Tensor> {
+    pub fn unary(&self, stream: &Stream, x: &Tensor, op: Unary) -> Result<Tensor> {
         let y = self.tensor(stream, x.rows(), x.cols())?;
         let scalars = Scalars::new().index(x.size());
         let bindings = [x.binding()?, y.binding()?];
@@ -309,7 +309,7 @@ impl Ops {
     /// `z = x op y`, with `y` repeating over `x` when it is shorter.
     pub fn binary(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         y: &Tensor,
         op: Binary,
@@ -342,7 +342,7 @@ impl Ops {
     /// Split-half rotary embedding over `heads` heads of `cols / heads`.
     pub fn rope(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         tokens: usize,
         heads: usize,
@@ -379,7 +379,7 @@ impl Ops {
     /// delta, the product and the sum, as the CUDA pipeline rounds it.
     pub fn euler_step(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         sample: &Tensor,
         velocity: &Tensor,
         delta: f32,
@@ -407,7 +407,7 @@ impl Ops {
     /// diffusers' bf16 rounding at each of its three operations.
     pub fn guidance(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         cond: &Tensor,
         uncond: &Tensor,
         scale: f32,
@@ -439,7 +439,7 @@ impl Ops {
     #[allow(clippy::too_many_arguments)]
     pub fn attention(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         q: &Tensor,
         k: &Tensor,
         v: &Tensor,
@@ -572,7 +572,7 @@ impl Ops {
     /// A 1×1 kernel uses GEMM directly.
     pub fn conv(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         height: usize,
         width: usize,
@@ -631,7 +631,7 @@ impl Ops {
     /// Uses the dense GEMM tile rules with tap-major accumulation.
     fn conv3x3(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         height: usize,
         width: usize,
@@ -690,7 +690,7 @@ impl Ops {
     /// Nearest-neighbour 2x, the VAE's upsampler.
     pub fn upsample(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         height: usize,
         width: usize,
@@ -724,7 +724,7 @@ impl Ops {
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn launch(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         name: &str,
         config: Config,
         scalars: &Scalars,
@@ -765,7 +765,7 @@ impl Ops {
     #[allow(clippy::too_many_arguments)]
     fn matmul(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         name: &str,
         a: View<'_>,
         b: View<'_>,

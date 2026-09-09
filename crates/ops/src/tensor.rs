@@ -19,8 +19,10 @@ struct FreeList {
 
 /// A source of device buffers that reuses what it has been given back.
 ///
-/// Buffers belong to the stream that allocated them and the runtime rejects a
-/// buffer used on another, so the pool no longer polices stream identity itself.
+/// Buffers belong to their device, not to the stream that allocated them, so
+/// any stream on that device may use one and the pool polices no identity of
+/// its own. It exists because `Stream::recycle` needs a mutable stream, which
+/// a tensor destructor does not have.
 #[derive(Default)]
 pub struct Pool {
     free: Mutex<FreeList>,
@@ -233,7 +235,7 @@ impl Tensor {
 
     pub fn download(&self, stream: &mut Stream) -> Result<Vec<u16>> {
         let mut values = vec![0u16; self.size()];
-        stream.read(self.binding()?, bytemuck::cast_slice_mut(&mut values))?;
+        stream.read_blocking(self.binding()?, bytemuck::cast_slice_mut(&mut values))?;
         Ok(values)
     }
 

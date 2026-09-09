@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use hrx::{Kernel, Stream};
-use std::sync::Arc;
 
 use crate::{sources, Config, Error, Result};
 
@@ -38,8 +37,20 @@ pub fn compiler_for_target(
     // 64 source modules with arbitrary eviction. One shape needs about fifty
     // modules and guided sampling prepares two shapes, so raise the cache above
     // what a run can hold and let the compiler use the cores this box has.
+    //
+    // `workers` now sizes HRX's own batch pool rather than one we ran, so
+    // KREA2_COMPILE_WORKERS is read once per (library, target) instead of once
+    // per prepare -- the compiler behind it is memoized. The cap stays: past
+    // eight, the per-specialization cache locks dominate.
+    let workers = match std::env::var("KREA2_COMPILE_WORKERS").ok().and_then(|v| v.parse().ok())
+    {
+        Some(n) => NonZeroUsize::new(n).unwrap_or(NonZeroUsize::MIN),
+        None => std::thread::available_parallelism()
+            .unwrap_or(NonZeroUsize::MIN)
+            .min(NonZeroUsize::new(8).expect("nonzero")),
+    };
     let options = hrx::loom::CompilerOptions {
-        workers: std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN),
+        workers,
         module_cache_capacity: 256,
         target: target.clone(),
     };
@@ -51,7 +62,7 @@ pub fn compiler_for_target(
 
 pub use hrx::bundle::digest;
 
-type Shapes = BTreeMap<Config, Arc<Kernel>>;
+type Shapes = BTreeMap<Config, Kernel>;
 type Grids = BTreeMap<(u32, u32), Shapes>;
 
 /// Loaded operations owned by one model instance. Cache hits compare the
@@ -73,7 +84,7 @@ impl PreparedKernels {
         name: &str,
         config: Config,
         grid: (u32, u32),
-    ) -> Result<Arc<Kernel>> {
+    ) -> Result<Kernel> {
         let mut loaded =
             self.loaded.lock().map_err(|_| Error("operation cache poisoned".into()))?;
         if let Some(kernel) = loaded
@@ -115,7 +126,7 @@ pub fn auxiliary_kernel(
     config: &Config,
     grid: (u32, u32),
     compiler_path: Option<&str>,
-) -> Result<Arc<Kernel>> {
+) -> Result<Kernel> {
     let mut config = config.clone();
     if name != "sage_transpose" {
         config.insert("grid_x".into(), u64::from(grid.0));
@@ -129,17 +140,9 @@ pub fn auxiliary_kernel(
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
     request.report = crate::kernel_reports();
     let artifact = compiler.module(source).compile(&request, &cache_root()?)?;
-    for diagnostic in artifact.diagnostics() {
-        eprintln!(
-            "krea2 kernel {name}: {} {}: {}",
-            diagnostic.severity, diagnostic.code, diagnostic.message
-        );
-    }
-    if let Some(report) = artifact.report() {
-        eprintln!("krea2 kernel {name} report: {report}");
-    }
+    crate::report(name, &artifact);
     // Safety: the shared compiler produced this export from embedded model source.
-    let kernel = Arc::new(unsafe { stream.load_artifact(&artifact)? });
+    let kernel = unsafe { stream.load_artifact(&artifact)? };
     Ok(kernel)
 }
 

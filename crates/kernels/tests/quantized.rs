@@ -59,8 +59,7 @@ impl Harness {
                 .dispatch(&kernel, grid, [threads, 1, 1], &constants, &bindings)
                 .unwrap();
         }
-        let reads: Vec<_> =
-            bindings.iter().map(|&v| self.stream.read_queued(v).unwrap()).collect();
+        let reads: Vec<_> = bindings.iter().map(|&v| self.stream.read(v).unwrap()).collect();
         reads.into_iter().map(|r| r.wait(&mut self.stream).unwrap()).collect()
     }
 }

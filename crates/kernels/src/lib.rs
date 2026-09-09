@@ -57,6 +57,34 @@ pub fn kernel_reports() -> bool {
     std::env::var_os("KREA2_KERNEL_REPORT").is_some_and(|v| v == "1")
 }
 
+/// What the compiler said about one kernel, on stderr.
+///
+/// Warnings and errors always print. Notes do not, unless `KREA2_KERNEL_REPORT`
+/// asked for them: the backend emits one per spilled value, and a dozen of those
+/// per kernel are what hid the register pressure fixed in `b1aeb55` until
+/// someone read past them. Tests that assert on spills read `diagnostics()`
+/// themselves and are unaffected by this.
+pub fn report(name: &str, artifact: &hrx::loom::Artifact) {
+    let verbose = kernel_reports();
+    for diagnostic in artifact.diagnostics() {
+        if !verbose && diagnostic.severity < hrx::loom::Severity::Warning {
+            continue;
+        }
+        // Line zero means the compiler had no source position for it.
+        let at = match diagnostic.line {
+            0 => String::new(),
+            line => format!(" at {line}:{}", diagnostic.column),
+        };
+        eprintln!(
+            "krea2 kernel {name}: {:?} {}{at}: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+    }
+    if let Some(report) = artifact.report() {
+        eprintln!("krea2 kernel {name} report: {report}");
+    }
+}
+
 /// A kernel's scalar arguments: Loom packs the leading indices, then the floats.
 ///
 /// Loom picks each index's width by range analysis, so the host cannot know it

@@ -328,7 +328,7 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
             pipeline.transformer(&text, text_tokens, &state, size, size, sigma).unwrap();
         let velocity: Vec<_> = velocity.into_iter().map(from_f32).collect();
         let velocity = Tensor::from_slice(&pool, &mut stream, &velocity, tokens, 64).unwrap();
-        ops.euler_step(&mut stream, &resident, &velocity, next - sigma).unwrap();
+        ops.euler_step(&stream, &resident, &velocity, next - sigma).unwrap();
         state = resident.download(&mut stream).unwrap().into_iter().map(to_f32).collect();
         eprintln!("BF16 reference: step {}/{}", step + 1, steps);
     }

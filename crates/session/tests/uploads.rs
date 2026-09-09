@@ -62,7 +62,7 @@ fn contiguous_and_padded_uploads_preserve_rows_across_chunks() {
     let weights = Weights::upload(&mut stream, &checkpoint, plan).unwrap();
     let mut actual = vec![0; flat_bytes];
     stream
-        .read(weights.view(weights.locate("flat", flat_bytes).unwrap()), &mut actual)
+        .read_blocking(weights.view(weights.locate("flat", flat_bytes).unwrap()), &mut actual)
         .unwrap();
     assert_eq!(actual, payload);
     let mut expected = [0; 32];
@@ -70,10 +70,14 @@ fn contiguous_and_padded_uploads_preserve_rows_across_chunks() {
         expected[i * 8..i * 8 + 4].copy_from_slice(&payload[row * 4..row * 4 + 4]);
     }
     let mut actual = [0xff; 32];
-    stream.read(weights.view(weights.locate("padded", 16).unwrap()), &mut actual).unwrap();
+    stream
+        .read_blocking(weights.view(weights.locate("padded", 16).unwrap()), &mut actual)
+        .unwrap();
     assert_eq!(actual, expected);
     let mut actual = [0xff; 16];
-    stream.read(weights.view(weights.locate("gathered", 16).unwrap()), &mut actual).unwrap();
+    stream
+        .read_blocking(weights.view(weights.locate("gathered", 16).unwrap()), &mut actual)
+        .unwrap();
     assert_eq!(
         actual.as_slice(),
         [

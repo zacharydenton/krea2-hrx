@@ -37,7 +37,7 @@ fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
                 let bindings = [scores.binding(), out.binding().expect("a binding")];
                 unsafe {
                     ops.launch(
-                        &mut stream,
+                        &stream,
                         name,
                         config(&[("xsize", count), ("tokens", tokens)]),
                         &scalars,

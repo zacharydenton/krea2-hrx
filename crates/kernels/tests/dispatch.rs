@@ -26,7 +26,7 @@ fn prepared_operations_reuse_both_shapes_and_remain_ordered() {
                 .unwrap();
         }
         let mut output = vec![0u16; count];
-        stream.read(buffer.binding(), bytemuck::cast_slice_mut(&mut output)).unwrap();
+        stream.read_blocking(buffer.binding(), bytemuck::cast_slice_mut(&mut output)).unwrap();
         assert!(output.iter().all(|value| *value == 0x4000)); // bf16 2.0
     }
 }
@@ -59,7 +59,7 @@ fn unary_one_writes_one_into_every_element() {
     .expect("dispatching unary_one");
 
     let mut bytes = vec![0u8; COUNT * 2];
-    stream.read(y.binding(), &mut bytes).expect("reading the output back");
+    stream.read_blocking(y.binding(), &mut bytes).expect("reading the output back");
     for (index, half) in bytes.chunks_exact(2).enumerate() {
         let bits = u16::from_le_bytes([half[0], half[1]]);
         assert_eq!(bits, 0x3f80, "element {index} is {bits:#06x}, not bf16 1.0");
@@ -77,7 +77,7 @@ fn a_span_past_the_end_of_an_allocation_is_rejected() {
     assert_eq!(error.to_string(), "span 768+512 exceeds 1024 bytes");
     // The same span inside the allocation is fine.
     let inside = buffer.try_slice(512, 512).expect("an in-range span");
-    stream.read(inside, &mut host).expect("an in-range read");
+    stream.read_blocking(inside, &mut host).expect("an in-range read");
 }
 
 #[test]
@@ -129,20 +129,36 @@ fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
     );
 }
 
+/// A `Kernel` is a value now, not an `Arc`, so nothing outside HRX can observe
+/// how many clones name one executable. What is observable is the consequence:
+/// a clone must keep the executable alive after the cache that made it is gone.
+/// Dispatching through one proves the share is real rather than a borrow.
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
-fn prepared_kernels_reuse_exports_without_global_retention() {
-    let stream = Stream::open().unwrap();
-    let prepared = kernels::cache::PreparedKernels::default();
-    let config = kernels::config([("count_b", 256)]);
-    let a = prepared.get(&stream, "unary_one", config.clone(), (1, 1)).unwrap();
-    let b = prepared.get(&stream, "unary_one", config, (1, 1)).unwrap();
-    assert!(std::sync::Arc::ptr_eq(&a, &b));
-    let weak = std::sync::Arc::downgrade(&a);
-    drop(a);
-    drop(b);
-    drop(prepared);
-    assert!(weak.upgrade().is_none(), "an instance's kernels must be released with it");
+fn a_cached_kernel_outlives_the_cache_that_made_it() {
+    const COUNT: usize = 256;
+    let mut stream = Stream::open().unwrap();
+    let kernel = {
+        let prepared = kernels::cache::PreparedKernels::default();
+        let config = kernels::config([("count_b", COUNT as u64)]);
+        let first = prepared.get(&stream, "unary_one", config.clone(), (1, 1)).unwrap();
+        let second = prepared.get(&stream, "unary_one", config, (1, 1)).unwrap();
+        assert_eq!(first.symbol(), second.symbol());
+        assert_eq!(first.info().workgroup_size, second.info().workgroup_size);
+        first // `prepared` drops here, with its own clone of the executable
+    };
+
+    let x = stream.allocate(COUNT * 2).unwrap();
+    let y = stream.allocate(COUNT * 2).unwrap();
+    stream.fill(x.binding(), 0).unwrap();
+    stream.fill(y.binding(), 0).unwrap();
+    let constants = Scalars::new().index(COUNT).pack("unary_one", &kernel).unwrap();
+    let bindings = [x.binding(), y.binding()];
+    // Safety: the kernel writes COUNT independent bf16 elements of `y`.
+    unsafe { stream.dispatch(&kernel, [1, 1, 1], [256, 1, 1], &constants, &bindings) }.unwrap();
+    let mut output = vec![0u16; COUNT];
+    stream.read_blocking(y.binding(), bytemuck::cast_slice_mut(&mut output)).unwrap();
+    assert!(output.iter().all(|bits| *bits == 0x3f80), "bf16 1.0 in every element");
 }
 
 #[test]

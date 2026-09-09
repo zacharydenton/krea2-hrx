@@ -8,7 +8,8 @@ allocation, streams, dispatch lifetimes and compiler caching.
 There is no link-time libhrx dependency or runtime rpath in the binary.
 
 Each pipeline owns an ordered stream. Block sessions and their tensor pools use
-that same stream; a standalone session uses its caller's stream. Calls sharing
+that same stream; a standalone session uses its caller's stream. Dispatches,
+fills and copies borrow the stream; transfers and waits need it mutably. Calls sharing
 one pipeline are serialized. Native command buffers retain recorded resources,
 so releasing an ordinary buffer does not wait for GPU execution.
 
@@ -20,7 +21,9 @@ completion. Profiling and progress callbacks add explicit waits when needed.
 
 Tensor storage returns to the model's pool when its final owner is dropped.
 This pool is intentional: HRX's `Stream::recycle` needs mutable stream access,
-which tensor destructors do not have. Keep a pool with its original stream.
+which tensor destructors do not have. Buffers are bound to their device, so a
+pooled block is usable from any stream on it; ordering conflicting access
+between streams is the caller's job, with `record_event`/`wait_event`.
 
 The compiler and runtime come from HRX's public, verified native bundle:
 
@@ -39,8 +42,8 @@ hrx-rs = { path = "../hrx.rs" }
 
 Cargo updates the lockfile for a path override. Restore the registry dependency
 before committing that lockfile. `HRX_RUNTIME_DIR` selects a trusted native
-directory; `HRX_CACHE_DIR` selects the cache, and `HRX_OFFLINE=1` refuses network
-provisioning. `HRX_LOOM_LIBRARY` or an explicit model compiler argument selects
+directory and `HRX_OFFLINE=1` refuses network provisioning. The artifact cache
+follows XDG: `$XDG_CACHE_HOME/hrx`, else `$HOME/.cache/hrx`. `HRX_LOOM_LIBRARY` or an explicit model compiler argument selects
 a compiler override.
 
 Krea's shape/bundle metadata and model-specific operation builders remain here.

@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             stream.dispatch(kernel, grid, [128, 1, 1], constants, &bindings)?;
         }
-        let bytes = stream.read_queued(bindings[3])?.wait(&mut stream)?;
+        let bytes = stream.read(bindings[3])?.wait(&mut stream)?;
         if let Some(ref original) = baseline {
             let different = bytes
                 .chunks_exact(2)

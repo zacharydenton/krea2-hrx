@@ -76,13 +76,7 @@ impl Models {
     }
 
     /// `y = x wᵀ + bias`, for a layer named by its prefix.
-    fn lin(
-        &self,
-        stream: &mut Stream,
-        x: &Tensor,
-        w: &Weights,
-        prefix: &str,
-    ) -> Result<Tensor> {
+    fn lin(&self, stream: &Stream, x: &Tensor, w: &Weights, prefix: &str) -> Result<Tensor> {
         let bias = match w.has(&format!("{prefix}.bias")) {
             true => Some(w.get(&format!("{prefix}.bias"))?.values()?),
             false => None,
@@ -173,9 +167,11 @@ impl Models {
                 Norm::Scale,
                 1e-6,
             )?;
-            let projected =
-                self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.gate_proj"))?;
-            let gate = self.ops.unary(stream, &projected, Unary::Silu)?;
+            let gate = self.ops.unary(
+                stream,
+                &self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.gate_proj"))?,
+                Unary::Silu,
+            )?;
             let up = self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.up_proj"))?;
             let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
             let down =
@@ -249,11 +245,18 @@ impl Models {
             .view(x.rows(), TEXT_WIDTH, 0)?;
         let attended =
             self.ops.attention(stream, &q, &k, &v, batch, tokens, 20, 20, 128, false)?;
-        let projected = self.lin(stream, &normed, w, &format!("{prefix}.attn.gate"))?;
-        let gate = self.ops.unary(stream, &projected, Unary::Sigmoid)?;
+        let gate = self.ops.unary(
+            stream,
+            &self.lin(stream, &normed, w, &format!("{prefix}.attn.gate"))?,
+            Unary::Sigmoid,
+        )?;
         let attended = self.ops.binary(stream, &attended, &gate, Binary::Mul)?;
-        let projected = self.lin(stream, &attended, w, &format!("{prefix}.attn.wo"))?;
-        let y = self.ops.binary(stream, x, &projected, Binary::Add)?;
+        let y = self.ops.binary(
+            stream,
+            x,
+            &self.lin(stream, &attended, w, &format!("{prefix}.attn.wo"))?,
+            Binary::Add,
+        )?;
 
         let normed = self.ops.norm(
             stream,
@@ -262,12 +265,19 @@ impl Models {
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let gated = self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?;
-        let gate = self.ops.unary(stream, &gated, Unary::Silu)?;
+        let gate = self.ops.unary(
+            stream,
+            &self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?,
+            Unary::Silu,
+        )?;
         let up = self.lin(stream, &normed, w, &format!("{prefix}.mlp.up"))?;
         let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
-        let down = self.lin(stream, &mixed, w, &format!("{prefix}.mlp.down"))?;
-        Ok(self.ops.binary(stream, &y, &down, Binary::Add)?)
+        Ok(self.ops.binary(
+            stream,
+            &y,
+            &self.lin(stream, &mixed, w, &format!("{prefix}.mlp.down"))?,
+            Binary::Add,
+        )?)
     }
 
     /// The 12 layer taps into one conditioning sequence.
@@ -323,8 +333,11 @@ impl Models {
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let projected = self.lin(stream, &x, &self.transformer, "txtmlp.1")?;
-        let x = self.ops.unary(stream, &projected, Unary::Gelu)?;
+        let x = self.ops.unary(
+            stream,
+            &self.lin(stream, &x, &self.transformer, "txtmlp.1")?,
+            Unary::Gelu,
+        )?;
         self.lin(stream, &x, &self.transformer, "txtmlp.3")
     }
 
@@ -341,22 +354,29 @@ impl Models {
             values[index + 128] = from_f32(angle.sin());
         }
         let sinusoids = Tensor::from_slice(self.ops.pool(), stream, &values, 1, 256)?;
-        let projected = self.lin(stream, &sinusoids, &self.transformer, "tmlp.0")?;
-        let hidden = self.ops.unary(stream, &projected, Unary::Gelu)?;
+        let hidden = self.ops.unary(
+            stream,
+            &self.lin(stream, &sinusoids, &self.transformer, "tmlp.0")?,
+            Unary::Gelu,
+        )?;
         let embedding = self.lin(stream, &hidden, &self.transformer, "tmlp.2")?;
-        let activated = self.ops.unary(stream, &embedding, Unary::Gelu)?;
-        let projected = self.lin(stream, &activated, &self.transformer, "tproj.1")?;
+        let projected = self.lin(
+            stream,
+            &self.ops.unary(stream, &embedding, Unary::Gelu)?,
+            &self.transformer,
+            "tproj.1",
+        )?;
         Ok((embedding, projected))
     }
 
     /// The latents into the residual stream's width.
-    pub fn image_in(&self, stream: &mut Stream, latents: &Tensor) -> Result<Tensor> {
+    pub fn image_in(&self, stream: &Stream, latents: &Tensor) -> Result<Tensor> {
         self.lin(stream, latents, &self.transformer, "first")
     }
 
     /// Every block's modulation table added to this timestep's vector, as the
     /// float32 buffer the block session reads.
-    pub fn modulation(&self, stream: &mut Stream, vector: &Tensor) -> Result<Scratch> {
+    pub fn modulation(&self, stream: &Stream, vector: &Tensor) -> Result<Scratch> {
         if vector.size() != 6 * WIDTH {
             return Err(Error("modulation dimensions".into()));
         }
@@ -458,7 +478,7 @@ impl Models {
 
     fn conv(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         height: usize,
         width: usize,
@@ -522,7 +542,7 @@ impl Models {
     /// A window of columns, for splitting a fused qkv projection.
     fn columns(
         &self,
-        stream: &mut Stream,
+        stream: &Stream,
         x: &Tensor,
         start: usize,
         count: usize,

@@ -224,56 +224,31 @@ pub fn prepare_for_target(
 
     // A cold shape compiles every block kernel, and the compiler is built for
     // concurrency: distinct specializations take distinct cache locks and the
-    // per-module index lock is only for the one-time index build. Compiling one
-    // at a time left that idle and made a new resolution wait seconds it did
-    // not need to. Workers pull from a shared queue so a slow kernel does not
-    // strand a thread with an empty share.
-    let queue = std::sync::Mutex::new(jobs.into_iter());
-    let width = match std::env::var("KREA2_COMPILE_WORKERS").ok().and_then(|v| v.parse().ok()) {
-        Some(n) if n > 0 => n,
-        _ => std::thread::available_parallelism().map_or(1, |n| n.get()).min(8),
-    };
-    let compiled = std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..width)
-            .map(|_| {
-                let (queue, shared, cache) = (&queue, &shared, &cache);
-                scope.spawn(move || -> Result<Vec<(String, hrx::loom::Artifact)>> {
-                    let mut done = Vec::new();
-                    loop {
-                        let job = {
-                            let mut queue =
-                                queue.lock().map_err(|_| Error("job queue poisoned".into()))?;
-                            match queue.next() {
-                                Some(job) => job,
-                                None => break,
-                            }
-                        };
-                        done.push((job.stem.clone(), compile_one(shared, cache, &job)?));
-                    }
-                    Ok(done)
-                })
-            })
-            .collect();
-        workers
-            .into_iter()
-            .map(|worker| {
-                worker.join().map_err(|_| Error("a compile worker panicked".into()))?
-            })
-            .collect::<Result<Vec<_>>>()
-    })?;
+    // per-module index lock is only for the one-time index build. compile_all
+    // runs the batch across the compiler's own workspace pool, which is the one
+    // place that knows how many workspaces it can afford, and returns results in
+    // request order.
+    let specialized: Vec<(&'static str, hrx::loom::Specialization)> =
+        jobs.iter().map(specialization).collect::<Result<_>>()?;
+    let modules: Vec<hrx::loom::Module> =
+        specialized.iter().map(|(source, _)| shared.module(source)).collect();
+    let requests: Vec<(&hrx::loom::Module, &hrx::loom::Specialization)> =
+        modules.iter().zip(specialized.iter().map(|(_, request)| request)).collect();
 
-    let artifacts: BTreeMap<String, hrx::loom::Artifact> =
-        compiled.into_iter().flatten().collect();
+    // compile_all does not short-circuit, so every kernel is attempted and the
+    // first failure in job order is the one reported.
+    let mut artifacts = BTreeMap::new();
+    for (job, outcome) in jobs.iter().zip(shared.compile_all(&requests, &cache)) {
+        let artifact = outcome?;
+        crate::report(&job.stem, &artifact);
+        artifacts.insert(job.stem.clone(), artifact);
+    }
     // Keep HRX's bounded module cache: another guidance shape uses these same sources.
     Ok(PreparedBundle { shape: shape.clone(), artifacts })
 }
 
-/// One kernel, with whatever the compiler had to say about it.
-fn compile_one(
-    shared: &hrx::loom::Compiler,
-    cache: &std::path::Path,
-    job: &Job,
-) -> Result<hrx::loom::Artifact> {
+/// One kernel's embedded source and the specialization that selects it.
+fn specialization(job: &Job) -> Result<(&'static str, hrx::loom::Specialization)> {
     let source = sources::block(&job.source)
         .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
     let mut request = hrx::loom::Specialization::new(format!("krea2_{}", job.source));
@@ -283,28 +258,7 @@ fn compile_one(
         .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
         .collect();
     request.report = crate::kernel_reports();
-    let artifact = shared.module(source).compile(&request, cache)?;
-    report(&job.stem, &artifact);
-    Ok(artifact)
-}
-
-/// Loom's own diagnostics and, when asked for, its compilation report. Both
-/// were discarded before: only the message of a *failed* compile survived, and
-/// a warning on a kernel that still built was never seen at all.
-fn report(stem: &str, artifact: &hrx::loom::Artifact) {
-    for diagnostic in artifact.diagnostics() {
-        eprintln!(
-            "krea2 kernel {stem}: {} {} at {}:{}: {}",
-            diagnostic.severity,
-            diagnostic.code,
-            diagnostic.line,
-            diagnostic.column,
-            diagnostic.message
-        );
-    }
-    if let Some(report) = artifact.report() {
-        eprintln!("krea2 kernel {stem} report: {report}");
-    }
+    Ok((source, request))
 }
 
 #[cfg(test)]

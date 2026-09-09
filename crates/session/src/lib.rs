@@ -450,7 +450,7 @@ impl Session {
         for index in first_block..first_block + count {
             self.block(stream, index, self.buffers.mods.binding())?;
         }
-        stream.read(self.buffers.x.binding(), bytemuck::cast_slice_mut(x))?;
+        stream.read_blocking(self.buffers.x.binding(), bytemuck::cast_slice_mut(x))?;
         self.report(count);
         Ok(())
     }

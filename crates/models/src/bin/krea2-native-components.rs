@@ -36,9 +36,9 @@ fn run(checkpoint: &Path, directory: &Path) -> Result<(), Box<dyn std::error::Er
     write(&mut stream, &directory.join("temb.bin"), &embedding)?;
     write(&mut stream, &directory.join("mod.bin"), &modulation)?;
 
-    let tables = models.modulation(&mut stream, &modulation)?;
+    let tables = models.modulation(&stream, &modulation)?;
     let mut values = vec![0f32; MODULATION_ELEMENTS];
-    stream.read(tables.binding(), bytemuck::cast_slice_mut(&mut values))?;
+    stream.read_blocking(tables.binding(), bytemuck::cast_slice_mut(&mut values))?;
     std::fs::write(directory.join("block_mod.bin"), bytemuck::cast_slice(&values))?;
 
     let hidden = read(&mut stream, &models, &directory.join("hidden.bin"), 6144)?;

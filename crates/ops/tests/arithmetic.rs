@@ -39,7 +39,7 @@ fn the_euler_step_rounds_where_the_sampler_rounds() {
     let delta = -0.1234f32;
     let sample = upload(&mut stream, &ops, &samples, 1, 1000);
     let v = upload(&mut stream, &ops, &velocity, 1, 1000);
-    ops.euler_step(&mut stream, &sample, &v, delta).expect("euler");
+    ops.euler_step(&stream, &sample, &v, delta).expect("euler");
 
     // kernels/native/euler.loom: bf16 delta, bf16 product, bf16 sum -- the
     // rounding diffusers' CUDA pipeline performs.
@@ -64,7 +64,7 @@ fn guidance_combines_as_krea_defines_it() {
     let scale = 3.5f32;
     let c = upload(&mut stream, &ops, &cond, 1, 512);
     let u = upload(&mut stream, &ops, &uncond, 1, 512);
-    ops.guidance(&mut stream, &c, &u, scale).expect("guidance");
+    ops.guidance(&stream, &c, &u, scale).expect("guidance");
 
     let want: Vec<f32> = cond
         .iter()
@@ -85,7 +85,7 @@ fn the_pointwise_and_broadcast_operations_agree_with_the_host() {
     let values: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) / 16.0).collect();
     let x = upload(&mut stream, &ops, &values, 16, 16);
 
-    let silu = ops.unary(&mut stream, &x, Unary::Silu).expect("silu");
+    let silu = ops.unary(&stream, &x, Unary::Silu).expect("silu");
     for (got, &value) in download(&mut stream, &silu).iter().zip(&values) {
         let value = to_f32(from_f32(value));
         let want = value / (1.0 + (-value).exp());
@@ -98,7 +98,7 @@ fn the_pointwise_and_broadcast_operations_agree_with_the_host() {
     // One row broadcast over sixteen.
     let row: Vec<f32> = (0..16).map(|i| 1.0 + i as f32).collect();
     let y = upload(&mut stream, &ops, &row, 1, 16);
-    let product = ops.binary(&mut stream, &x, &y, Binary::Mul).expect("mul");
+    let product = ops.binary(&stream, &x, &y, Binary::Mul).expect("mul");
     let want: Vec<f32> = values
         .iter()
         .enumerate()
@@ -137,10 +137,9 @@ fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
         weight_on(&mut stream, &packed, shape.clone()).in_layout(Layout::ChannelsLast);
 
     let patches =
-        ops.conv(&mut stream, &x, height, width, &row_weight, None).expect("the patch path");
-    let implicit = ops
-        .conv(&mut stream, &x, height, width, &packed_weight, None)
-        .expect("the implicit path");
+        ops.conv(&stream, &x, height, width, &row_weight, None).expect("the patch path");
+    let implicit =
+        ops.conv(&stream, &x, height, width, &packed_weight, None).expect("the implicit path");
 
     let (a, b) = (download(&mut stream, &patches), download(&mut stream, &implicit));
     assert_eq!(a.len(), height * width * outputs);
@@ -152,10 +151,7 @@ fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
     );
     // An explicitly packed 3×3 weight is accepted.
     let flat = weight_on(&mut stream, &row_major, shape).in_layout(Layout::ChannelsLast);
-    assert!(
-        ops.conv(&mut stream, &x, height, width, &flat, None).is_ok(),
-        "3x3 packed is fine"
-    );
+    assert!(ops.conv(&stream, &x, height, width, &flat, None).is_ok(), "3x3 packed is fine");
 }
 
 fn rounded(v: f32) -> f64 {
@@ -192,8 +188,7 @@ fn linear_layers_match_scalar_matmul_with_bias_and_ragged_tiles() {
                         + if biased { bias[c] as f64 } else { 0. }
                 })
                 .collect();
-            let y =
-                ops.linear(&mut stream, &xdev, &wdev, biased.then(|| bdev.binding())).unwrap();
+            let y = ops.linear(&stream, &xdev, &wdev, biased.then(|| bdev.binding())).unwrap();
             close(&download(&mut stream, &y), &want, 0.01);
         }
     }
@@ -282,9 +277,8 @@ fn causal_and_grouped_attention_match_scalar_softmax() {
             let q = upload(&mut stream, &ops, &q, tokens, heads * dim);
             let k = upload(&mut stream, &ops, &k, tokens, kv * dim);
             let v = upload(&mut stream, &ops, &v, tokens, kv * dim);
-            let attention = ops
-                .attention(&mut stream, &q, &k, &v, 1, tokens, heads, kv, dim, causal)
-                .unwrap();
+            let attention =
+                ops.attention(&stream, &q, &k, &v, 1, tokens, heads, kv, dim, causal).unwrap();
             close(&download(&mut stream, &attention), &want, 0.015);
         }
     }
@@ -313,12 +307,12 @@ fn rotary_embedding_and_nearest_upsampling_match_cpu_indices() {
         }
     }
     let xd = upload(&mut stream, &ops, &x, tokens, heads * dim);
-    let rotated = ops.rope(&mut stream, &xd, tokens, heads, 10000.).unwrap();
+    let rotated = ops.rope(&stream, &xd, tokens, heads, 10000.).unwrap();
     close(&download(&mut stream, &rotated), &want, 0.015);
     let (height, width, channels) = (3usize, 5usize, 7usize);
     let image: Vec<_> = (0..height * width * channels).map(|i| i as f32 / 32.).collect();
     let input = upload(&mut stream, &ops, &image, height * width, channels);
-    let upsampled = ops.upsample(&mut stream, &input, height, width).unwrap();
+    let upsampled = ops.upsample(&stream, &input, height, width).unwrap();
     let output = download(&mut stream, &upsampled);
     for y in 0..height * 2 {
         for x in 0..width * 2 {
