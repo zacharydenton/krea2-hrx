@@ -293,6 +293,36 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
 }
 
 #[test]
+#[ignore = "requires the provisioned Loom compiler"]
+fn production_attention_has_no_scratch_spills() {
+    let compiler = kernels::compiler(None).unwrap();
+    let stem = "attention_gqa_lds_f16_wmma";
+    let source = kernels::sources::block(stem).unwrap();
+    for tokens in [1043usize, 4115, 9235, 16403] {
+        let shape = kernels::Shape::new(tokens as i32, 8, 16).unwrap();
+        let mut request = hrx::loom::Specialization::new(format!("krea2_{stem}"));
+        for (key, value) in [
+            ("q_stride", 6144),
+            ("kv_stride", 1536),
+            ("out_stride", 6144),
+            ("tokens", tokens),
+            ("token_capacity", shape.capacity as usize),
+        ] {
+            request.config.insert(format!("krea2.{stem}.{key}"), value.to_string());
+        }
+        request.config.insert(format!("krea2.{stem}.scale"), "0.08838834764831845".into());
+        let artifact =
+            compiler.module(source).compile(&request, &kernels::cache_root().unwrap()).unwrap();
+        let spills: Vec<_> = artifact
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "BACKEND/009")
+            .collect();
+        assert!(spills.is_empty(), "{tokens} tokens: {spills:?}");
+    }
+}
+
+#[test]
 #[ignore = "requires gfx1151 and provisioned HRX"]
 fn production_attention_tiles_match_grouped_cpu_softmax() {
     let mut h = Harness::new();

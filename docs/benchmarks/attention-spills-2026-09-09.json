@@ -1,0 +1,260 @@
+{
+  "date": "2026-09-09",
+  "gpu": "Radeon 8060S (gfx1151)",
+  "hrx_rs": "0.1.0",
+  "rustc": "1.95.0-nightly (5fb2ff861 2026-02-21)",
+  "compiler_sha256": "e66da21cc469071391a54055044bf5202a6c3d36eca4556f22d067f4e44b3fc3",
+  "baseline_source_sha256": "429c42508556e13f163ef53a0f9e55b61d52a86186e4a073a4797dde5613a079",
+  "candidate_source_sha256": "44725bc70cdbc6f73f75db9aa60f2ae8322041e44db401099f56ae41b14f99e4",
+  "method": {
+    "timing": "host wall clock, batch dispatch then synchronize; allocation, uploads, compilation and comparison excluded",
+    "dispatches_per_sample": 10,
+    "warmup_rounds": 1,
+    "recorded_rounds": 7,
+    "order": "rotating",
+    "query_heads": 48,
+    "kv_heads": 12,
+    "head_dimension": 128,
+    "comparison": "all output elements bitwise equal within each run"
+  },
+  "resources_4115": {
+    "baseline": {
+      "vgprs": 256,
+      "scratch_bytes_per_lane": 48,
+      "spill_slots": 12,
+      "lds_bytes": 21760,
+      "key_loop_scratch_loads": 20,
+      "key_loop_scratch_stores": 6
+    },
+    "pv1": {
+      "vgprs": 240,
+      "scratch_bytes_per_lane": 0,
+      "spill_slots": 0,
+      "lds_bytes": 21760
+    },
+    "pv2": {
+      "vgprs": 248,
+      "scratch_bytes_per_lane": 0,
+      "spill_slots": 0,
+      "lds_bytes": 21760,
+      "key_loop_scratch_loads": 0,
+      "key_loop_scratch_stores": 0
+    },
+    "pv4": {
+      "vgprs": 240,
+      "scratch_bytes_per_lane": 32,
+      "spill_slots": 8,
+      "lds_bytes": 21760
+    },
+    "qlds": {
+      "vgprs": 248,
+      "scratch_bytes_per_lane": 0,
+      "spill_slots": 0,
+      "lds_bytes": 29952
+    }
+  },
+  "runs": [
+    {
+      "run": "interleaved",
+      "results": [
+        {
+          "variant": "baseline",
+          "tokens": 4115,
+          "median_ms": 46.056632,
+          "samples_ms": [
+            44.432220900000004,
+            45.679463399999996,
+            45.955556800000004,
+            46.0566319,
+            48.5240998,
+            51.461224900000005,
+            58.898549700000004
+          ]
+        },
+        {
+          "variant": "reordered",
+          "tokens": 4115,
+          "median_ms": 42.547185,
+          "samples_ms": [
+            39.667740200000004,
+            39.852879200000004,
+            41.8527469,
+            42.5471847,
+            43.304167,
+            44.527472,
+            52.5414721
+          ]
+        }
+      ]
+    },
+    {
+      "run": "variants",
+      "results": [
+        {
+          "variant": "baseline",
+          "tokens": 4115,
+          "median_ms": 28.460474,
+          "samples_ms": [
+            28.1742906,
+            28.2406856,
+            28.343149899999997,
+            28.4604737,
+            28.5590459,
+            28.5999847,
+            28.9996468
+          ]
+        },
+        {
+          "variant": "pv1",
+          "tokens": 4115,
+          "median_ms": 19.786333,
+          "samples_ms": [
+            18.807943,
+            19.3992977,
+            19.557196299999998,
+            19.786333,
+            19.8250421,
+            19.977713799999997,
+            20.0184637
+          ]
+        },
+        {
+          "variant": "pv2",
+          "tokens": 4115,
+          "median_ms": 19.79981,
+          "samples_ms": [
+            19.604635100000003,
+            19.6250155,
+            19.6673683,
+            19.7998097,
+            19.8356556,
+            19.8385327,
+            19.9700221
+          ]
+        },
+        {
+          "variant": "pv4",
+          "tokens": 4115,
+          "median_ms": 24.428171,
+          "samples_ms": [
+            24.303053799999997,
+            24.374079000000002,
+            24.3855406,
+            24.428171400000004,
+            24.511693200000003,
+            24.7440857,
+            24.7552524
+          ]
+        },
+        {
+          "variant": "qlds",
+          "tokens": 4115,
+          "median_ms": 22.196086,
+          "samples_ms": [
+            22.0849839,
+            22.1062213,
+            22.1206129,
+            22.1960858,
+            22.325704299999998,
+            22.399001199999997,
+            23.0206601
+          ]
+        }
+      ]
+    },
+    {
+      "run": "1043",
+      "results": [
+        {
+          "variant": "baseline",
+          "tokens": 1043,
+          "median_ms": 2.000554,
+          "samples_ms": [
+            1.9411747,
+            1.9798227000000002,
+            1.9939153,
+            2.0005541,
+            2.0065869,
+            2.0172977000000003,
+            2.1167609
+          ]
+        },
+        {
+          "variant": "pv1",
+          "tokens": 1043,
+          "median_ms": 1.359778,
+          "samples_ms": [
+            1.3248806,
+            1.3539859,
+            1.3549388,
+            1.3597776000000001,
+            1.3671155000000002,
+            1.3739283,
+            1.3921408
+          ]
+        },
+        {
+          "variant": "pv2",
+          "tokens": 1043,
+          "median_ms": 1.346553,
+          "samples_ms": [
+            1.3064482,
+            1.3266466,
+            1.3312015000000001,
+            1.3465531,
+            1.3520689000000001,
+            1.3522938,
+            1.3707224
+          ]
+        }
+      ]
+    },
+    {
+      "run": "9235",
+      "results": [
+        {
+          "variant": "baseline",
+          "tokens": 9235,
+          "median_ms": 222.051548,
+          "samples_ms": [
+            217.4275055,
+            219.85038879999996,
+            221.761648,
+            222.05154770000004,
+            222.1998732,
+            224.31983889999998,
+            224.92523379999997
+          ]
+        },
+        {
+          "variant": "pv1",
+          "tokens": 9235,
+          "median_ms": 169.080241,
+          "samples_ms": [
+            141.50464010000002,
+            168.6633257,
+            168.9938132,
+            169.0802415,
+            169.4365473,
+            169.77051899999998,
+            170.41027419999998
+          ]
+        },
+        {
+          "variant": "pv2",
+          "tokens": 9235,
+          "median_ms": 160.167671,
+          "samples_ms": [
+            156.9219356,
+            159.06178290000003,
+            160.054311,
+            160.1676707,
+            160.66384639999998,
+            168.94972760000002,
+            170.6605025
+          ]
+        }
+      ]
+    }
+  ]
+}

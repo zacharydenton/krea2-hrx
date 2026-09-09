@@ -1,0 +1,185 @@
+{
+  "date": "2026-09-09",
+  "gpu": "Radeon 8060S (gfx1151)",
+  "base_revision": "f5c7c82",
+  "isolation": "Same frozen working-tree source snapshot and host changes; only the embedded attention source differs between binaries. Concurrent workspace edits are excluded.",
+  "prompt": "a red fox sitting in fresh snow at dawn, soft light, photograph",
+  "width": 1024,
+  "height": 1024,
+  "checkpoint": "krea2_turbo_int8_convrot.safetensors",
+  "steps": 8,
+  "guidance": 0,
+  "attention": "fp16",
+  "method": {
+    "order": [
+      "before",
+      "after",
+      "after",
+      "before"
+    ],
+    "seeds_per_process": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "excluded_warmup_seed": 0,
+    "warm_samples_per_variant": 6,
+    "timing": "CLI wall time per image: seeded noise, prompt encoding/text fusion, all eight transformer/Euler steps, VAE decode, RGB readback, PNG encoding and file write; model load and first-image setup excluded from warm samples. Progress callback and profiling disabled.",
+    "cache": "Native compiler/artifact and OS file caches were not cleared; load and first-image differences are not attributed to the attention change."
+  },
+  "binary_sha256": {
+    "before": "4be85b8dbaf1ca7e5a9a14af304afa060533464f8672436d8f84213bc8f60f2e",
+    "after": "4024aeb66110534b7788250cade5faeb07071cd1290519e7f97a49045fa490ac"
+  },
+  "snapshot_manifest_sha256": "c411c308f4cdab5d8630ea145e7a383fd382b96a8e77e7c0e7d953df8fa8e84e",
+  "warm_samples_seconds": {
+    "before": [
+      30.03,
+      30.02,
+      30.02,
+      32.08,
+      32.07,
+      32.06
+    ],
+    "after": [
+      28.82,
+      29.76,
+      29.95,
+      29.48,
+      29.52,
+      29.55
+    ]
+  },
+  "warm_median_seconds": {
+    "before": 31.045,
+    "after": 29.535
+  },
+  "warm_range_seconds": {
+    "before": [
+      30.02,
+      32.08
+    ],
+    "after": [
+      28.82,
+      29.95
+    ]
+  },
+  "median_seconds_saved": 1.5100000000000016,
+  "median_latency_reduction_percent": 4.863907231438236,
+  "quality": "All sixteen output PNG files matched byte-for-byte for their corresponding seed across both binaries and both rounds.",
+  "runs": [
+    {
+      "variant": "before",
+      "model_load_seconds": 6.744802,
+      "process_wall_seconds": 141.48,
+      "images": [
+        {
+          "seed": 0,
+          "seconds": 44.4,
+          "png_sha256": "89ec6d8f1871e56cb44e149e740693fbd048877ac1a2c39ad443ebe697f2f494"
+        },
+        {
+          "seed": 1,
+          "seconds": 30.03,
+          "png_sha256": "5942a19d6ff307fc2a01f39ef9d1d34ee1b781a85b653f0eaae161832a46b0be"
+        },
+        {
+          "seed": 2,
+          "seconds": 30.02,
+          "png_sha256": "ed92cd8e5bb4f96c2b3e295033dd3cb6f134b7236a441cc1dfaf586ce7e2fcdb"
+        },
+        {
+          "seed": 3,
+          "seconds": 30.02,
+          "png_sha256": "aceb7304d5751e0bd6c0ff7a1bd8e70f24260777d4e877e90111307572cd4027"
+        }
+      ],
+      "warm_median_seconds": 30.02
+    },
+    {
+      "variant": "after",
+      "model_load_seconds": 5.280039,
+      "process_wall_seconds": 126.658,
+      "images": [
+        {
+          "seed": 0,
+          "seconds": 32.69,
+          "png_sha256": "89ec6d8f1871e56cb44e149e740693fbd048877ac1a2c39ad443ebe697f2f494"
+        },
+        {
+          "seed": 1,
+          "seconds": 28.82,
+          "png_sha256": "5942a19d6ff307fc2a01f39ef9d1d34ee1b781a85b653f0eaae161832a46b0be"
+        },
+        {
+          "seed": 2,
+          "seconds": 29.76,
+          "png_sha256": "ed92cd8e5bb4f96c2b3e295033dd3cb6f134b7236a441cc1dfaf586ce7e2fcdb"
+        },
+        {
+          "seed": 3,
+          "seconds": 29.95,
+          "png_sha256": "aceb7304d5751e0bd6c0ff7a1bd8e70f24260777d4e877e90111307572cd4027"
+        }
+      ],
+      "warm_median_seconds": 29.76
+    },
+    {
+      "variant": "after",
+      "model_load_seconds": 1.768188,
+      "process_wall_seconds": 125.909,
+      "images": [
+        {
+          "seed": 0,
+          "seconds": 35.45,
+          "png_sha256": "89ec6d8f1871e56cb44e149e740693fbd048877ac1a2c39ad443ebe697f2f494"
+        },
+        {
+          "seed": 1,
+          "seconds": 29.48,
+          "png_sha256": "5942a19d6ff307fc2a01f39ef9d1d34ee1b781a85b653f0eaae161832a46b0be"
+        },
+        {
+          "seed": 2,
+          "seconds": 29.52,
+          "png_sha256": "ed92cd8e5bb4f96c2b3e295033dd3cb6f134b7236a441cc1dfaf586ce7e2fcdb"
+        },
+        {
+          "seed": 3,
+          "seconds": 29.55,
+          "png_sha256": "aceb7304d5751e0bd6c0ff7a1bd8e70f24260777d4e877e90111307572cd4027"
+        }
+      ],
+      "warm_median_seconds": 29.52
+    },
+    {
+      "variant": "before",
+      "model_load_seconds": 1.711014,
+      "process_wall_seconds": 131.868,
+      "images": [
+        {
+          "seed": 0,
+          "seconds": 33.81,
+          "png_sha256": "89ec6d8f1871e56cb44e149e740693fbd048877ac1a2c39ad443ebe697f2f494"
+        },
+        {
+          "seed": 1,
+          "seconds": 32.08,
+          "png_sha256": "5942a19d6ff307fc2a01f39ef9d1d34ee1b781a85b653f0eaae161832a46b0be"
+        },
+        {
+          "seed": 2,
+          "seconds": 32.07,
+          "png_sha256": "ed92cd8e5bb4f96c2b3e295033dd3cb6f134b7236a441cc1dfaf586ce7e2fcdb"
+        },
+        {
+          "seed": 3,
+          "seconds": 32.06,
+          "png_sha256": "aceb7304d5751e0bd6c0ff7a1bd8e70f24260777d4e877e90111307572cd4027"
+        }
+      ],
+      "warm_median_seconds": 32.07
+    }
+  ]
+}

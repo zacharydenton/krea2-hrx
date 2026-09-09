@@ -12,6 +12,10 @@ Selection is recorded in the compiled bundle metadata. The default kernel is
 `kernels/attention_gqa_lds_f16_wmma.loom`. Experimental query32 attention is
 not selected by either production builder; see [its evaluation](attention-2x.md).
 
+The default kernel consumes V fragments in pairs to avoid VGPR spills. See the
+[register-pressure investigation](attention-spills.md) for disassembly findings,
+the Rust comparison tool, and measured kernel latency.
+
 ## Quality tradeoff
 
 On the fixed 1024×1024, seed-zero, eight-step W8A8 fixture, against the bf16
