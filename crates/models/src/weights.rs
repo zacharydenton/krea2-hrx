@@ -115,7 +115,7 @@ impl Weights {
         let mut values = BTreeMap::new();
         for item in &items {
             let tensor = file.get(&item.key)?;
-            let base = storage.ptr().offset(item.offset);
+            let base = item.offset;
             let staged = stage(&item.dtype, tensor.bytes, item)?;
             let bytes = staged.as_deref().unwrap_or(&tensor.bytes[..item.bytes]);
             // Repack both ordinary 4D and reduced causal 5D convolutions.
@@ -129,17 +129,16 @@ impl Weights {
             };
             // The F32 and BF16 copies must use the same packed layout.
             let bytes = packed.as_deref().unwrap_or(bytes);
-            stream.upload(base, bytes)?;
+            stream.upload(storage.slice(base, bytes.len()), bytes)?;
             let (bf16, holder) = if item.dtype == "F32" {
                 // Everything but the norms consumes a float32 tensor as bf16,
                 // rounded the way the checkpoint's own conversion rounds.
                 let floats = read_f32(bytes, item.count);
                 let rounded: Vec<u16> = floats.iter().map(|&v| from_f32_carrying(v)).collect();
                 let buffer = Arc::new(stream.allocate(rounded.len() * 2)?);
-                stream.upload(buffer.ptr(), bytemuck::cast_slice(&rounded))?;
-                let pointer = buffer.ptr();
+                stream.upload(buffer.binding(), bytemuck::cast_slice(&rounded))?;
                 float_storage.push(Arc::clone(&buffer));
-                (pointer, buffer)
+                (0, buffer)
             } else {
                 (base, Arc::clone(&storage))
             };

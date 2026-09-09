@@ -173,11 +173,9 @@ impl Models {
                 Norm::Scale,
                 1e-6,
             )?;
-            let gate = self.ops.unary(
-                stream,
-                &self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.gate_proj"))?,
-                Unary::Silu,
-            )?;
+            let projected =
+                self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.gate_proj"))?;
+            let gate = self.ops.unary(stream, &projected, Unary::Silu)?;
             let up = self.lin(stream, &normed, &self.text, &format!("{layer}.mlp.up_proj"))?;
             let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
             let down =
@@ -251,18 +249,11 @@ impl Models {
             .view(x.rows(), TEXT_WIDTH, 0)?;
         let attended =
             self.ops.attention(stream, &q, &k, &v, batch, tokens, 20, 20, 128, false)?;
-        let gate = self.ops.unary(
-            stream,
-            &self.lin(stream, &normed, w, &format!("{prefix}.attn.gate"))?,
-            Unary::Sigmoid,
-        )?;
+        let projected = self.lin(stream, &normed, w, &format!("{prefix}.attn.gate"))?;
+        let gate = self.ops.unary(stream, &projected, Unary::Sigmoid)?;
         let attended = self.ops.binary(stream, &attended, &gate, Binary::Mul)?;
-        let y = self.ops.binary(
-            stream,
-            x,
-            &self.lin(stream, &attended, w, &format!("{prefix}.attn.wo"))?,
-            Binary::Add,
-        )?;
+        let projected = self.lin(stream, &attended, w, &format!("{prefix}.attn.wo"))?;
+        let y = self.ops.binary(stream, x, &projected, Binary::Add)?;
 
         let normed = self.ops.norm(
             stream,
@@ -271,19 +262,12 @@ impl Models {
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let gate = self.ops.unary(
-            stream,
-            &self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?,
-            Unary::Silu,
-        )?;
+        let gated = self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?;
+        let gate = self.ops.unary(stream, &gated, Unary::Silu)?;
         let up = self.lin(stream, &normed, w, &format!("{prefix}.mlp.up"))?;
         let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
-        Ok(self.ops.binary(
-            stream,
-            &y,
-            &self.lin(stream, &mixed, w, &format!("{prefix}.mlp.down"))?,
-            Binary::Add,
-        )?)
+        let down = self.lin(stream, &mixed, w, &format!("{prefix}.mlp.down"))?;
+        Ok(self.ops.binary(stream, &y, &down, Binary::Add)?)
     }
 
     /// The 12 layer taps into one conditioning sequence.
@@ -339,11 +323,8 @@ impl Models {
             Norm::OnePlusScale,
             1e-5,
         )?;
-        let x = self.ops.unary(
-            stream,
-            &self.lin(stream, &x, &self.transformer, "txtmlp.1")?,
-            Unary::Gelu,
-        )?;
+        let projected = self.lin(stream, &x, &self.transformer, "txtmlp.1")?;
+        let x = self.ops.unary(stream, &projected, Unary::Gelu)?;
         self.lin(stream, &x, &self.transformer, "txtmlp.3")
     }
 
@@ -360,18 +341,11 @@ impl Models {
             values[index + 128] = from_f32(angle.sin());
         }
         let sinusoids = Tensor::from_slice(self.ops.pool(), stream, &values, 1, 256)?;
-        let hidden = self.ops.unary(
-            stream,
-            &self.lin(stream, &sinusoids, &self.transformer, "tmlp.0")?,
-            Unary::Gelu,
-        )?;
+        let projected = self.lin(stream, &sinusoids, &self.transformer, "tmlp.0")?;
+        let hidden = self.ops.unary(stream, &projected, Unary::Gelu)?;
         let embedding = self.lin(stream, &hidden, &self.transformer, "tmlp.2")?;
-        let projected = self.lin(
-            stream,
-            &self.ops.unary(stream, &embedding, Unary::Gelu)?,
-            &self.transformer,
-            "tproj.1",
-        )?;
+        let activated = self.ops.unary(stream, &embedding, Unary::Gelu)?;
+        let projected = self.lin(stream, &activated, &self.transformer, "tproj.1")?;
         Ok((embedding, projected))
     }
 
@@ -452,8 +426,10 @@ impl Models {
             if table.count != 6 * WIDTH {
                 return Err(Error("block modulation dimensions".into()));
             }
-            let destination = self.block_tables.binding()?.offset(index * 6 * WIDTH * 2);
-            device().copy_device_to_device(destination, table.values()?, table.count * 2)?;
+            let bytes = table.count * 2;
+            let destination =
+                self.block_tables.binding()?.slice(index * 6 * WIDTH * 2, bytes)?;
+            stream.copy(destination, table.values()?)?;
         }
         Ok(())
     }
@@ -471,9 +447,11 @@ impl Models {
             true => self.conv(stream, x, height, width, &format!("{prefix}.conv_shortcut"))?,
             false => x.clone(),
         };
-        let y = self.ops.norm_silu(x, self.vae.get(&format!("{prefix}.norm1.gamma"))?)?;
+        let y =
+            self.ops.norm_silu(stream, x, self.vae.get(&format!("{prefix}.norm1.gamma"))?)?;
         let y = self.conv(stream, &y, height, width, &format!("{prefix}.conv1"))?;
-        let y = self.ops.norm_silu(&y, self.vae.get(&format!("{prefix}.norm2.gamma"))?)?;
+        let y =
+            self.ops.norm_silu(stream, &y, self.vae.get(&format!("{prefix}.norm2.gamma"))?)?;
         let y = self.conv(stream, &y, height, width, &format!("{prefix}.conv2"))?;
         Ok(self.ops.binary(stream, &y, &skip, Binary::Add)?)
     }
@@ -486,9 +464,9 @@ impl Models {
         width: usize,
         prefix: &str,
     ) -> Result<Tensor> {
-        let bias = self.vae.get(&format!("{prefix}.bias"))?.values;
+        let bias = self.vae.get(&format!("{prefix}.bias"))?.values()?;
         let weight = self.vae.get(&format!("{prefix}.weight"))?;
-        Ok(self.ops.conv(x, height, width, weight, Some(bias))?)
+        Ok(self.ops.conv(stream, x, height, width, weight, Some(bias))?)
     }
 
     /// One tile of latents to RGB, at eight times the resolution.
@@ -513,17 +491,12 @@ impl Models {
         )?;
         let qkv = self.conv(stream, &normed, h, w, "decoder.mid_block.attentions.0.to_qkv")?;
         let d = x.cols();
-        let attended = self.ops.attention(
-            &self.columns(stream, &qkv, 0, d)?,
-            &self.columns(stream, &qkv, d, d)?,
-            &self.columns(stream, &qkv, 2 * d, d)?,
-            1,
-            h * w,
-            1,
-            1,
-            d,
-            false,
-        )?;
+        let (cq, ck, cv) = (
+            self.columns(stream, &qkv, 0, d)?,
+            self.columns(stream, &qkv, d, d)?,
+            self.columns(stream, &qkv, 2 * d, d)?,
+        );
+        let attended = self.ops.attention(stream, &cq, &ck, &cv, 1, h * w, 1, 1, d, false)?;
         let projected =
             self.conv(stream, &attended, h, w, "decoder.mid_block.attentions.0.proj")?;
         x = self.ops.binary(stream, &x, &projected, Binary::Add)?;
@@ -542,7 +515,7 @@ impl Models {
                     self.conv(stream, &x, h, w, &format!("{prefix}.upsamplers.0.resample.1"))?;
             }
         }
-        let x = self.ops.norm_silu(&x, self.vae.get("decoder.norm_out.gamma")?)?;
+        let x = self.ops.norm_silu(stream, &x, self.vae.get("decoder.norm_out.gamma")?)?;
         self.conv(stream, &x, h, w, "decoder.conv_out")
     }
 
@@ -589,7 +562,7 @@ impl Models {
         width: usize,
     ) -> Result<Vec<u8>> {
         let (h, w) = (height / 8, width / 8);
-        let latent = unpack(&packed.download()?, h, w)?;
+        let latent = unpack(&packed.download(stream)?, h, w)?;
 
         // Tiles overlap by 8 latents where there is more than one of them.
         let stride = if h > 32 || w > 32 { 24 } else { 32 };
@@ -605,9 +578,14 @@ impl Models {
                     input[j * tw * 16..(j + 1) * tw * 16]
                         .copy_from_slice(&latent[source..source + tw * 16]);
                 }
-                let uploaded = Tensor::from_slice(self.ops.pool(), &input, th * tw, 16)?;
+                let uploaded =
+                    Tensor::from_slice(self.ops.pool(), stream, &input, th * tw, 16)?;
                 let output = self.decode_tile(stream, &uploaded, th, tw)?;
-                row.push(Tile { height: th * 8, width: tw * 8, data: output.download()? });
+                row.push(Tile {
+                    height: th * 8,
+                    width: tw * 8,
+                    data: output.download(stream)?,
+                });
             }
             tiles.push(row);
         }
