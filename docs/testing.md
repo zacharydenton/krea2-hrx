@@ -177,3 +177,43 @@ to 0.999717, relative latent RMS from 0.059111 to 0.023806, and image PSNR from
 the reference has since moved to the official repository on the CPU, and the
 GPU-captured reference shared its device arithmetic with the candidate. Both sets
 include the actual GPU Euler kernel and native VAE decoder.
+
+## Separating the scheme from our implementation of it
+
+`scripts/parity.sh` has two points to compare, so it can say how far this host is
+from the unquantized model but not how much of that is the W8A8 ConvRot scheme and
+how much is our kernels. `scripts/quantized_reference.py` supplies the third point:
+the same int8 ConvRot checkpoint run by a plain torch transcription of
+`Krea2Transformer2DModel`, with no kernel of ours involved. Like the capture script
+it is a `uv run` script and not part of `scripts/test.sh`.
+
+```sh
+./scripts/quantized_reference.py forward --checkpoint CKPT --quant w8a8 --out v.npy
+```
+
+Prefer `forward` over `trajectory`: one evaluation accumulates nothing, so the number
+is the arithmetic rather than eight steps of amplification. Measured that way at
+1024×1024 on the pinned fixture, everything on the GPU, identical inputs:
+
+| One transformer forward | rel RMS |
+| --- | ---: |
+| The scheme: torch W8A8 against the identical torch code unquantized | 0.012905 |
+| Our kernels against that scheme | 0.011656 |
+| Our kernels against unquantized | 0.015702 |
+| Two independent *unquantized* implementations (this transcription vs diffusers) | 0.007002 |
+
+The last row is the floor: two honest implementations of the same maths already
+disagree by 0.0070, so our 0.0117 deviation from the scheme is under twice the noise
+between implementations. Decoded through one untiled VAE the scheme reaches 30.93 dB
+against the reference and our kernels 31.13 dB — marginally closer than the scheme's
+own reference implementation.
+
+SSIM disagrees with PSNR on that last point: 0.9705 for the torch scheme against
+0.9459 for our kernels. Our kernels are structurally a little further from the
+reference while being no further in mean-square terms, which is the shape the fp16
+WMMA attention default would produce. Neither metric should be quoted alone.
+
+The script is slow by construction — dequantisation and the Hadamard rotations run in
+eager torch, about two minutes per forward — and it needs the ComfyUI-format files
+rather than the diffusers repository, because `w8a8` reads the packed rows and
+`weight_scale` tensors that the diffusers export does not carry.
