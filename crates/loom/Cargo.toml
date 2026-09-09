@@ -7,9 +7,8 @@ license = "MIT"
 publish = false
 
 [dependencies]
-hrx = { package = "krea2-hrx", path = "../hrx" }
+hrx.workspace = true
 
 [dev-dependencies]
-hrx-core.workspace = true
 bytemuck = "1"
 half = { version = "2", features = ["bytemuck"] }

@@ -1,9 +1,0 @@
-[package]
-name = "krea2-hrx"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-description = "Krea compatibility exports for the shared HRX runtime"
-
-[dependencies]
-hrx-core.workspace = true

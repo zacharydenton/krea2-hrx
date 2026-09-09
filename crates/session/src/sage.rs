@@ -9,7 +9,7 @@
 //! 128 for int8, with `[heads][capacity]` float32 scales, so one key tile is
 //! one contiguous block. The correction is
 //! `[query heads][ceil(tokens / 64)][capacity]` in float32.
-use hrx::{device, Args, Buffer, DevicePtr};
+use hrx::{Buffer, Kernel, Stream, View};
 use loom::{cache::PreparedKernels, Config};
 
 use crate::{Error, Result};
@@ -96,8 +96,8 @@ impl Sage {
 
         // The key mean, over the whole sequence: a partial sum per tile, then
         // one workgroup per head to finish it.
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(k).ptr(self.key_partial.ptr());
+        let scalars = Scalars::new().index(t as i32);
+        let bindings = [k, self.key_partial.binding()];
         self.launch(
             "sage_key_partial",
             &[
@@ -111,8 +111,8 @@ impl Sage {
             (kv as u32, tiles as u32),
             128,
         )?;
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(self.key_partial.ptr()).ptr(self.key_mean.ptr());
+        let scalars = Scalars::new().index(t as i32);
+        let bindings = [self.key_partial.binding(), self.key_mean.binding()];
         self.launch(
             "sage_key_mean",
             &[
@@ -129,8 +129,8 @@ impl Sage {
 
         // The query mean is per tile, not per sequence: each query tile only
         // ever meets the keys once.
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(q).ptr(self.query_mean.ptr()).ptr(self.query_mean_half.ptr());
+        let scalars = Scalars::new().index(t as i32);
+        let bindings = [q, self.query_mean.binding(), self.query_mean_half.binding()];
         self.launch(
             "sage_query_mean",
             &[
@@ -145,12 +145,8 @@ impl Sage {
             128,
         )?;
 
-        let mut args = Args::new();
-        args.i32(t as i32)
-            .ptr(q)
-            .ptr(self.query_mean.ptr())
-            .ptr(self.q4.ptr())
-            .ptr(self.q_scale.ptr());
+        let scalars = Scalars::new().index(t as i32);
+        let bindings = [q, self.query_mean.binding(), self.q4.binding(), self.q_scale.binding()];
         self.launch(
             self.quantize("q"),
             &[
@@ -167,13 +163,8 @@ impl Sage {
             (t.div_ceil(8) as u32, h as u32),
             256,
         )?;
-        let mut args = Args::new();
-        args.i32(t as i32)
-            .ptr(k)
-            .ptr(self.key_mean.ptr())
-            .ptr(self.k4.ptr())
-            .ptr(self.k_scale.ptr())
-            .ptr(self.centered_k.ptr());
+        let scalars = Scalars::new().index(t as i32);
+        let bindings = [k, self.key_mean.binding(), self.k4.binding(), self.k_scale.binding(), self.centered_k.binding()];
         self.launch(
             self.quantize("k"),
             &[
@@ -192,8 +183,8 @@ impl Sage {
             256,
         )?;
 
-        let mut args = Args::new();
-        args.i32(t as i32).ptr(v).ptr(self.v_transposed.ptr());
+        let scalars = Scalars::new().index(t as i32);
+        let bindings = [v, self.v_transposed.binding()];
         self.launch(
             "sage_transpose",
             &[("width", kv * 128), ("row_capacity", c)],
@@ -206,12 +197,8 @@ impl Sage {
         // what the kernel adds back to each score.
         let (m, n) = (tiles * 4, c);
         let (a_stride, b_stride) = (m * 128, n * 128);
-        let mut args = Args::new();
-        args.i32(m as i32)
-            .f32(1.0)
-            .ptr(self.query_mean_half.ptr())
-            .ptr(self.centered_k.ptr())
-            .ptr(self.correction.ptr());
+        let scalars = Scalars::new().index(m as i32).float(1.0);
+        let bindings = [self.query_mean_half.binding(), self.centered_k.binding(), self.correction.binding()];
         self.launch(
             "gemm_f16_f32_nt",
             &[

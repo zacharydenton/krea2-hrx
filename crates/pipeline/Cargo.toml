@@ -10,7 +10,7 @@ publish = false
 name = "krea2_pipeline"
 
 [dependencies]
-hrx = { package = "krea2-hrx", path = "../hrx" }
+hrx.workspace = true
 krea2-models = { path = "../models" }
 krea2-numerics = { path = "../numerics" }
 krea2-ops = { path = "../ops" }

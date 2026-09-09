@@ -16,7 +16,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use hrx::{device, Args, Buffer, DevicePtr};
+use hrx::{Buffer, Kernel, Stream, View};
+use krea2_ops::Scalars;
 
 pub use bundle::{Kernels, Metadata};
 pub use sage::Sage;
@@ -91,20 +92,20 @@ fn fingerprint(values: &[f32]) -> u64 {
     hash
 }
 
-/// One block's weights, as device addresses into the resident checkpoint.
+/// One block's weights, located once in the resident checkpoint.
 struct Block {
-    qkvg_q: DevicePtr,
-    qkvg_s: DevicePtr,
-    wo_q: DevicePtr,
-    wo_s: DevicePtr,
-    gu_q: DevicePtr,
-    gu_s: DevicePtr,
-    down_q: DevicePtr,
-    down_s: DevicePtr,
-    prenorm: DevicePtr,
-    postnorm: DevicePtr,
-    qnorm: DevicePtr,
-    knorm: DevicePtr,
+    qkvg_q: crate::weights::At,
+    qkvg_s: crate::weights::At,
+    wo_q: crate::weights::At,
+    wo_s: crate::weights::At,
+    gu_q: crate::weights::At,
+    gu_s: crate::weights::At,
+    down_q: crate::weights::At,
+    down_s: crate::weights::At,
+    prenorm: crate::weights::At,
+    postnorm: crate::weights::At,
+    qnorm: crate::weights::At,
+    knorm: crate::weights::At,
 }
 
 /// The session's scratch: the residual stream and every intermediate, sized for
@@ -123,6 +124,12 @@ struct Buffers {
     mods: Buffer,
     cos: Buffer,
     sin: Buffer,
+}
+
+/// The gate half of the fused QKVG buffer: from its offset to the end.
+fn gate_half(fused: &Buffer) -> Result<View<'_>> {
+    let at = GATE_OFFSET as usize * 2;
+    fused.try_slice(at, fused.bytes() - at).map_err(Error::from)
 }
 
 pub struct Session {
@@ -246,10 +253,10 @@ impl Session {
             (&buffers.fused, capacity * QKVG as usize * 2),
             (&buffers.x, capacity * HIDDEN as usize * 2),
         ] {
-            device().zero(buffer.ptr(), bytes)?;
+            device().zero(buffer.binding(), bytes)?;
         }
         if let Some(transposed) = &buffers.v_transposed {
-            device().zero(transposed.ptr(), kv_bytes)?;
+            device().zero(transposed.binding(), kv_bytes)?;
         }
         let sage = match metadata.attention_bits {
             16 => None,
@@ -300,23 +307,34 @@ impl Session {
 
     /// One kernel, timed when profiling is on. The synchronize on either side
     /// is what makes a stage's number mean anything.
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         &self,
+        stream: &mut Stream,
         kernel: &hrx::Kernel,
         stage: &'static str,
         grid_x: u32,
         grid_y: u32,
         threads: u32,
-        args: &Args,
+        scalars: &Scalars,
+        bindings: &[View<'_>],
     ) -> Result<()> {
+        let constants = scalars.pack(stage, kernel)?;
+        let compiled = kernel.info().workgroup_size;
+        if compiled != [threads, 1, 1] {
+            return Err(Error::failed(format!(
+                "{stage}: compiled for workgroup {compiled:?} but the host asked for {threads}"
+            )));
+        }
+        let grid = [grid_x, grid_y, 1];
         if !self.profile.load(Ordering::Relaxed) {
-            unsafe { kernel.launch_2d(grid_x, grid_y, threads, args) }?;
+            unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
             return Ok(());
         }
-        device().synchronize()?;
+        stream.synchronize()?;
         let began = std::time::Instant::now();
-        unsafe { kernel.launch_2d(grid_x, grid_y, threads, args) }?;
-        device().synchronize()?;
+        unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
+        stream.synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
         Ok(())
     }
@@ -331,8 +349,8 @@ impl Session {
         }
         // Cleared first: a failed upload must not leave the tables claimed.
         *resident = None;
-        device().write(self.buffers.cos.ptr(), cos)?;
-        device().write(self.buffers.sin.ptr(), sin)?;
+        device().write(self.buffers.cos.binding(), cos)?;
+        device().write(self.buffers.sin.binding(), sin)?;
         *resident = Some(fingerprint);
         Ok(())
     }
@@ -342,7 +360,7 @@ impl Session {
         if !self.profile.load(Ordering::Relaxed) {
             return None;
         }
-        let _ = device().synchronize();
+        let _ = stream.synchronize();
         Some(std::time::Instant::now())
     }
 
@@ -351,7 +369,7 @@ impl Session {
         let Some(began) = began else {
             return Ok(());
         };
-        device().synchronize()?;
+        stream.synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
         Ok(())
     }
@@ -421,14 +439,14 @@ impl Session {
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
-        device().write(self.buffers.x.ptr(), x)?;
-        device().write(self.buffers.mods.ptr(), mods)?;
+        device().write(self.buffers.x.binding(), x)?;
+        device().write(self.buffers.mods.binding(), mods)?;
         self.upload_rope(cos, sin)?;
         for index in first_block..first_block + count {
-            self.block(index, self.buffers.mods.ptr())?;
+            self.block(index, self.buffers.mods.binding())?;
         }
-        device().synchronize()?;
-        device().read(x, self.buffers.x.ptr())?;
+        stream.synchronize()?;
+        device().read(x, self.buffers.x.binding())?;
         self.report(count);
         Ok(())
     }
@@ -462,7 +480,7 @@ impl Session {
         }
         // Into the session's own buffer, whose headroom rows are already zero.
         device().copy_device_to_device(
-            self.buffers.x.ptr(),
+            self.buffers.x.binding(),
             x,
             tokens * HIDDEN as usize * 2,
         )?;
@@ -475,7 +493,7 @@ impl Session {
         self.report(self.layers);
         device().copy_device_to_device(
             x,
-            self.buffers.x.ptr(),
+            self.buffers.x.binding(),
             tokens * HIDDEN as usize * 2,
         )?;
         Ok(())
@@ -483,29 +501,27 @@ impl Session {
 
     /// This block's slice of the modulation tables: prescale, preshift,
     /// pregate, postscale, postshift, postgate, each 6144 floats.
-    fn modulation(&self, mods: DevicePtr, index: usize, part: usize) -> DevicePtr {
-        let stride = 6 * HIDDEN as usize * 4;
-        mods.offset(index * stride + part * HIDDEN as usize * 4)
+    fn modulation<'a>(&self, mods: View<'a>, index: usize, part: usize) -> Result<View<'a>> {
+        let row = HIDDEN as usize * 4;
+        let stride = 6 * row;
+        mods.slice(index * stride + part * row, row).map_err(Error::from)
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn gemm(
         &self,
+        stream: &mut Stream,
         kernel: &hrx::Kernel,
         stage: &'static str,
-        weights: DevicePtr,
-        scales: DevicePtr,
+        weights: View<'_>,
+        scales: View<'_>,
         n: i32,
-        out: DevicePtr,
-        gate: Option<DevicePtr>,
+        out: View<'_>,
+        gate: Option<View<'_>>,
     ) -> Result<()> {
-        let mut args = Args::new();
-        args.i32(self.tokens as i32)
-            .ptr(self.buffers.a_q.ptr())
-            .ptr(weights)
-            .ptr(scales)
-            .ptr(self.buffers.a_s.ptr())
-            .ptr(out);
+        let scalars = Scalars::new().index(self.tokens as i32);
+        let bindings = [self.buffers.a_q.binding(), weights, scales, self.buffers.a_s.binding(), out];
         if let Some(gate) = gate {
             args.ptr(gate);
         }
@@ -517,19 +533,13 @@ impl Session {
         self.launch(kernel, stage, (n / 128) as u32, grid_y as u32, THREADS, &args)
     }
 
-    fn block(&self, index: usize, mods: DevicePtr) -> Result<()> {
+    fn block(&self, stream: &mut Stream, index: usize, mods: View<'_>) -> Result<()> {
         let block = &self.blocks[index];
         let tokens = self.tokens as i32;
         let b = &self.buffers;
 
-        let mut norm = Args::new();
-        norm.i32(tokens)
-            .ptr(b.x.ptr())
-            .ptr(block.prenorm)
-            .ptr(self.modulation(mods, index, 0))
-            .ptr(self.modulation(mods, index, 1))
-            .ptr(b.a_q.ptr())
-            .ptr(b.a_s.ptr());
+        let norm_scalars = Scalars::new().index(tokens);
+        let norm = [b.x.binding(), block.prenorm, self.modulation(mods, index, 0)?, self.modulation(mods, index, 1)?, b.a_q.binding(), b.a_s.binding()];
         self.launch(&self.kernels.prepare_norm, "prepare", tokens as u32, 1, THREADS, &norm)?;
 
         self.gemm(
@@ -538,20 +548,12 @@ impl Session {
             block.qkvg_q,
             block.qkvg_s,
             QKVG,
-            b.fused.ptr(),
+            b.fused.binding(),
             None,
         )?;
 
-        let mut rope = Args::new();
-        rope.i32(tokens)
-            .ptr(b.fused.ptr())
-            .ptr(block.qnorm)
-            .ptr(block.knorm)
-            .ptr(b.cos.ptr())
-            .ptr(b.sin.ptr())
-            .ptr(b.q.ptr())
-            .ptr(b.k.ptr())
-            .ptr(b.v.ptr());
+        let rope_scalars = Scalars::new().index(tokens);
+        let rope = [b.fused.binding(), block.qnorm, block.knorm, b.cos.binding(), b.sin.binding(), b.q.binding(), b.k.binding(), b.v.binding()];
         self.launch(&self.kernels.rope, "qk norm + rope", tokens as u32, 1, THREADS, &rope)?;
 
         match &self.sage {
@@ -561,19 +563,10 @@ impl Session {
             Some(sage) => {
                 // Six launches, so it is timed as one stage rather than each.
                 let preparing = self.timed();
-                sage.run(b.q.ptr(), b.k.ptr(), b.v.ptr())?;
+                sage.run(b.q.binding(), b.k.binding(), b.v.binding())?;
                 self.record("SA2 preprocessing", preparing)?;
-                let mut attention = Args::new();
-                attention
-                    .i32(tokens)
-                    .i32(KV_HEADS)
-                    .ptr(sage.q4.ptr())
-                    .ptr(sage.k4.ptr())
-                    .ptr(sage.v_transposed.ptr())
-                    .ptr(sage.q_scale.ptr())
-                    .ptr(sage.k_scale.ptr())
-                    .ptr(sage.correction.ptr())
-                    .ptr(b.attn.ptr());
+                let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS);
+                let attention = [sage.q4.binding(), sage.k4.binding(), sage.v_transposed.binding(), sage.q_scale.binding(), sage.k_scale.binding(), sage.correction.binding(), b.attn.binding()];
                 let waves = self.metadata.attention_waves as i32;
                 let rows = 16 * (waves / 4);
                 self.launch(
@@ -589,8 +582,8 @@ impl Session {
             None => {
                 let values = match (&b.v_transposed, &self.kernels.attention_transpose) {
                     (Some(transposed), Some(kernel)) => {
-                        let mut args = Args::new();
-                        args.i32(tokens).ptr(b.v.ptr()).ptr(transposed.ptr());
+                        let scalars = Scalars::new().index(tokens);
+                        let bindings = [b.v.binding(), transposed.binding()];
                         self.launch(
                             kernel,
                             "f16 V transpose",
@@ -599,17 +592,12 @@ impl Session {
                             256,
                             &args,
                         )?;
-                        transposed.ptr()
+                        transposed.binding()
                     }
-                    _ => b.v.ptr(),
+                    _ => b.v.binding(),
                 };
-                let mut attention = Args::new();
-                attention
-                    .i32(tokens)
-                    .ptr(b.q.ptr())
-                    .ptr(b.k.ptr())
-                    .ptr(values)
-                    .ptr(b.attn.ptr());
+                let attention_scalars = Scalars::new().index(tokens);
+                let attention = [b.q.binding(), b.k.binding(), values, b.attn.binding()];
                 let rows = 16 * self.metadata.fp16_query_tiles as i32;
                 self.launch(
                     &self.kernels.attention,
@@ -622,13 +610,8 @@ impl Session {
             }
         }
 
-        let mut gated = Args::new();
-        gated
-            .i32(tokens)
-            .ptr(b.attn.ptr())
-            .ptr(b.fused.ptr().offset(GATE_OFFSET as usize * 2))
-            .ptr(b.a_q.ptr())
-            .ptr(b.a_s.ptr());
+        let gated_scalars = Scalars::new().index(tokens);
+        let gated = [b.attn.binding(), b.fused.binding().offset(GATE_OFFSET as usize * 2), b.a_q.binding(), b.a_s.binding()];
         self.launch(
             &self.kernels.prepare_gated,
             "prepare gated",
@@ -644,18 +627,12 @@ impl Session {
             block.wo_q,
             block.wo_s,
             HIDDEN,
-            b.x.ptr(),
-            Some(self.modulation(mods, index, 2)),
+            b.x.binding(),
+            Some(self.modulation(mods, index, 2)?),
         )?;
 
-        let mut post = Args::new();
-        post.i32(tokens)
-            .ptr(b.x.ptr())
-            .ptr(block.postnorm)
-            .ptr(self.modulation(mods, index, 3))
-            .ptr(self.modulation(mods, index, 4))
-            .ptr(b.a_q.ptr())
-            .ptr(b.a_s.ptr());
+        let post_scalars = Scalars::new().index(tokens);
+        let post = [b.x.binding(), block.postnorm, self.modulation(mods, index, 3)?, self.modulation(mods, index, 4)?, b.a_q.binding(), b.a_s.binding()];
         self.launch(&self.kernels.prepare_norm, "prepare", tokens as u32, 1, THREADS, &post)?;
 
         self.gemm(
@@ -664,12 +641,12 @@ impl Session {
             block.gu_q,
             block.gu_s,
             2 * INTER,
-            b.gu.ptr(),
+            b.gu.binding(),
             None,
         )?;
 
-        let mut swiglu = Args::new();
-        swiglu.i32(tokens).ptr(b.gu.ptr()).ptr(b.a_q.ptr()).ptr(b.a_s.ptr());
+        let swiglu_scalars = Scalars::new().index(tokens);
+        let swiglu = [b.gu.binding(), b.a_q.binding(), b.a_s.binding()];
         self.launch(
             &self.kernels.prepare_swiglu,
             "prepare swiglu",
@@ -685,8 +662,8 @@ impl Session {
             block.down_q,
             block.down_s,
             HIDDEN,
-            b.x.ptr(),
-            Some(self.modulation(mods, index, 5)),
+            b.x.binding(),
+            Some(self.modulation(mods, index, 5)?),
         )?;
         Ok(())
     }
