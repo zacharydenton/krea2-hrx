@@ -13,4 +13,4 @@ strip = true
 [workspace.dependencies]
 # 0.2.0 is not on crates.io yet, so this pins the revision rather than the
 # version. Move back to a plain registry dependency once it is published.
-hrx = { package = "hrx-rs", git = "https://github.com/zacharydenton/hrx-rs", rev = "f1b62a9", default-features = false, features = ["download", "loom"] }
+hrx = { package = "hrx-rs", git = "https://github.com/zacharydenton/hrx-rs", rev = "67538b0", default-features = false, features = ["download", "loom"] }

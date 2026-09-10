@@ -21,9 +21,13 @@ completion. Profiling and progress callbacks add explicit waits when needed.
 
 Tensor storage returns to the model's pool when its final owner is dropped.
 This pool is intentional: HRX's `Stream::recycle` needs mutable stream access,
-which tensor destructors do not have. Buffers are bound to their device, so a
-pooled block is usable from any stream on it; ordering conflicting access
-between streams is the caller's job, with `record_event`/`wait_event`.
+which tensor destructors do not have. One pool serves one stream, and refuses
+another. Buffers are device-scoped, so HRX permits a block on any stream and
+`record_event`/`wait_event` order that use — but a pooled block returns to the
+free list while the work reading it is still queued, and reissuing it is safe
+only because the stream that runs that work also runs whatever writes it next.
+Across streams there is no such order, and no event can impose one on a reuse
+already handed out.
 
 The compiler and runtime come from HRX's public, verified native bundle:
 

@@ -15,14 +15,24 @@ const LIMIT: usize = 512 << 20;
 struct FreeList {
     cached: usize,
     blocks: BTreeMap<usize, Vec<Buffer>>,
+    /// The stream every block here came from, once one has. See [`Pool`].
+    stream: Option<usize>,
 }
 
 /// A source of device buffers that reuses what it has been given back.
 ///
-/// Buffers belong to their device, not to the stream that allocated them, so
-/// any stream on that device may use one and the pool polices no identity of
-/// its own. It exists because `Stream::recycle` needs a mutable stream, which
-/// a tensor destructor does not have.
+/// It exists because `Stream::recycle` needs a mutable stream, which a tensor
+/// destructor does not have.
+///
+/// **One pool serves one stream.** A block goes back on the free list as soon
+/// as its last owner drops, which is typically while the work reading it is
+/// still queued. Reissuing it is safe only because the stream that runs that
+/// work also runs whatever writes it next, in that order. Across streams there
+/// is no such order, and the second stream would overwrite bytes the first has
+/// not finished with -- events can order cross-stream *use*, but not reuse the
+/// pool has already handed out. Buffers themselves are device-scoped and HRX
+/// will not object, so the pool keeps this invariant itself: it records the
+/// stream it first served and refuses another.
 #[derive(Default)]
 pub struct Pool {
     free: Mutex<FreeList>,
@@ -38,6 +48,17 @@ impl Pool {
     /// from returning a 100 MB block for a 1 KB tensor.
     fn take(self: &Arc<Self>, stream: &Stream, bytes: usize) -> Result<Pooled> {
         let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
+        match free.stream {
+            Some(owner) if owner != stream.id() => {
+                return Err(Error(
+                    "a buffer pool serves one stream: reuse is ordered by the queue that \
+                     last used the block, and another stream is not in that order"
+                        .into(),
+                ))
+            }
+            Some(_) => {}
+            None => free.stream = Some(stream.id()),
+        }
         let reusable = free
             .blocks
             .range_mut(bytes..)
@@ -319,6 +340,29 @@ mod tests {
         // allocation mapped and the binding valid.
         drop(buffer);
         assert_eq!(view.binding().expect("a binding").len(), 32);
+    }
+
+    /// The hazard device-scoped buffers opened up: a block returns to the free
+    /// list while the work using it is still queued, so reissuing it to a
+    /// second stream races the first. HRX will not object -- the buffer belongs
+    /// to the device -- so the pool has to.
+    #[test]
+    #[ignore = "requires gfx1151 and provisioned HRX"]
+    fn a_pool_refuses_a_second_stream_rather_than_racing_it() {
+        let device = hrx::Device::open(0).expect("a device");
+        let first = device.stream().expect("first stream");
+        let second = device.stream().expect("second stream");
+        let pool = Pool::new();
+
+        let tensor = Tensor::new(&pool, &first, 16, 16).expect("a tensor");
+        drop(tensor); // back on the free list, possibly with work still queued
+
+        let Err(error) = Tensor::new(&pool, &second, 16, 16) else {
+            panic!("a second stream must not be handed the recycled block");
+        };
+        assert!(error.0.contains("serves one stream"), "{}", error.0);
+        // The stream it does serve is unaffected.
+        assert!(Tensor::new(&pool, &first, 16, 16).is_ok());
     }
 
     #[test]
