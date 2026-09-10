@@ -45,7 +45,7 @@ krea2 --width 1504 --height 640 --seed 9 --out canyon.png \
   resident. The transformer checkpoint alone is about 13 GB.
 
 Builds, tests, and model execution use Rust. Kernel sources are maintained directly
-in `crates/kernels/kernels`. See the [runtime guide](docs/hrx-runtime.md) for deployment
+in `kernels`. See the [runtime guide](docs/hrx-runtime.md) for deployment
 and [native tests](docs/testing.md) for validation.
 
 ## Install
@@ -118,7 +118,7 @@ lists all options. `KREA2_NATIVE_PROFILE=1` enables diagnostic stage timings.
 
 ## Libraries
 
-A checkout build produces `build/krea2`. The workspace crates are the interface:
+A checkout build produces `build/krea2`. The library is the interface:
 `krea2-pipeline` for prompt-to-RGB generation and the individual pipeline
 components, `krea2-session` for resident transformer block sessions. Both are
 ordinary Rust libraries, usable as a git dependency.
@@ -162,5 +162,5 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for builds, tests and benchmark requireme
 ## License
 
 Project code is [MIT licensed](LICENSE). The bundled Qwen tokenizer has its
-[own attribution and Apache-2.0 license](crates/tokenizer/assets/README.md). Model weights are
+[own attribution and Apache-2.0 license](assets/README.md). Model weights are
 separate downloads governed by their upstream licenses.

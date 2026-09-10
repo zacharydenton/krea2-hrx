@@ -31,7 +31,7 @@ onto the ComfyUI key names, with no kernel of ours involved.
 `forward` is one transformer evaluation on the fixture's noise and conditioning, which is the
 measurement to prefer: nothing accumulates, so the number is the arithmetic and nothing else.
 `trajectory` runs the fixture's full schedule with the Euler rounding of
-`crates/loom/kernels/native/euler.loom`, for an image.
+`kernels/native/euler.loom`, for an image.
 
 Measured this way at 1024x1024 on the pinned fixture, one forward, everything on the GPU:
 

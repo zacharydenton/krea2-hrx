@@ -19,9 +19,9 @@ Qwen3-VL-4B encodes the prompt; Qwen-Image VAE decodes the resulting latents.
 | `krea2-models` | Model discovery, text encoder, outer transformer graph and VAE |
 | `krea2-pipeline` | Conditioning, noise, scheduling and image generation |
 
-`cli/` provides argument handling and image output. `crates/kernels/kernels/`
+`cli/` provides argument handling and image output. `kernels/`
 contains the checked-in Loom sources, which are authoritative since their
-generators were retired. `crates/tokenizer/assets/tokenizer.json` is embedded
+generators were retired. `assets/tokenizer.json` is embedded
 and read by the Rust `tokenizers` crate.
 
 ## Transformer
@@ -39,7 +39,7 @@ The int4 kernel family remains available for experiments.
 
 Operand rows with an 8192-byte pitch receive padding to avoid cache aliasing.
 The upload plan, kernel configuration and launch metadata must agree on the
-pitch. Shape rules live in `crates/kernels/src/shape.rs`, pinned by its own tests. The
+pitch. Shape rules live in `src/kernels/shape.rs`, pinned by its own tests. The
 Python kernel builder that once mirrored them, and the parity test between the
 two, were retired with that layer.
 

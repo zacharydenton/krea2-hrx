@@ -1,7 +1,7 @@
 # Shared HRX runtime
 
 Krea uses [`hrx-rs`](https://crates.io/crates/hrx-rs) 0.2.0 from crates.io.
-The workspace renames it to `hrx`, so call sites read `hrx::`.
+The manifest renames it to `hrx`, so call sites read `hrx::`.
 Its features are explicit and `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
@@ -34,7 +34,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 ```sh
 cargo install --locked hrx-rs --version 0.2.0 --features runner
 hrx prepare
-cargo build --release --workspace
+cargo build --release
 ```
 
 For local HRX development, use an ignored `.cargo/config.toml`:
@@ -60,8 +60,8 @@ operation sets retain loaded kernels for their lifetime; there is no global
 loaded-kernel cache holding model resources after teardown. Artifacts load from
 owned bytes without a compiler subprocess or an extra filesystem round trip.
 
-Kernel sources live in `crates/kernels/kernels`; tokenizer assets live in
-`crates/tokenizer/assets`. Generators and tests use these paths directly.
+Kernel sources live in `kernels`; tokenizer assets live in
+`assets`. Generators and tests use these paths directly.
 Package builds carry the same assets without depending on files outside the package.
 
 H3, Krea and kernel test libraries can coexist: HRX initializes under an OS lock
@@ -70,7 +70,7 @@ globally shuts it down on model teardown.
 
 ## Interface
 
-The workspace crates are the interface. `krea2-pipeline` and `krea2-session` are
+The library is the interface. `krea2::pipeline` and `krea2::session` are
 ordinary Rust libraries and consuming applications depend on them directly; an
 Elixir application wraps `krea2_pipeline::Pipeline` with Rustler. There is no C
 ABI, no generated header and no error-buffer protocol: arguments are Rust types,
@@ -93,10 +93,10 @@ crossing a 16 MiB boundary, gathered and padded weights, pooled storage, and
 numerical operations. Repeat them with:
 
 ```sh
-HRX_OFFLINE=1 cargo test -p krea2-kernels --test dispatch -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo test -p krea2-session --test uploads -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo test -p krea2-ops -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo run --release -p krea2-kernels --example dispatch_cost
+HRX_OFFLINE=1 cargo test --test dispatch -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo test --test uploads -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo test -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo run --release --example dispatch_cost
 ```
 
 On Ryzen AI MAX+ 395 / gfx1151 with Rust 1.95 nightly and hrx-rs 0.1.0, three

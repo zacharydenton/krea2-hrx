@@ -60,8 +60,8 @@ against 569 ms with blocking downloads. That configuration showed no improvement
 it does not set a general limit on transfer overlap.
 
 ```sh
-cargo run --release -p krea2-kernels --example dispatch_cost
-cargo test --release -p krea2-session --lib -- --ignored --nocapture \
+cargo run --release --example dispatch_cost
+cargo test --release --lib -- --ignored --nocapture \
   the_declared_concurrency_is_priced_against_a_chain \
   two_independent_block_prefixes_are_priced_against_a_chain
 ```

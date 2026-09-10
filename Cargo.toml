@@ -1,14 +1,34 @@
-[workspace]
-resolver = "2"
-members = ["cli", "crates/kernels", "crates/tokenizer", "crates/numerics", "crates/checkpoint", "crates/session", "crates/ops", "crates/models", "crates/pipeline"]
-
-[workspace.package]
+[package]
+name = "krea2"
+version = "0.1.0"
 edition = "2021"
+description = "Krea 2 image generation on one Radeon 8060S, through HRX and Loom"
 license = "MIT"
 publish = false
 
 [profile.release]
 strip = true
 
-[workspace.dependencies]
+[dependencies]
 hrx = { package = "hrx-rs", version = "0.2.0", default-features = false, features = ["download", "loom"] }
+
+anyhow = "1"
+bytemuck = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+hf-hub = { version = "1.0", default-features = false, features = ["blocking", "rustls-tls"] }
+memmap2 = "0.9"
+png = "0.17"
+rand = "0.9"
+rand_chacha = "0.9"
+rand_distr = "0.5"
+safetensors = "0.8"
+# default-features = false keeps this pure Rust: fancy-regex instead of the
+# oniguruma C library, and no progress bars or HTTP.
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+# An independent implementation of the same rounding, for the oracle tests only.
+half = { version = "2", features = ["bytemuck"] }
+serde_json = "1"
+tempfile = "3"

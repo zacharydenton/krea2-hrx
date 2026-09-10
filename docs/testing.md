@@ -1,21 +1,21 @@
 # Native test coverage
 
-Run `scripts/test.sh --cpu` for formatting, Clippy and workspace tests;
+Run `scripts/test.sh --cpu` for formatting, Clippy and CPU tests;
 `scripts/test.sh --gpu` also runs the explicitly ignored gfx1151 tests. GPU tests
 use the same HRX compiler/cache and runtime as inference. Missing prerequisites
 are errors when GPU tests are requested. There is no Python environment.
 
 | Coverage | Rust location |
 | --- | --- |
-| BF16 ties, NaNs and conversion boundaries | `crates/numerics` |
-| All 36,050 Turbo/Raw sigma values from Diffusers, including the 589-token rounding regression | `crates/pipeline/tests/schedule.rs` and immutable `fixtures/sigmas.f32le` |
-| Exact BF16 Euler and guidance arithmetic; activations, broadcast, normalization and fused SiLU | `crates/ops/tests/arithmetic.rs` |
-| Dense matmul, bias, ragged tiles, convolution layouts, grouped/causal attention, rotary embedding and upsampling | `crates/ops/tests/arithmetic.rs` |
-| Repeated resident softmax, including causal masking and non-tile-aligned lengths | `crates/ops/tests/softmax_repeat.rs` |
-| INT4/INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `crates/kernels/tests/quantized.rs` |
-| Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `crates/kernels/tests/quantized.rs` |
-| Shared compiled artifact identity, allocation bounds and native library loading | `crates/kernels/tests/dispatch.rs` |
-| Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `crates/session/tests/constructor.rs` |
+| BF16 ties, NaNs and conversion boundaries | `src/numerics` |
+| All 36,050 Turbo/Raw sigma values from Diffusers, including the 589-token rounding regression | `tests/schedule.rs` and immutable `fixtures/sigmas.f32le` |
+| Exact BF16 Euler and guidance arithmetic; activations, broadcast, normalization and fused SiLU | `tests/arithmetic.rs` |
+| Dense matmul, bias, ragged tiles, convolution layouts, grouped/causal attention, rotary embedding and upsampling | `tests/arithmetic.rs` |
+| Repeated resident softmax, including causal masking and non-tile-aligned lengths | `tests/softmax_repeat.rs` |
+| INT4/INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `tests/quantized.rs` |
+| Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `tests/quantized.rs` |
+| Shared compiled artifact identity, allocation bounds and native library loading | `tests/dispatch.rs` |
+| Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `tests/constructor.rs` |
 
 Checked-in Loom source is authoritative. The former Python generators, model
 wrappers, benchmark orchestration and reference implementations are retired.
@@ -33,7 +33,7 @@ not another quantized implementation. Run it explicitly:
 scripts/parity.sh
 ```
 
-This invokes `crates/pipeline/tests/unquantized_parity.rs`. The reference is the
+This invokes `tests/unquantized_parity.rs`. The reference is the
 official `krea/Krea-2-Turbo` diffusers repository loaded with `from_pretrained`,
 run **on the CPU** at 1024×1024, seed 0, eight steps, guidance 0. Nothing in this
 repository interprets the checkpoint on that path: the pipeline, transformer,
@@ -98,7 +98,7 @@ regress; the measuring stick moved onto firmer ground.
 The default fixture directory is `build/quality`; `KREA2_QUALITY_FIXTURE` can point
 to another copy of the same frozen fixture. `KREA2_CHECKPOINT` selects the native
 candidate's checkpoint. Missing fixtures or weights fail explicitly. Reference
-file hashes are pinned in `crates/pipeline/tests/fixtures/unquantized.json`; the
+file hashes are pinned in `tests/fixtures/unquantized.json`; the
 runner never creates or updates its own ground truth. The test needs no Python,
 NumPy or Torch.
 
