@@ -7,7 +7,7 @@ The library exposes the same choice through `PipelineOptions`.
 Auto is the default. Without a matching, passing local qualification it uses the
 GPU without opening an NPU or compiling a kernel. `gpu` forces the existing
 implementation. `npu` requires a verified compiled artifact and reports errors;
-it bypasses the performance gate for explicit qualification. Device execution
+it bypasses the qualification gates for explicit measurement. Device execution
 errors propagate once offload starts.
 
 Build with `--no-default-features` to omit NPU support. Such a build accepts Auto
@@ -21,7 +21,8 @@ BFP16 emulation. The checked-in IRON generator and tile sources are in
 `native/npu`; their upstream attribution and license are beside them. Chess and
 its license are supplied separately.
 
-The generator uses a 4-column XDNA2 array with 64×64×32 tiles. M is padded to a
+The generator uses a 4-column XDNA2 array with 64×64×32 tiles. Wide outputs
+use one row block per DMA transfer to stay within the descriptor stride limit. M is padded to a
 multiple of 512; K must be divisible by 64 and N by 128. Unsupported shapes use
 GPU in Auto mode. Each specialization retains resident NPU weights, shared
 input/F32 output, a GPU epilogue and one prepared HRX graph. Input and output
@@ -85,3 +86,31 @@ Qualification is checked when a shape first enters a pipeline's cache. Restart
 the pipeline after changing profiles or power configuration. Read
 `Pipeline::fusion_selection()` for the selected backend or fallback reason; the
 CLI prints it after generation unless `--quiet` is set.
+
+## Measured result: keep GPU
+
+On 2026-09-10, the Turbo fixture's 228×2560→6912 projection failed qualification:
+
+| Completed stage | GPU | Chess NPU + GPU epilogue |
+| --- | ---: | ---: |
+| Median of five process medians | 1.588 ms | 14.488 ms |
+| Median of five process p95 values | 3.679 ms | 17.975 ms |
+
+The isolated projection passed the scalar f64 oracle and changed-input replay
+checks. Tracked residency was 55,332,352 bytes, with no new HRX allocations or
+imports during replay. This implementation nevertheless misses the latency gate
+by a wide margin.
+
+The full-model NPU run increased latent relative-RMS loss by 0.429612 dB against
+the accepted baseline, exceeding the 0.1 dB limit. Image PSNR improved by
+0.119227 dB, which does not excuse failure of the separate latent gate. The first
+warm generation pair measured 42.922 s on GPU and 46.386 s with the NPU pilot.
+Qualification stopped at the quality failure, so this is one pair, not a completed
+five-process end-to-end timing comparison. No Auto profile was published.
+
+[Raw measurements and identities](benchmarks/npu-fusion-2026-09-10.json) retain
+the stage samples, first generation pair, artifact hashes and reference hashes.
+These results describe the checked-in four-column pilot, not peak NPU capability.
+First use also hashes the full checkpoint when considering an eligible profile;
+on the local USB filesystem that read took minutes. Auto without an eligible
+profile avoids that read and keeps the existing GPU operation.

@@ -166,6 +166,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for builds, tests and benchmark requireme
 
 ## License
 
-Project code is [MIT licensed](LICENSE). The bundled Qwen tokenizer has its
+Rust and Loom code is [MIT licensed](LICENSE). The NPU generator and tile
+sources use [Apache-2.0 WITH LLVM-exception](native/npu/NOTICE.md). Chess is
+installed separately and is not redistributed. The bundled Qwen tokenizer has its
 [own attribution and Apache-2.0 license](assets/README.md). Model weights are
 separate downloads governed by their upstream licenses.
