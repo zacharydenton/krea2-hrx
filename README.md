@@ -54,8 +54,7 @@ From this checkout. The shared runtime is a pinned dependency, so no sibling
 checkout is needed to build; the `hrx` runner is what stages the native bundle:
 
 ```sh
-cargo install --locked --git https://github.com/zacharydenton/hrx-rs \
-  --rev 6f5979fa3f0956e7390bb4de125dfef18857210b --features runner,npu hrx-rs
+cargo install --locked --version 0.4.0 --features runner,npu hrx-rs
 hrx prepare
 cargo install --locked --path .
 ```

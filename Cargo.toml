@@ -14,7 +14,7 @@ default = ["npu"]
 npu = ["hrx/npu-compile"]
 
 [dependencies]
-hrx = { package = "hrx-rs", git = "https://github.com/zacharydenton/hrx-rs", rev = "6f5979fa3f0956e7390bb4de125dfef18857210b", default-features = false, features = ["download", "loom"] }
+hrx = { package = "hrx-rs", version = "0.4.0", default-features = false, features = ["download", "loom"] }
 
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }

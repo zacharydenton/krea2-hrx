@@ -1,7 +1,7 @@
 # Shared HRX runtime
 
-Krea pins a Git revision of [`hrx-rs`](https://github.com/zacharydenton/hrx-rs)
-for keyed kernel requests, the coordinated graph API and NPU integration.
+Krea uses [`hrx-rs` 0.4](https://crates.io/crates/hrx-rs) for keyed kernel
+requests, the coordinated graph API and NPU integration.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
 Its features are explicit and `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
@@ -33,8 +33,7 @@ already handed out.
 The compiler and runtime come from HRX's public, verified native bundle:
 
 ```sh
-cargo install --locked --git https://github.com/zacharydenton/hrx-rs \
-  --rev 6f5979fa3f0956e7390bb4de125dfef18857210b --features runner,npu hrx-rs
+cargo install --locked --version 0.4.0 --features runner,npu hrx-rs
 hrx prepare
 cargo build --release
 ```
@@ -42,11 +41,11 @@ cargo build --release
 For local HRX development, use an ignored `.cargo/config.toml`:
 
 ```toml
-[patch."https://github.com/zacharydenton/hrx-rs"]
+[patch.crates-io]
 hrx-rs = { path = "../hrx.rs" }
 ```
 
-Cargo updates the lockfile for a path override. Restore the pinned Git dependency
+Cargo updates the lockfile for a path override. Restore the registry dependency
 before committing a lockfile generated with a local override.
 
 `HRX_RUNTIME_DIR` selects a trusted native directory and `HRX_OFFLINE=1` refuses
