@@ -1,6 +1,7 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs`](https://crates.io/crates/hrx-rs) 0.2.0 from crates.io.
+Krea pins a Git revision of [`hrx-rs`](https://github.com/zacharydenton/hrx-rs)
+for its caller-key kernel index, which is not yet in the crates.io release.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
 Its features are explicit and `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
@@ -40,11 +41,11 @@ cargo build --release
 For local HRX development, use an ignored `.cargo/config.toml`:
 
 ```toml
-[patch.crates-io]
+[patch."https://github.com/zacharydenton/hrx-rs"]
 hrx-rs = { path = "../hrx.rs" }
 ```
 
-Cargo updates the lockfile for a path override. Restore the registry dependency
+Cargo updates the lockfile for a path override. Restore the pinned Git dependency
 before committing a lockfile generated with a local override.
 
 `HRX_RUNTIME_DIR` selects a trusted native directory and `HRX_OFFLINE=1` refuses
@@ -53,6 +54,26 @@ else `$HOME/.cache/hrx`. `HRX_LOOM_LIBRARY` or an explicit model compiler argume
 selects a compiler override.
 
 Krea's shape/bundle metadata and model-specific operation builders remain here.
+
+Auxiliary dispatches use HRX's `KeyedKernels` with the kernel name, dimensions,
+grid and report setting as their key. Only a miss constructs a specialization
+and hashes the embedded source. HRX owns the key index and the artifact cache;
+different keys for the same artifact share one loaded executable. Failed
+requests remain retryable, and cache hits still check the device.
+
+On gfx1151 with HRX revision `cd64a45`, an optimized warm-lookup benchmark on
+2026-09-10 measured:
+
+| Kernel | HRX source lookup | Krea through HRX's key index |
+| --- | ---: | ---: |
+| Unary | 1,859 ns | 307 ns |
+| Wide GEMM | 37,547 ns | 532 ns |
+
+These are host lookup costs, not end-to-end inference timings. The source path
+already has its specialization constructed before timing; the keyed path
+includes Krea's request-key construction. Each figure is the median of nine
+samples after three warmups, with alternating measurement order. Reproduce with
+`cargo run --release --example kernel_lookup`.
 Both auxiliary and block compilation use the stream's target and `hrx::loom`.
 Compiler selection is cached by library and target. Its bounded module cache is
 kept across guidance shapes, avoiding repeated parsing and indexing. Prepared

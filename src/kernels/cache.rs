@@ -54,8 +54,18 @@ pub fn compiler_for_target(
 /// target to build for.
 #[derive(Default)]
 pub struct PreparedKernels {
-    loaded: Mutex<Option<hrx::loom::Kernels>>,
+    loaded: Mutex<Option<hrx::loom::KeyedKernels<RequestKey>>>,
     compiler: Option<String>,
+}
+
+/// The model inputs that determine an auxiliary specialization. HRX indexes
+/// these directly; expanding their strings and hashing source is miss-only.
+#[derive(Hash, PartialEq, Eq)]
+struct RequestKey {
+    name: String,
+    config: Config,
+    grid: (u32, u32),
+    report: bool,
 }
 
 impl PreparedKernels {
@@ -71,7 +81,12 @@ impl PreparedKernels {
         grid: (u32, u32),
     ) -> Result<Kernel> {
         let source = auxiliary_source(name)?;
-        let request = specialization(name, &config, grid);
+        let key = RequestKey {
+            name: name.to_owned(),
+            config,
+            grid: if name == "sage_transpose" { (0, 0) } else { grid },
+            report: super::kernel_reports(),
+        };
         let mut loaded =
             self.loaded.lock().map_err(|_| Error("operation cache poisoned".into()))?;
         let kernels = match &*loaded {
@@ -81,11 +96,17 @@ impl PreparedKernels {
                     self.compiler.as_deref(),
                     stream.target(),
                 )?)
-                .reporting(|artifact| super::report(artifact.symbol(), artifact)),
+                .reporting(|artifact| super::report(artifact.symbol(), artifact))
+                .keyed(),
             ),
         };
-        // Safety: the embedded model sources are checked into this repository.
-        Ok(unsafe { kernels.get(stream, source, &request) }?)
+        // Safety: source is embedded and immutable; the key includes every
+        // input used to select the source, specialization and report setting.
+        Ok(unsafe {
+            kernels.get_or_insert_with(stream, key, |key| {
+                Ok((source, specialization(&key.name, &key.config, key.grid, key.report)))
+            })
+        }?)
     }
 }
 
@@ -100,7 +121,12 @@ fn auxiliary_source(name: &str) -> Result<&'static str> {
 ///
 /// `grid_x` and `grid_y` join the configuration for every kernel but
 /// `sage_transpose`, which is written for any grid.
-fn specialization(name: &str, config: &Config, grid: (u32, u32)) -> hrx::loom::Specialization {
+fn specialization(
+    name: &str,
+    config: &Config,
+    grid: (u32, u32),
+    report: bool,
+) -> hrx::loom::Specialization {
     let mut config = config.clone();
     if name != "sage_transpose" {
         config.insert("grid_x".into(), u64::from(grid.0));
@@ -109,7 +135,7 @@ fn specialization(name: &str, config: &Config, grid: (u32, u32)) -> hrx::loom::S
     let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
     request.config =
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
-    request.report = super::kernel_reports();
+    request.report = report;
     request
 }
 
@@ -126,10 +152,10 @@ mod tests {
     #[test]
     fn the_grid_joins_the_configuration_except_where_the_kernel_takes_any() {
         let config = super::super::config([("tokens", 4115)]);
-        let joined = specialization("unary_one", &config, (7, 3));
+        let joined = specialization("unary_one", &config, (7, 3), false);
         assert_eq!(joined.config.get("krea2.unary_one.grid_x").map(String::as_str), Some("7"));
         assert_eq!(joined.symbol, "krea2_unary_one");
-        let any = specialization("sage_transpose", &config, (7, 3));
+        let any = specialization("sage_transpose", &config, (7, 3), false);
         assert!(!any.config.contains_key("krea2.sage_transpose.grid_x"));
     }
 }
