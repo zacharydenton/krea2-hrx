@@ -305,7 +305,14 @@ impl Cache {
             }
             let loaded = (|| -> Result<Pilot> {
                 let path = q::directory()?.join(format!("{}.json", shape.name()));
-                let record: Record = serde_json::from_slice(&fs::read(path)?)?;
+                let bytes = fs::read(path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Error::Message("no saved NPU qualification for this shape".into())
+                    } else {
+                        error.into()
+                    }
+                })?;
+                let record: Record = serde_json::from_slice(&bytes)?;
                 if backend == FusionBackend::Auto && !record.qualified() {
                     return Err(Error::Unsupported(
                         "no passing latency and quality qualification".into(),
