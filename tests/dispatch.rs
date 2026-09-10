@@ -1,7 +1,7 @@
 //! GPU dispatch, allocation-span and runtime-dependency checks.
 //! Requires HRX, a gfx1151 GPU and a compiler; run with --ignored.
 use hrx::Stream;
-use krea2::kernels::{auxiliary_kernel, config, Scalars};
+use krea2::kernels::{config, PreparedKernels, Scalars};
 
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
@@ -43,14 +43,9 @@ fn unary_one_writes_one_into_every_element() {
     stream.fill(y.binding(), 0).expect("zeroing the output");
 
     let grid = (COUNT.div_ceil(256) as u32, 1);
-    let kernel = auxiliary_kernel(
-        &stream,
-        "unary_one",
-        &config([("count_b", COUNT as u64)]),
-        grid,
-        None,
-    )
-    .expect("compiling unary_one");
+    let kernel = PreparedKernels::default()
+        .get(&stream, "unary_one", config([("count_b", COUNT as u64)]), grid)
+        .expect("compiling unary_one");
     let constants = Scalars::new().index(COUNT).pack("unary_one", &kernel).unwrap();
     let bindings = [x.binding(), y.binding()];
     // Safety: the kernel writes COUNT independent bf16 elements of `y`.
@@ -115,8 +110,10 @@ fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
     let mut request = hrx::loom::Specialization::new("krea2_euler");
     request.config.insert("krea2.euler.grid_x".into(), "4".into());
     request.config.insert("krea2.euler.grid_y".into(), "1".into());
-    auxiliary_kernel(&stream, "euler", &krea2::kernels::Config::new(), (4, 1), None).unwrap();
-    let directory = krea2::kernels::cache_root()
+    PreparedKernels::default()
+        .get(&stream, "euler", krea2::kernels::Config::new(), (4, 1))
+        .unwrap();
+    let directory = hrx::bundle::kernel_cache()
         .unwrap()
         .join(compiler.module(source).key(&request).unwrap());
     let artifact = directory.join("kernel.hsaco");

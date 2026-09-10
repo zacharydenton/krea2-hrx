@@ -1,10 +1,12 @@
-//! Auxiliary kernel cache, keyed by source and configuration, and the compiler
-//! selection it caches behind. HRX owns hashing, locking and artifact
-//! publication; this owns which kernel is wanted at which shape.
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+//! Which auxiliary kernel is wanted at which shape.
+//!
+//! HRX owns compilation, the artifact cache, the loaded-kernel cache and the
+//! compiler's own memoization. What is left here is the model's half: the
+//! embedded source for a name, the `krea2_` symbol and `krea2.<name>.` config
+//! spellings, and the grid that joins the configuration for every kernel but
+//! one.
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 use hrx::{Kernel, Stream};
@@ -22,26 +24,14 @@ pub fn compiler_for_target(
     override_path: Option<&str>,
     target: &hrx::Target,
 ) -> Result<hrx::loom::Compiler> {
-    type CompilerKey = (Option<String>, String);
-    static COMPILERS: Mutex<Option<HashMap<CompilerKey, hrx::loom::Compiler>>> =
-        Mutex::new(None);
-    let selected =
-        override_path.map(str::to_owned).or_else(|| std::env::var("HRX_LOOM_LIBRARY").ok());
-    let mut cache = COMPILERS.lock().map_err(|_| Error("compiler cache poisoned".into()))?;
-    let cache = cache.get_or_insert_with(HashMap::new);
-    let key = (selected.clone(), target.as_str().to_owned());
-    if let Some(compiler) = cache.get(&key) {
-        return Ok(compiler.clone());
-    }
     // The defaults are tuned for a small consumer: four workers, and room for
     // 64 source modules with arbitrary eviction. One shape needs about fifty
     // modules and guided sampling prepares two shapes, so raise the cache above
     // what a run can hold and let the compiler use the cores this box has.
     //
-    // `workers` now sizes HRX's own batch pool rather than one we ran, so
-    // KREA2_COMPILE_WORKERS is read once per (library, target) instead of once
-    // per prepare -- the compiler behind it is memoized. The cap stays: past
-    // eight, the per-specialization cache locks dominate.
+    // `workers` sizes HRX's own batch pool. The compiler behind it is memoized
+    // by HRX, so KREA2_COMPILE_WORKERS is read once per (library, target). The
+    // cap stays: past eight, the per-specialization cache locks dominate.
     let workers = match std::env::var("KREA2_COMPILE_WORKERS").ok().and_then(|v| v.parse().ok())
     {
         Some(n) => NonZeroUsize::new(n).unwrap_or(NonZeroUsize::MIN),
@@ -54,22 +44,17 @@ pub fn compiler_for_target(
         module_cache_capacity: 256,
         target: target.clone(),
     };
-    let compiler =
-        hrx::loom::Compiler::with_options(selected.as_deref().map(Path::new), options)?;
-    cache.insert(key, compiler.clone());
-    Ok(compiler)
+    Ok(hrx::loom::Compiler::shared(override_path.map(Path::new), options)?)
 }
 
-pub use hrx::bundle::digest;
-
-type Shapes = BTreeMap<Config, Kernel>;
-type Grids = BTreeMap<(u32, u32), Shapes>;
-
-/// Loaded operations owned by one model instance. Cache hits compare the
-/// existing configuration directly: no compiler lookup or signature formatting.
+/// Loaded operations owned by one model instance, released with it.
+///
+/// The cache itself is HRX's, keyed by the artifact each specialization
+/// compiles to. This holds the compiler selection until a stream names the
+/// target to build for.
 #[derive(Default)]
 pub struct PreparedKernels {
-    loaded: Mutex<HashMap<String, Grids>>,
+    loaded: Mutex<Option<hrx::loom::Kernels>>,
     compiler: Option<String>,
 }
 
@@ -85,28 +70,23 @@ impl PreparedKernels {
         config: Config,
         grid: (u32, u32),
     ) -> Result<Kernel> {
+        let source = auxiliary_source(name)?;
+        let request = specialization(name, &config, grid);
         let mut loaded =
             self.loaded.lock().map_err(|_| Error("operation cache poisoned".into()))?;
-        if let Some(kernel) = loaded
-            .get(name)
-            .and_then(|grids| grids.get(&grid))
-            .and_then(|shapes| shapes.get(&config))
-        {
-            return Ok(kernel.clone());
-        }
-        let kernel = auxiliary_kernel(stream, name, &config, grid, self.compiler.as_deref())?;
-        loaded
-            .entry(name.into())
-            .or_default()
-            .entry(grid)
-            .or_default()
-            .insert(config, kernel.clone());
-        Ok(kernel)
+        let kernels = match &*loaded {
+            Some(kernels) => kernels,
+            None => loaded.insert(
+                hrx::loom::Kernels::new(compiler_for_target(
+                    self.compiler.as_deref(),
+                    stream.target(),
+                )?)
+                .reporting(|artifact| super::report(artifact.symbol(), artifact)),
+            ),
+        };
+        // Safety: the embedded model sources are checked into this repository.
+        Ok(unsafe { kernels.get(stream, source, &request) }?)
     }
-}
-
-pub fn cache_root() -> Result<PathBuf> {
-    Ok(hrx::bundle::kernel_cache()?)
 }
 
 /// The embedded source for an auxiliary kernel, named in the error when there
@@ -116,34 +96,21 @@ fn auxiliary_source(name: &str) -> Result<&'static str> {
     sources::auxiliary(name).ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))
 }
 
-/// Compiles `name` for `config` if needed and returns the loaded kernel.
+/// The export and configuration one auxiliary kernel compiles from.
 ///
 /// `grid_x` and `grid_y` join the configuration for every kernel but
 /// `sage_transpose`, which is written for any grid.
-pub fn auxiliary_kernel(
-    stream: &Stream,
-    name: &str,
-    config: &Config,
-    grid: (u32, u32),
-    compiler_path: Option<&str>,
-) -> Result<Kernel> {
+fn specialization(name: &str, config: &Config, grid: (u32, u32)) -> hrx::loom::Specialization {
     let mut config = config.clone();
     if name != "sage_transpose" {
         config.insert("grid_x".into(), u64::from(grid.0));
         config.insert("grid_y".into(), u64::from(grid.1));
     }
-    let source = auxiliary_source(name)?;
-    let compiler = compiler_for_target(compiler_path, stream.target())?;
-    let symbol = format!("krea2_{name}");
-    let mut request = hrx::loom::Specialization::new(&symbol);
+    let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
     request.config =
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
     request.report = super::kernel_reports();
-    let artifact = compiler.module(source).compile(&request)?;
-    super::report(name, &artifact);
-    // Safety: the shared compiler produced this export from embedded model source.
-    let kernel = unsafe { stream.load_artifact(&artifact)? };
-    Ok(kernel)
+    request
 }
 
 #[cfg(test)]
@@ -154,5 +121,15 @@ mod tests {
     fn an_unknown_kernel_is_named_in_the_error() {
         let error = auxiliary_source("no_such_kernel").unwrap_err();
         assert_eq!(error.0, "no auxiliary kernel named no_such_kernel");
+    }
+
+    #[test]
+    fn the_grid_joins_the_configuration_except_where_the_kernel_takes_any() {
+        let config = super::super::config([("tokens", 4115)]);
+        let joined = specialization("unary_one", &config, (7, 3));
+        assert_eq!(joined.config.get("krea2.unary_one.grid_x").map(String::as_str), Some("7"));
+        assert_eq!(joined.symbol, "krea2_unary_one");
+        let any = specialization("sage_transpose", &config, (7, 3));
+        assert!(!any.config.contains_key("krea2.sage_transpose.grid_x"));
     }
 }
