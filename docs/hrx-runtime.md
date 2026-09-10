@@ -1,14 +1,15 @@
 # Shared HRX runtime
 
-Krea depends on the published [`hrx-rs`](https://crates.io/crates/hrx-rs) crate
-directly, renamed to `hrx` in the workspace `Cargo.toml` so call sites read
-`hrx::`. Its features are explicit and `Cargo.lock` pins the complete dependency
+Krea uses [`hrx-rs`](https://crates.io/crates/hrx-rs) 0.2.0 from crates.io.
+The manifest renames it to `hrx`, so call sites read `hrx::`.
+Its features are explicit and `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
 There is no link-time libhrx dependency or runtime rpath in the binary.
 
 Each pipeline owns an ordered stream. Block sessions and their tensor pools use
-that same stream; a standalone session uses its caller's stream. Calls sharing
+that same stream; a standalone session uses its caller's stream. Dispatches,
+fills and copies borrow the stream; transfers and waits need it mutably. Calls sharing
 one pipeline are serialized. Native command buffers retain recorded resources,
 so releasing an ordinary buffer does not wait for GPU execution.
 
@@ -20,14 +21,20 @@ completion. Profiling and progress callbacks add explicit waits when needed.
 
 Tensor storage returns to the model's pool when its final owner is dropped.
 This pool is intentional: HRX's `Stream::recycle` needs mutable stream access,
-which tensor destructors do not have. Keep a pool with its original stream.
+which tensor destructors do not have. One pool serves one stream, and refuses
+another. Buffers are device-scoped, so HRX permits a block on any stream and
+`record_event`/`wait_event` order that use — but a pooled block returns to the
+free list while the work reading it is still queued, and reissuing it is safe
+only because the stream that runs that work also runs whatever writes it next.
+Across streams there is no such order, and no event can impose one on a reuse
+already handed out.
 
 The compiler and runtime come from HRX's public, verified native bundle:
 
 ```sh
-cargo install --locked hrx-rs --features runner
+cargo install --locked hrx-rs --version 0.2.0 --features runner
 hrx prepare
-cargo build --release --workspace
+cargo build --release
 ```
 
 For local HRX development, use an ignored `.cargo/config.toml`:
@@ -38,10 +45,12 @@ hrx-rs = { path = "../hrx.rs" }
 ```
 
 Cargo updates the lockfile for a path override. Restore the registry dependency
-before committing that lockfile. `HRX_RUNTIME_DIR` selects a trusted native
-directory; `HRX_CACHE_DIR` selects the cache, and `HRX_OFFLINE=1` refuses network
-provisioning. `HRX_LOOM_LIBRARY` or an explicit model compiler argument selects
-a compiler override.
+before committing a lockfile generated with a local override.
+
+`HRX_RUNTIME_DIR` selects a trusted native directory and `HRX_OFFLINE=1` refuses
+network provisioning. The artifact cache follows XDG: `$XDG_CACHE_HOME/hrx`,
+else `$HOME/.cache/hrx`. `HRX_LOOM_LIBRARY` or an explicit model compiler argument
+selects a compiler override.
 
 Krea's shape/bundle metadata and model-specific operation builders remain here.
 Both auxiliary and block compilation use the stream's target and `hrx::loom`.
@@ -51,8 +60,8 @@ operation sets retain loaded kernels for their lifetime; there is no global
 loaded-kernel cache holding model resources after teardown. Artifacts load from
 owned bytes without a compiler subprocess or an extra filesystem round trip.
 
-Kernel sources live in `crates/kernels/kernels`; tokenizer assets live in
-`crates/tokenizer/assets`. Generators and tests use these paths directly.
+Kernel sources live in `kernels`; tokenizer assets live in
+`assets`. Generators and tests use these paths directly.
 Package builds carry the same assets without depending on files outside the package.
 
 H3, Krea and kernel test libraries can coexist: HRX initializes under an OS lock
@@ -61,7 +70,7 @@ globally shuts it down on model teardown.
 
 ## Interface
 
-The workspace crates are the interface. `krea2-pipeline` and `krea2-session` are
+The library is the interface. `krea2::pipeline` and `krea2::session` are
 ordinary Rust libraries and consuming applications depend on them directly; an
 Elixir application wraps `krea2_pipeline::Pipeline` with Rustler. There is no C
 ABI, no generated header and no error-buffer protocol: arguments are Rust types,
@@ -84,10 +93,10 @@ crossing a 16 MiB boundary, gathered and padded weights, pooled storage, and
 numerical operations. Repeat them with:
 
 ```sh
-HRX_OFFLINE=1 cargo test -p krea2-kernels --test dispatch -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo test -p krea2-session --test uploads -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo test -p krea2-ops -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo run --release -p krea2-kernels --example dispatch_cost
+HRX_OFFLINE=1 cargo test --test dispatch -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo test --test uploads -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo test -- --ignored --test-threads=1
+HRX_OFFLINE=1 cargo run --release --example dispatch_cost
 ```
 
 On Ryzen AI MAX+ 395 / gfx1151 with Rust 1.95 nightly and hrx-rs 0.1.0, three

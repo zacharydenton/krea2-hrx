@@ -38,7 +38,7 @@ The int4/int8 paths adapt Q/K smoothing from
 per-token scales and fp16 PV, so they are not an exact implementation of the
 upstream arithmetic.
 
-`crates/session/src/sage.rs` prepares each block:
+`src/session/sage.rs` prepares each block:
 
 1. Compute K's mean over the sequence, per head/channel.
 2. Center Q in 64-token groups, excluding padding from the means.
@@ -59,10 +59,10 @@ is an empirical choice on gfx1151.
 
 ## Validation
 
-- `crates/kernels/tests/quantized.rs`: production fp16 attention and quantized
+- `tests/quantized.rs`: production fp16 attention and quantized
   preparation against independent softmax and Hadamard references, including
   padded and partial tiles.
-- `crates/pipeline/tests/unquantized_parity.rs`, via `scripts/parity.sh`:
+- `tests/unquantized_parity.rs`, via `scripts/parity.sh`:
   complete latent and image trajectories against the unquantized BF16 model.
 
 The Python attention benchmarks were retired with the rest of that layer; the

@@ -40,7 +40,7 @@ here rather than existing only as files somebody once made.
 
     ./scripts/capture_reference.py reference           the ground truth: noise, text, bf16 latent and image
     ./scripts/capture_reference.py accept --latents F  mint a new accepted W8A8 baseline (deliberate)
-    ./scripts/capture_reference.py manifest            the hashes for crates/pipeline/tests/fixtures/unquantized.json
+    ./scripts/capture_reference.py manifest            the hashes for tests/fixtures/unquantized.json
 
 A `uv run` script: dependencies and the ROCm Torch index are in the header above and the
 resolution is pinned by capture_reference.py.lock, so there is no environment to set up.
@@ -426,7 +426,7 @@ def main() -> int:
     ap.add_argument("--reference-only", action="store_true",
                     help="manifest: pin only the reference before minting a fresh baseline")
     ap.add_argument("--manifest", type=Path,
-                    default=ROOT / "crates/pipeline/tests/fixtures/unquantized.json",
+                    default=ROOT / "tests/fixtures/unquantized.json",
                     help="manifest: destination (Rust override: KREA2_QUALITY_MANIFEST)")
     ap.add_argument("--note", default=None,
                     help="manifest: replace the provenance line describing the fixture")

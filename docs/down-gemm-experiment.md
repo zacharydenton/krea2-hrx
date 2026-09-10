@@ -2,8 +2,8 @@
 
 The original hand-written INT4 down-projection candidate is retired. Its
 256×128 tile and raster-tail shortening were incorporated into the GEMM family
-now checked in at `crates/loom/kernels/gemm_*.loom`, which is authoritative since
-its generator was retired; production selection follows `crates/kernels/src/shape.rs`.
+now checked in at `kernels/gemm_*.loom`, which is authoritative since
+its generator was retired; production selection follows `src/kernels/shape.rs`.
 
 Early resident-kernel trials reported 1.06–1.09× improvements under contention.
 A later contended run reversed the result, so those samples are not evidence
@@ -23,7 +23,7 @@ partial maximum with a partial sum while another wave still had an outstanding
 read. Maximum and sum reductions now use separate regions that are not
 rewritten after their final broadcasts. Reduction arithmetic is unchanged.
 
-`crates/ops/tests/softmax_repeat.rs` uses constant logits with exactly known
+`tests/softmax_repeat.rs` uses constant logits with exactly known
 probabilities to exercise repeated resident dispatch. The
 [recorded investigation](benchmarks/softmax-race-2026-09-06.json) includes
 failing and corrected runs.

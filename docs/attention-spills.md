@@ -46,10 +46,10 @@ absolute timings; compare candidates within a run.
 Reproduce a comparison with an original source file and the current kernel:
 
 ```sh
-git show f5c7c82:crates/kernels/kernels/attention_gqa_lds_f16_wmma.loom > before.loom
-cargo run --release -p krea2-kernels --example attention -- \
+git show f5c7c82:kernels/attention_gqa_lds_f16_wmma.loom > before.loom
+cargo run --release --example attention -- \
   4115 /tmp/attention-report before.loom \
-  crates/kernels/kernels/attention_gqa_lds_f16_wmma.loom
+  kernels/attention_gqa_lds_f16_wmma.loom
 ```
 
 The Rust example verifies exact output equality and writes each HSACO, compiler

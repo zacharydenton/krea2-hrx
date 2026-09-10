@@ -131,14 +131,6 @@ itoa
 konst
 konst_proc_macros
 krea2
-krea2-checkpoint
-krea2-kernels
-krea2-models
-krea2-numerics
-krea2-ops
-krea2-pipeline
-krea2-session
-krea2-tokenizer
 lazy_static
 libc
 libloading
