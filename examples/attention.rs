@@ -1,5 +1,5 @@
 //! Compare attention sources on identical inputs, retaining compiler reports and code.
-//! cargo run --release -p krea2-kernels --example attention -- TOKENS OUT_DIR SOURCE...
+//! cargo run --release --example attention -- TOKENS OUT_DIR SOURCE...
 use half::f16;
 use hrx::{Buffer, Constants, Stream};
 use std::{path::PathBuf, time::Instant};

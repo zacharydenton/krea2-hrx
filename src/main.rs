@@ -1,4 +1,4 @@
-//! Command-line interface, model discovery and image output for `krea2-pipeline`.
+//! Command-line interface, model discovery and image output for `krea2::pipeline`.
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;

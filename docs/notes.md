@@ -7,19 +7,19 @@ The hidden width is 6144, with 48 query heads, 12 key/value heads, head dimensio
 128 and SwiGLU width 16384. At 1024×1024 there are 4096 image tokens plus text.
 Qwen3-VL-4B encodes the prompt; Qwen-Image VAE decodes the resulting latents.
 
-| Crate | Responsibility |
+| Crate or module | Responsibility |
 | --- | --- |
 | `hrx` | Device, allocations, argument packing and dispatch |
-| `krea2-kernels` | Embedded kernel sources, the specializations they compile to and the launch shapes |
-| `krea2-checkpoint` | Safetensors mapping and block-weight upload plans |
-| `krea2-numerics` | bf16 and fp8 conversions |
-| `krea2-tokenizer` | Hugging Face tokenization and Krea's prompt template |
-| `krea2-ops` | Device tensors, allocation pool and auxiliary operations |
-| `krea2-session` | Resident transformer blocks and attention preparation |
-| `krea2-models` | Model discovery, text encoder, outer transformer graph and VAE |
-| `krea2-pipeline` | Conditioning, noise, scheduling and image generation |
+| `krea2::kernels` | Embedded kernel sources, the specializations they compile to and the launch shapes |
+| `krea2::checkpoint` | Safetensors mapping and block-weight upload plans |
+| `krea2::numerics` | bf16 and fp8 conversions |
+| `krea2::tokenizer` | Hugging Face tokenization and Krea's prompt template |
+| `krea2::ops` | Device tensors, allocation pool and auxiliary operations |
+| `krea2::session` | Resident transformer blocks and attention preparation |
+| `krea2::models` | Model discovery, text encoder, outer transformer graph and VAE |
+| `krea2::pipeline` | Conditioning, noise, scheduling and image generation |
 
-`cli/` provides argument handling and image output. `kernels/`
+`src/main.rs` provides argument handling and image output. `kernels/`
 contains the checked-in Loom sources, which are authoritative since their
 generators were retired. `assets/tokenizer.json` is embedded
 and read by the Rust `tokenizers` crate.

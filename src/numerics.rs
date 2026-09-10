@@ -137,7 +137,7 @@ mod tests {
 
     /// Every f32, against `half`, for the conversion that has an independent
     /// implementation. Minutes, so it is not in the default run:
-    /// `cargo test --release -p krea2-numerics -- --ignored`.
+    /// `cargo test --release --lib the_quieting_conversion_matches_half_over_every_f32 -- --ignored`.
     #[test]
     #[ignore = "sweeps all 2^32 f32 patterns"]
     fn the_quieting_conversion_matches_half_over_every_f32() {

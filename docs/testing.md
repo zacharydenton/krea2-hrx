@@ -1,13 +1,15 @@
 # Native test coverage
 
-Run `scripts/test.sh --cpu` for formatting, Clippy and CPU tests;
-`scripts/test.sh --gpu` also runs the explicitly ignored gfx1151 tests. GPU tests
-use the same HRX compiler/cache and runtime as inference. Missing prerequisites
-are errors when GPU tests are requested. There is no Python environment.
+Run `scripts/test.sh --cpu` for formatting, Clippy, rustdoc with warnings denied
+and CPU tests. `scripts/test.sh --gpu` also runs tensor/pool, arithmetic, dispatch,
+quantized-kernel, softmax and upload regressions on gfx1151. These tests need no
+model checkpoints or parity fixtures. They use the same HRX compiler/cache and
+runtime as inference. Missing prerequisites are errors when GPU tests are
+requested. There is no Python environment.
 
 | Coverage | Rust location |
 | --- | --- |
-| BF16 ties, NaNs and conversion boundaries | `src/numerics` |
+| BF16 ties, NaNs and conversion boundaries | `src/numerics.rs` |
 | All 36,050 Turbo/Raw sigma values from Diffusers, including the 589-token rounding regression | `tests/schedule.rs` and immutable `fixtures/sigmas.f32le` |
 | Exact BF16 Euler and guidance arithmetic; activations, broadcast, normalization and fused SiLU | `tests/arithmetic.rs` |
 | Dense matmul, bias, ragged tiles, convolution layouts, grouped/causal attention, rotary embedding and upsampling | `tests/arithmetic.rs` |
@@ -16,6 +18,22 @@ are errors when GPU tests are requested. There is no Python environment.
 | Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `tests/quantized.rs` |
 | Shared compiled artifact identity, allocation bounds and native library loading | `tests/dispatch.rs` |
 | Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `tests/constructor.rs` |
+| Tensor views, pooled allocation reuse and stream affinity | `src/ops/tensor.rs` |
+
+The exhaustive CPU sweep and model-dependent checks remain explicit commands:
+
+```sh
+cargo test --release --lib the_quieting_conversion_matches_half_over_every_f32 -- --ignored
+cargo test --release --lib checkpoint::plan::tests:: -- --ignored --test-threads=1
+cargo test --release --lib session::tests:: -- --ignored --test-threads=1 \
+  --skip two_independent_block_prefixes_are_priced_against_a_chain
+scripts/parity.sh
+```
+
+The sweep checks all 2³² float32 encodings. The checkpoint and session tests need
+local Krea weights; `scripts/parity.sh` also needs the frozen unquantized BF16
+fixture described below. Run the timing experiments separately using the
+commands in [graph recording](graph-recording.md).
 
 Checked-in Loom source is authoritative. The former Python generators, model
 wrappers, benchmark orchestration and reference implementations are retired.

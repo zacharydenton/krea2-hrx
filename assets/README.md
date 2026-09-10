@@ -2,7 +2,7 @@
 
 `tokenizer.json` comes from
 [Qwen/Qwen3-VL-4B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct).
-It is embedded by `krea2-tokenizer` and used without modifying the tokenizer
+It is embedded by `krea2::tokenizer` and used without modifying the tokenizer
 configuration. Krea's prompt template is applied separately in Rust.
 
 The upstream repository declares

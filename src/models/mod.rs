@@ -1,5 +1,5 @@
 //! Model discovery, dense weight loading, text encoder and VAE graphs.
-//! Transformer block execution is provided by `krea2-session`.
+//! Transformer block execution is provided by [`crate::session`].
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod files;

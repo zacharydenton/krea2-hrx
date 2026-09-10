@@ -70,9 +70,9 @@ globally shuts it down on model teardown.
 
 ## Interface
 
-The library is the interface. `krea2::pipeline` and `krea2::session` are
-ordinary Rust libraries and consuming applications depend on them directly; an
-Elixir application wraps `krea2_pipeline::Pipeline` with Rustler. There is no C
+The `krea2` library is the interface. Consuming applications use its
+`krea2::pipeline` and `krea2::session` modules directly; an Elixir application
+wraps `krea2::pipeline::Pipeline` with Rustler. There is no C
 ABI, no generated header and no error-buffer protocol: arguments are Rust types,
 failures are `Result`, and Rustler contains panics at the NIF boundary as the C
 boundary once did.

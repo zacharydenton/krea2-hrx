@@ -1,5 +1,5 @@
 //! Text encoder, text fusion, embeddings, projections and VAE decoder.
-//! GPU operations use [`krea2_ops`]. Host-side sinusoids, latent unpacking and tile
+//! GPU operations use [`crate::ops`]. Host-side sinusoids, latent unpacking and tile
 //! blending preserve the reference's bf16 rounding boundaries.
 use std::sync::Arc;
 
@@ -46,7 +46,7 @@ impl Models {
         )
     }
 
-    /// `tokenizer` of `None` uses the copy compiled into `krea2-tokenizer`.
+    /// `tokenizer` of `None` uses the copy embedded by [`crate::tokenizer`].
     pub fn load(
         stream: &mut Stream,
         checkpoint: &std::path::Path,

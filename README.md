@@ -56,7 +56,7 @@ checkout is needed to build; the `hrx` runner is what stages the native bundle:
 ```sh
 cargo install --locked --version 0.2.0 --features runner hrx-rs
 hrx prepare
-cargo install --locked --path cli
+cargo install --locked --path .
 ```
 
 The native bundle is pinned by hash. See the
@@ -118,13 +118,12 @@ lists all options. `KREA2_NATIVE_PROFILE=1` enables diagnostic stage timings.
 
 ## Libraries
 
-A checkout build produces `build/krea2`. The library is the interface:
-`krea2-pipeline` for prompt-to-RGB generation and the individual pipeline
-components, `krea2-session` for resident transformer block sessions. Both are
-ordinary Rust libraries, usable as a git dependency.
+A checkout build produces `build/krea2`. The `krea2` library is usable as a git
+dependency: `krea2::pipeline` provides prompt-to-RGB generation and the individual
+pipeline components; `krea2::session` provides resident transformer block sessions.
 
-There is no C ABI. Consuming applications bind the Rust crates directly — an
-Elixir application wraps `krea2_pipeline::Pipeline` with Rustler, which needs no
+There is no C ABI. Consuming applications bind the Rust library directly — an
+Elixir application wraps `krea2::pipeline::Pipeline` with Rustler, which needs no
 C boundary, no generated headers and no error-buffer protocol. See the
 [runtime and deployment guide](docs/hrx-runtime.md) for lifetimes and threading.
 
