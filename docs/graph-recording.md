@@ -1,112 +1,84 @@
 # Recording the block loop
 
-The 28 transformer blocks are recorded once per session as an HRX dependency
-graph and replayed each forward, rather than dispatched launch by launch.
-`Session::blocks_through` records on first use; profiling still dispatches
-directly, because it synchronizes between stages and a replay cannot stop to do
-that.
+Each session records its transformer blocks once and replays them through HRX.
+The session uses its creating stream and owns every recorded workspace buffer.
+External residual and modulation inputs are copied into those fixed buffers;
+RoPE contents are updated when their fingerprint changes. Profiling dispatches
+directly, including after a recording has been cached.
 
-**This is deliberate infrastructure, not a measured win.** Everything below says
-so. It is kept because the graph is where the runtime's scheduling work lands,
-and because a recording states the pipeline's real dependency structure in a form
-a future runtime can exploit. The measurements are here so the decision is
-re-checkable rather than remembered.
+Replay has not demonstrated a consistent end-to-end speedup on gfx1151. It
+reduces host recording work, but native barriers, partitioning and GPU resource
+use determine the completed time. Grid size alone does not establish saturation.
 
-## What it costs and what it saves
+## Dependencies
 
-Host submission is **238 ns per dispatch** including the operation-cache lookup
-and constant packing (`crates/kernels/examples/dispatch_cost.rs`). A forward is
-280 dispatches, so replay can save at most **67 µs**. HRX documents about
-**0.95 µs per graph edge**, so a 279-edge serial chain costs roughly **265 µs**.
-Both are about 0.01% of a 3674 ms forward, which is why the end-to-end paired
-comparison could not resolve a difference: A/B/B/A over two rounds gave medians
-of 29.58 s direct against 29.21 s recorded, with the two rounds disagreeing on
-the sign.
+The block loop orders shared scratch reuse and residual updates. Sage's seven
+preparation kernels form a DAG: the key and query branches have separate storage,
+V transpose is independent of both, and correction consumes the two branches.
+Attention waits directly for query quantization, V transpose and correction.
+Correction already depends on K quantization, so a fourth edge is redundant.
 
-## Why there is no concurrency to expose
+There is no empty join node between preparation and attention. In the pinned
+native runtime an empty node splits the command buffer and adds a queue barrier.
+The scheduler considers additional workstreams only after the first 16
+recordable nodes in a partition. Removing unnecessary barriers can help even
+within one workstream; declaring a DAG does not guarantee simultaneous execution.
+The native API currently exposes no partition or workstream counters.
 
-A graph pays when independent work can overlap. Three measurements, from
-different directions, say this pipeline has none.
+## Measurements and limits
 
-**The Sage preparation pass is a genuine DAG and it does not matter.** Its seven
-launches form a diamond — the key side and the query side touch disjoint
-buffers, the V transpose touches neither, and only the correction GEMM reads
-both — for a critical path of four instead of seven. Recorded 28 deep, with no
-checkpoint and no disk involved:
+A previous full-pipeline A/B/B/A comparison measured 29.58 s direct against
+29.21 s recorded, with the two rounds disagreeing on the sign. That establishes
+no consistent win. Historical host submission measured 238 ns per dispatch;
+it does not measure the GPU or give a fixed cost for graph edges.
 
-| | replay of 28 passes | median |
+The Sage benchmark records 28 preparation passes as either a diamond or a chain.
+It alternates measurement order, uses three warmups and nine samples per arm,
+and checks outputs against eager execution. On 2026-09-10 it measured 244.3 ms
+for the diamond and 246.0 ms for the chain. These passes omit the transformer
+kernels that would normally separate them, so their native schedule can differ
+from a complete block loop.
+
+The overlap benchmark measures two sessions with two blocks each. It initializes
+distinct finite inputs, resets them before each sample and checks both outputs
+against eager execution. Measurement order alternates, with three warmups and
+nine samples per arm. Uploads, reset copies and checks are outside the timer.
+A 2026-09-10 run produced these medians; every output matched eager execution.
+The independent schedule did not improve these cases.
+
+| Tokens | Serial | Independent |
 | --- | ---: | ---: |
-| diamond | 191.5, 196.0, 190.6, 190.3 ms | 191.1 ms |
-| chain | 192.1, 192.3, 191.3, 192.5 ms | 192.2 ms |
+| 275 | 66.7 ms | 70.6 ms |
+| 1043 | 184.1 ms | 211.3 ms |
+| 4115 | 737.6 ms | 755.8 ms |
 
-0.6%, inside the spread. The launch grids explain it: `sage_query_mean` is 3120
-workgroups and `sage_key_partial` is 780, against 40 CUs. Each kernel already
-fills the device.
+These figures describe two block prefixes. A full-forward overlap experiment
+would need all 28 blocks and the surrounding pipeline work.
 
-**Two whole forwards do not overlap either.** Two sessions sharing one set of
-weights but with their own activation buffers, recorded into one graph twice —
-once as two chains the runtime may overlap, once as one chain end to end:
-
-| tokens | image | overlapped | sequential | delta |
-| ---: | --- | ---: | ---: | ---: |
-| 275 | 256×256 | 44.06 ms | 43.92 ms | +0.3% |
-| 1043 | 512×512 | 104.27 ms | 104.55 ms | −0.3% |
-| 4115 | 1024×1024 | 417.52 ms | 421.12 ms | −0.9% |
-
-Swept over sequence length because saturation is a property of the launch grids,
-and those shrink with the image. It does not break down even at 256×256.
-
-**The VAE's blocking readbacks were not costing anything either.** Decoding
-1024×1024 waits on 36 tile downloads, each of which drains the stream. Replacing
-them with queued readbacks and one wait measured 578 ms against 569 ms — inside
-the spread — and was reverted. Each tile's host work is a 32 KB memcpy, so the
-round trips cost single-digit milliseconds out of 570; the rest is real GPU work,
-about 15.8 ms per tile for a hundred dispatches on a 256×256 image.
-
-## The control
-
-Equal timings would also be what a scheduler that never partitioned the work
-produced, so the negative results depend on the mechanism working. HRX's own
-`independent_nodes_beat_a_serial_chain` replays 64 tiny fills in about 88 µs
-declared independent against 151 µs chained, and passes on this machine. The
-runtime does overlap independent nodes. This workload gives it nothing to do.
-
-## What would change the answer
-
-- **Kernels fast enough for submission cost to matter.** At 238 ns against
-  13 ms per dispatch, host cost is 0.002% today.
-- **Work that leaves the device idle.** Every measurement above is against
-  kernels whose grids fill a 40-CU GPU at every shape tested.
-- **A runtime that schedules across streams or devices**, where a recording is
-  the unit of work rather than a replay of one queue.
-
-Re-run the evidence with:
+A separate historical VAE experiment measured 578 ms with queued tile downloads
+against 569 ms with blocking downloads. That configuration showed no improvement;
+it does not set a general limit on transfer overlap.
 
 ```sh
 cargo run --release -p krea2-kernels --example dispatch_cost
-cargo test -p krea2-session --lib -- --ignored --nocapture \
+cargo test --release -p krea2-session --lib -- --ignored --nocapture \
   the_declared_concurrency_is_priced_against_a_chain \
-  two_independent_forwards_are_priced_against_one_after_the_other
+  two_independent_block_prefixes_are_priced_against_a_chain
 ```
 
-## Correctness
+## Correctness and ownership
 
-Replay must produce exactly what direct dispatch produces, and does:
-`a_recorded_block_loop_replays_to_the_same_bytes` compares the two byte for byte
-and asserts the recording was actually taken, and `scripts/parity.sh` reports the
-full 1024×1024 trajectory bit-identical to the frozen baseline. The Sage DAG was
-checked the same way at `KREA2_ATTN_QK=4` and `=8`, three runs each, to rule out
-a race that happened to win.
+`a_recorded_block_loop_replays_to_the_same_bytes` compares eager execution with
+successive replays after changing input bytes, modulation, RoPE and external
+allocation addresses. It also checks stream rejection before storage is changed,
+profiling after recording, and destruction with a replay pending.
 
-Two constraints the recording imposes, both load-bearing:
+Graph instantiation retains native resources. Model pools must additionally keep
+their Rust allocation owners alive while a recording can be replayed: native
+retention prevents deallocation, but does not prevent pool reuse. This session
+uses fixed, unpooled workspaces. HRX's completion-point destructor waits for the
+last replay without flushing unrelated work on the stream.
 
-- **Every binding must be session-owned**, because a recording fixes addresses.
-  `run_device` therefore copies the caller's modulation into the session's own
-  buffer, as it already did for the residual stream.
-- **`Session.graph` is declared before the buffers it records**, because fields
-  drop in declaration order.
-
-Releasing a graph while a replay is still running frees native structures the
-device is reading; it surfaced here as an AMDGPU memory access fault during an
-unrelated session's weight upload. Fixed upstream in `hrx-rs` f1b62a9, where
-`GraphExec::drop` now drains its stream first.
+On 2026-09-10 the replay regression passed with `KREA2_ATTN_QK=16`, `8` and
+`4` against HRX 0.2.0. Locked workspace builds, CPU tests, clippy and rustdoc
+with warnings denied also passed using the crates.io package.

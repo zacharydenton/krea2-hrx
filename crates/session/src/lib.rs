@@ -8,11 +8,9 @@
 //! the device between blocks, in bf16, as ComfyUI keeps it.
 //!
 //! That chain is identical every forward, so it is recorded once as a graph and
-//! replayed. Recording is not currently faster: the chain is genuinely serial,
-//! every kernel in it fills the device, and the host submission it saves is
-//! about 0.01% of a forward. It is kept as the form this pipeline's dependency
-//! structure should be stated in, for a runtime that can use it.
-//! [`docs/graph-recording.md`] has the measurements and what would change them.
+//! replayed. Measurements have not established an end-to-end speedup. See
+//! [graph recording](https://github.com/zacharydenton/krea2-loom/blob/main/docs/graph-recording.md)
+//! for the benchmark scope and replay constraints.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod bundle;
@@ -133,12 +131,30 @@ struct Buffers {
     sin: Buffer,
 }
 
-/// A recording in progress: the graph, and the node the next launch comes
-/// after. The block loop is a hard serial chain -- every stage reads what the
-/// one before it wrote -- so each launch depends on exactly its predecessor.
+/// Dependencies for the next dispatch. A fan-in goes on its consumer directly,
+/// without inserting an empty native graph node.
+#[derive(Clone, Copy, Default)]
+enum After {
+    #[default]
+    None,
+    One(hrx::Node),
+    Three([hrx::Node; 3]),
+}
+
+impl After {
+    fn as_slice(&self) -> &[hrx::Node] {
+        match self {
+            Self::None => &[],
+            Self::One(node) => std::slice::from_ref(node),
+            Self::Three(nodes) => nodes,
+        }
+    }
+}
+
+/// A recording in progress and the dependencies of its next launch.
 pub(crate) struct Recording<'g> {
     graph: hrx::Graph<'g>,
-    last: Option<hrx::Node>,
+    last: After,
 }
 
 /// Where a block's launches go: straight to the stream, or into a recording.
@@ -157,15 +173,16 @@ fn gate_half(fused: &Buffer) -> Result<View<'_>> {
     fused.try_slice(at, fused.bytes() - at).map_err(Error::from)
 }
 
+/// Resident block workspace and recording, used on the stream that created it.
 pub struct Session {
+    stream_id: usize,
     tokens: usize,
     layers: usize,
     metadata: Metadata,
     kernels: Kernels,
     blocks: Vec<Block>,
-    /// Declared before the buffers and kernels it records, because fields drop
-    /// in declaration order and a graph must be released before the allocations
-    /// it names are.
+    /// The native graph retains its recorded resources until its final replay
+    /// completes. These fixed session buffers are never returned to a pool.
     graph: RefCell<Option<hrx::GraphExec>>,
     buffers: Buffers,
     // Calls on one session are serialized: they share the scratch buffers.
@@ -310,6 +327,7 @@ impl Session {
             )?),
         };
         Ok(Session {
+            stream_id: stream.id(),
             tokens,
             layers,
             metadata,
@@ -339,6 +357,13 @@ impl Session {
         self.profile.swap(enable, Ordering::Relaxed)
     }
 
+    fn check_stream(&self, stream: &Stream) -> Result<()> {
+        if stream.id() != self.stream_id {
+            return Err(Error::invalid("a session must use the stream that created it"));
+        }
+        Ok(())
+    }
+
     /// One kernel, into the stream or into a recording. Timing is only possible
     /// on the stream: the synchronize on either side is what makes a stage's
     /// number mean anything, and a replay cannot stop in the middle to take one.
@@ -364,10 +389,7 @@ impl Session {
         let grid = [grid_x, grid_y, 1];
         let stream = match sink {
             Sink::Record(recording) => {
-                let after = match &recording.last {
-                    Some(node) => std::slice::from_ref(node),
-                    None => &[],
-                };
+                let after = recording.last.as_slice();
                 // Safety: as the direct dispatch below. The bindings borrow this
                 // session, which outlives the graph being recorded.
                 let node = unsafe {
@@ -375,7 +397,7 @@ impl Session {
                         .graph
                         .dispatch(after, kernel, grid, compiled, &constants, bindings)
                 }?;
-                recording.last = Some(node);
+                recording.last = After::One(node);
                 return Ok(());
             }
             Sink::Stream(stream) => stream,
@@ -475,6 +497,7 @@ impl Session {
         first_block: usize,
         block_count: Option<usize>,
     ) -> Result<()> {
+        self.check_stream(stream)?;
         let count = block_count.unwrap_or(self.layers.saturating_sub(first_block));
         if first_block >= self.layers || count < 1 || count > self.layers - first_block {
             return Err(Error::invalid("block range must be within the loaded layers"));
@@ -512,9 +535,9 @@ impl Session {
     /// `[layers][6][6144]`. The rope tables stay host-side because they change
     /// only when the image geometry does.
     ///
-    /// Both views must belong to `stream` and cover the shapes above. The
-    /// runtime checks the first and this checks the second, which is why the
-    /// address-based version's `unsafe` is gone.
+    /// Use the stream that created this session. Both views must belong to its
+    /// device and cover the shapes above. Inputs are copied into fixed session
+    /// buffers before replay, so external addresses may change between calls.
     pub fn run_device(
         &self,
         stream: &mut Stream,
@@ -523,6 +546,7 @@ impl Session {
         cos: &[f32],
         sin: &[f32],
     ) -> Result<()> {
+        self.check_stream(stream)?;
         let tokens = self.tokens;
         if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
             return Err(Error::invalid("cos/sin have the wrong element count"));
@@ -566,7 +590,7 @@ impl Session {
         }
         let mut recorded = self.graph.borrow_mut();
         if recorded.is_none() {
-            let mut recording = Recording { graph: stream.graph()?, last: None };
+            let mut recording = Recording { graph: stream.graph()?, last: After::None };
             for index in 0..self.layers {
                 self.block(
                     &mut Sink::Record(&mut recording),
@@ -879,68 +903,90 @@ mod tests {
         assert_eq!(resident(), after_a, "A's second upload was not recorded");
     }
 
-    /// A recorded replay must produce exactly what direct dispatch produces,
-    /// and must actually be taken: the graph is only populated by the path
-    /// under test, so an empty one means the recording never happened.
+    fn inputs(
+        tokens: usize,
+        layers: usize,
+        phase: usize,
+    ) -> (Vec<u16>, Vec<f32>, Vec<f32>, Vec<f32>) {
+        let x = (0..tokens * HIDDEN as usize)
+            .map(|i| ((0.25 + ((i + phase * 17) % 97) as f32 / 128.0).to_bits() >> 16) as u16)
+            .collect();
+        let mods = (0..layers * 6 * HIDDEN as usize)
+            .map(|i| 0.01 + ((i + phase) % 7) as f32 * 0.001)
+            .collect();
+        let angle = phase as f32 * 0.125;
+        let cos = vec![angle.cos(); tokens * HEAD_DIM as usize];
+        let sin = vec![angle.sin(); cos.len()];
+        (x, mods, cos, sin)
+    }
+
     #[test]
     #[ignore = "requires Krea checkpoint and gfx1151"]
     fn a_recorded_block_loop_replays_to_the_same_bytes() {
         let (checkpoint, tokens) = fixture();
-        let mut stream = Stream::open().expect("a stream");
-        let session =
-            Session::open(&mut stream, &checkpoint, tokens, 2).expect("resident session");
+        let device = hrx::Device::open(0).expect("device");
+        let mut stream = device.stream().expect("stream");
+        let mut other = device.stream().expect("sibling stream");
+        let session = Session::open(&mut stream, &checkpoint, tokens, 2).expect("session");
+        // Keep previous external buffers alive so the allocator cannot disguise
+        // a stale captured address by handing out the same allocation again.
+        let mut external = Vec::new();
+        for phase in 0..2 {
+            let (start, mods, cos, sin) = inputs(tokens, 2, phase);
+            let mut expected = start.clone();
+            session.run(&mut stream, &mut expected, &mods, &cos, &sin, 0, None).expect("eager");
+            assert!(expected.iter().all(|v| v & 0x7f80 != 0x7f80), "finite reference");
+            let x = stream.allocate(start.len() * 2).unwrap();
+            let table = stream.allocate(mods.len() * 4).unwrap();
+            stream.upload(x.binding(), bytemuck::cast_slice(&start)).unwrap();
+            stream.upload(table.binding(), bytemuck::cast_slice(&mods)).unwrap();
+            stream.synchronize().unwrap();
 
-        let mods = vec![0.01f32; 2 * 6 * HIDDEN as usize];
-        let cos = vec![1.0f32; tokens * HEAD_DIM as usize];
-        let sin = vec![0.0f32; tokens * HEAD_DIM as usize];
-        let start: Vec<u16> = (0..tokens * HIDDEN as usize)
-            .map(|i| 0x3c00u16.wrapping_add((i % 97) as u16))
-            .collect();
+            // A sibling stream is rejected before it can overwrite session inputs.
+            let error = session
+                .run_device(&mut other, x.binding(), table.binding(), &cos, &sin)
+                .expect_err("stream affinity");
+            assert!(error.invalid_argument);
+            other.synchronize().unwrap();
+            let mut actual = vec![0u16; start.len()];
+            stream
+                .read_blocking(
+                    session.buffers.x.binding(),
+                    bytemuck::cast_slice_mut(&mut actual),
+                )
+                .unwrap();
+            assert_eq!(actual, expected, "a rejected call changed session storage");
+            assert!(session.run(&mut other, &mut actual, &mods, &cos, &sin, 0, None).is_err());
 
-        // The direct path: profiling forces every launch onto the stream.
-        let mut host = start.clone();
-        session.set_profile(true);
-        session.run(&mut stream, &mut host, &mods, &cos, &sin, 0, None).expect("direct");
-        session.set_profile(false);
-        assert!(session.graph.borrow().is_none(), "profiling must not record");
+            session
+                .run_device(&mut stream, x.binding(), table.binding(), &cos, &sin)
+                .expect("replay");
+            assert!(session.graph.borrow().is_some());
+            stream.read_blocking(x.binding(), bytemuck::cast_slice_mut(&mut actual)).unwrap();
+            assert_eq!(actual, expected, "replay with changed inputs, tables and addresses");
 
-        // The recorded path, through the device entry point.
-        let x = stream.allocate(tokens * HIDDEN as usize * 2).expect("x");
-        let table = stream.allocate(mods.len() * 4).expect("mods");
-        stream.upload(x.binding(), bytemuck::cast_slice(&start)).expect("x upload");
-        stream.upload(table.binding(), bytemuck::cast_slice(&mods)).expect("mods upload");
-        session
-            .run_device(&mut stream, x.binding(), table.binding(), &cos, &sin)
-            .expect("recorded");
-        assert!(session.graph.borrow().is_some(), "the block loop was not recorded");
-
-        let mut replayed = vec![0u16; start.len()];
-        stream
-            .read_blocking(x.binding(), bytemuck::cast_slice_mut(&mut replayed))
-            .expect("readback");
-        assert_eq!(replayed, host, "replay diverged from direct dispatch");
-
-        // A second forward reuses the recording rather than rebuilding it.
-        session
-            .run_device(&mut stream, x.binding(), table.binding(), &cos, &sin)
-            .expect("replayed");
-        // Nothing drains here on purpose: the session, its graph and the
-        // buffers that graph recorded are all released with the replay still in
-        // flight, which must be safe.
+            // Diagnostic execution must remain correct after a graph has been cached.
+            session.set_profile(true);
+            stream.upload(x.binding(), bytemuck::cast_slice(&start)).unwrap();
+            session
+                .run_device(&mut stream, x.binding(), table.binding(), &cos, &sin)
+                .expect("profiled eager");
+            stream.read_blocking(x.binding(), bytemuck::cast_slice_mut(&mut actual)).unwrap();
+            assert_eq!(actual, expected);
+            session.set_profile(false);
+            external.push((x, table));
+        }
+        let (x, table) = external.last().unwrap();
+        let (_, _, cos, sin) = inputs(tokens, 2, 1);
+        session.run_device(&mut stream, x.binding(), table.binding(), &cos, &sin).unwrap();
+        // Exercise destruction with the final replay still in flight.
     }
 
-    /// What overlapping two independent forwards could be worth, before
-    /// building the machinery for it. Two sessions sharing one set of weights
-    /// but with their own activation buffers, recorded into one graph twice:
-    /// once as two chains the runtime may overlap, once as one chain end to
-    /// end. If the block kernels already saturate the GPU the two are equal,
-    /// and stage E has nothing to win.
+    /// Compare two independent two-block prefixes with a serial recording.
+    /// Inputs are initialized, reset before every sample, and outputs checked.
     #[test]
-    #[ignore = "requires Krea checkpoint and gfx1151; a benchmark, not an assertion"]
-    fn two_independent_forwards_are_priced_against_one_after_the_other() {
-        // Swept over sequence length because saturation is a property of the
-        // launch grids, and those shrink with the image: 4115 tokens is
-        // 1024x1024, 1043 is 512x512, 275 is 256x256.
+    #[ignore = "requires Krea checkpoint and gfx1151; a benchmark, not a speed assertion"]
+    fn two_independent_block_prefixes_are_priced_against_a_chain() {
         for tokens in [275usize, 1043, 4115] {
             overlap_probe(tokens);
         }
@@ -948,67 +994,80 @@ mod tests {
 
     fn overlap_probe(tokens: usize) {
         let (checkpoint, _) = fixture();
-        let mut stream = Stream::open().expect("a stream");
-        let (file, plan) = Session::validate(&checkpoint, tokens, 2).expect("plan");
-        let weights =
-            std::sync::Arc::new(Weights::upload(&mut stream, &file, plan).expect("weights"));
-        let first = Session::with_weights(&mut stream, weights.clone(), tokens, 2, None)
-            .expect("first session");
-        let second = Session::with_weights(&mut stream, weights, tokens, 2, None)
-            .expect("second session");
-
-        let mut timings = Vec::new();
-        for overlapped in [true, false, false, true] {
-            // Scoped so the graph's borrow of the stream ends before the
-            // replay below needs it mutably.
-            let mut graph = {
-                let mut recording =
-                    Recording { graph: stream.graph().expect("graph"), last: None };
-                for index in 0..first.layers {
-                    first
-                        .block(
-                            &mut Sink::Record(&mut recording),
-                            index,
-                            first.buffers.mods.binding(),
-                        )
-                        .expect("record first");
-                }
-                // Overlapped: the second chain names no predecessor, so the runtime
-                // may schedule it alongside the first. Otherwise it follows on.
-                if overlapped {
-                    recording.last = None;
-                }
-                for index in 0..second.layers {
-                    second
-                        .block(
-                            &mut Sink::Record(&mut recording),
-                            index,
-                            second.buffers.mods.binding(),
-                        )
-                        .expect("record second");
-                }
-                recording.graph.finish().expect("instantiate")
-            };
-
-            stream.synchronize().expect("drain");
-            let began = std::time::Instant::now();
-            for _ in 0..4 {
-                stream.launch(&mut graph).expect("replay");
-            }
-            stream.synchronize().expect("drain");
-            let each = began.elapsed().as_secs_f64() * 1e3 / 4.0;
-            eprintln!(
-                "  {tokens} tokens, {}: {each:.2} ms",
-                if overlapped { "overlapped" } else { "sequential " }
-            );
-            timings.push((overlapped, each));
+        let mut stream = Stream::open().unwrap();
+        let (file, plan) = Session::validate(&checkpoint, tokens, 2).unwrap();
+        let weights = std::sync::Arc::new(Weights::upload(&mut stream, &file, plan).unwrap());
+        let first =
+            Session::with_weights(&mut stream, weights.clone(), tokens, 2, None).unwrap();
+        let second = Session::with_weights(&mut stream, weights, tokens, 2, None).unwrap();
+        let mut starts = Vec::new();
+        let mut expected = Vec::new();
+        for (phase, session) in [&first, &second].into_iter().enumerate() {
+            let (start, mods, cos, sin) = inputs(tokens, 2, phase);
+            let initial = stream.allocate(start.len() * 2).unwrap();
+            stream.upload(initial.binding(), bytemuck::cast_slice(&start)).unwrap();
+            let mut result = start;
+            session.run(&mut stream, &mut result, &mods, &cos, &sin, 0, None).unwrap();
+            assert!(result.iter().all(|v| v & 0x7f80 != 0x7f80));
+            starts.push(initial);
+            expected.push(result);
         }
-        let mean = |want: bool| {
-            let taken: Vec<f64> =
-                timings.iter().filter(|(o, _)| *o == want).map(|(_, t)| *t).collect();
-            taken.iter().sum::<f64>() / taken.len() as f64
+        let record = |independent| {
+            let mut recording = Recording { graph: stream.graph().unwrap(), last: After::None };
+            for (index, session) in [&first, &second].into_iter().enumerate() {
+                if independent && index == 1 {
+                    recording.last = After::None;
+                }
+                for block in 0..session.layers {
+                    session
+                        .block(
+                            &mut Sink::Record(&mut recording),
+                            block,
+                            session.buffers.mods.binding(),
+                        )
+                        .unwrap();
+                }
+            }
+            recording.graph.finish().unwrap()
         };
-        eprintln!("overlapped {:.2} ms vs sequential {:.2} ms", mean(true), mean(false));
+        let mut graphs = [record(false), record(true)];
+        let mut samples = [Vec::new(), Vec::new()];
+        for round in 0..12 {
+            for arm in if round % 2 == 0 { [0, 1] } else { [1, 0] } {
+                for (session, initial) in [&first, &second].into_iter().zip(&starts) {
+                    stream
+                        .copy(
+                            session.buffers.x.binding().slice(0, initial.bytes()).unwrap(),
+                            initial.binding(),
+                        )
+                        .unwrap();
+                }
+                stream.synchronize().unwrap();
+                let began = std::time::Instant::now();
+                stream.launch(&mut graphs[arm]).unwrap();
+                stream.synchronize().unwrap();
+                if round >= 3 {
+                    samples[arm].push(began.elapsed().as_secs_f64() * 1e3);
+                }
+                for (session, expected) in [&first, &second].into_iter().zip(&expected) {
+                    let mut actual = vec![0u16; expected.len()];
+                    stream
+                        .read_blocking(
+                            session.buffers.x.binding(),
+                            bytemuck::cast_slice_mut(&mut actual),
+                        )
+                        .unwrap();
+                    assert_eq!(&actual, expected, "two-block prefix parity");
+                }
+            }
+        }
+        for arm in &mut samples {
+            arm.sort_by(f64::total_cmp);
+        }
+        eprintln!(
+            "{tokens} tokens, two sessions with two blocks each: serial {:.3} ms, independent {:.3} ms",
+            samples[0][4], samples[1][4]
+        );
     }
 
     fn fixture() -> (std::path::PathBuf, usize) {

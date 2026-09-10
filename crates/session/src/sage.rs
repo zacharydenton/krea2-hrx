@@ -20,7 +20,7 @@ use hrx::{Buffer, Stream, View};
 use kernels::Scalars;
 use kernels::{cache::PreparedKernels, Config};
 
-use crate::{Error, Result, Sink};
+use crate::{After, Error, Result, Sink};
 
 /// One of the seven launches: everything about it the shape fixes. Only the
 /// bindings depend on the call, and only on which buffers the caller hands in.
@@ -252,8 +252,8 @@ impl Sage {
     /// Recorded, the seven form a diamond rather than a chain: the key side
     /// (partial, mean, quantize) and the query side (mean, quantize) touch
     /// disjoint buffers, the V transpose touches neither, and only the
-    /// correction GEMM reads from both sides. The join at the end is what the
-    /// attention launch after this one depends on.
+    /// correction GEMM reads from both sides. Attention waits directly on the
+    /// three terminal nodes.
     pub(crate) fn run<'g>(
         &'g self,
         sink: &mut Sink<'g, '_>,
@@ -327,15 +327,20 @@ impl Sage {
         {
             let constants = plan.scalars.pack(plan.name, kernel)?;
             self.check(plan, kernel)?;
-            let after: Vec<hrx::Node> = match after_table[index] {
-                // A root waits only for whatever produced q, k and v.
-                [] => entry.into_iter().collect(),
-                dependencies => dependencies.iter().map(|&at| nodes[at]).collect(),
+            let pair;
+            let after = match after_table[index] {
+                [] => entry.as_slice(),
+                [at] => std::slice::from_ref(&nodes[*at]),
+                [a, b] => {
+                    pair = [nodes[*a], nodes[*b]];
+                    &pair
+                }
+                _ => unreachable!("Sage nodes have at most two internal dependencies"),
             };
             // Safety: as the direct dispatch above.
             let node = unsafe {
                 recording.graph.dispatch(
-                    &after,
+                    after,
                     kernel,
                     [plan.grid.0, plan.grid.1, 1],
                     [plan.threads, 1, 1],
@@ -345,10 +350,9 @@ impl Sage {
             }?;
             nodes.push(node);
         }
-        // The leaves: everything the attention kernel reads was written by the
-        // two quantizations, the transpose or the correction.
-        let leaves = [nodes[3], nodes[4], nodes[5], nodes[6]];
-        recording.last = Some(recording.graph.join(&leaves)?);
+        // Correction already depends on K quantization. These three nodes
+        // cover every attention input and order scratch reuse in the next pass.
+        recording.last = After::Three([nodes[3], nodes[5], nodes[6]]);
         Ok(())
     }
 
@@ -373,8 +377,8 @@ mod tests {
 
     /// What the declared concurrency is worth, in isolation and with no
     /// checkpoint: the same seven launches recorded as the real diamond and as
-    /// a chain, replayed back to back. Prints rather than asserts -- the answer
-    /// depends on whether these grids leave the GPU anything to overlap with.
+    /// a chain, with alternating measurement order. Checks output parity but
+    /// does not assert a speedup.
     #[test]
     #[ignore = "requires gfx1151; a benchmark, not an assertion"]
     fn the_declared_concurrency_is_priced_against_a_chain() {
@@ -390,10 +394,33 @@ mod tests {
             stream.fill(buffer.binding(), 0x11).expect("fill");
         }
 
-        // 28 repetitions, as one forward runs it, so the graph is the size the
-        // block loop actually records.
+        let outputs = [
+            &sage.q4,
+            &sage.k4,
+            &sage.q_scale,
+            &sage.k_scale,
+            &sage.correction,
+            &sage.v_transposed,
+        ];
+        for buffer in outputs {
+            stream.fill(buffer.binding(), 0).expect("initialize output padding");
+        }
+        sage.run(&mut Sink::Stream(&mut stream), q.binding(), k.binding(), v.binding())
+            .expect("eager reference");
+        let expected: Vec<Vec<u8>> = outputs
+            .into_iter()
+            .map(|buffer| {
+                let mut bytes = vec![0; buffer.bytes()];
+                stream.read_blocking(buffer.binding(), &mut bytes).expect("reference read");
+                bytes
+            })
+            .collect();
+
+        // Isolate 28 preparation passes. A real forward has other kernels
+        // between them, which may lead to different native scheduling.
         let record = |table: &[&'static [usize]; 7]| {
-            let mut recording = Recording { graph: stream.graph().expect("graph"), last: None };
+            let mut recording =
+                Recording { graph: stream.graph().expect("graph"), last: After::None };
             for _ in 0..28 {
                 sage.run_after(
                     &mut Sink::Record(&mut recording),
@@ -406,22 +433,33 @@ mod tests {
             }
             recording.graph.finish().expect("instantiate")
         };
-        let mut diamond = record(&Sage::DIAMOND);
-        let mut chain = record(&CHAIN);
-
-        let mut time = |graph: &mut hrx::GraphExec| {
-            stream.synchronize().expect("drain");
-            let began = std::time::Instant::now();
-            for _ in 0..8 {
-                stream.launch(graph).expect("replay");
+        let mut graphs = [record(&Sage::DIAMOND), record(&CHAIN)];
+        let mut samples = [Vec::new(), Vec::new()];
+        for round in 0..12 {
+            for arm in if round % 2 == 0 { [0, 1] } else { [1, 0] } {
+                stream.synchronize().expect("drain");
+                let began = std::time::Instant::now();
+                for _ in 0..4 {
+                    stream.launch(&mut graphs[arm]).expect("replay");
+                }
+                stream.synchronize().expect("drain");
+                if round >= 3 {
+                    samples[arm].push(began.elapsed().as_secs_f64() * 1e3 / 4.0);
+                }
+                for (buffer, expected) in outputs.into_iter().zip(&expected) {
+                    let mut actual = vec![0; buffer.bytes()];
+                    stream.read_blocking(buffer.binding(), &mut actual).expect("read");
+                    assert_eq!(&actual, expected, "preparation output parity");
+                }
             }
-            stream.synchronize().expect("drain");
-            began.elapsed().as_secs_f64() * 1e3 / 8.0
-        };
-        for round in 0..4 {
-            let (d, c) = (time(&mut diamond), time(&mut chain));
-            eprintln!("round {round}: diamond {d:.3} ms, chain {c:.3} ms");
         }
+        for arm in &mut samples {
+            arm.sort_by(f64::total_cmp);
+        }
+        eprintln!(
+            "28 preparation passes: diamond {:.3} ms, chain {:.3} ms",
+            samples[0][4], samples[1][4]
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Shared HRX runtime
 
-Krea depends on the published [`hrx-rs`](https://crates.io/crates/hrx-rs) crate
-directly, renamed to `hrx` in the workspace `Cargo.toml` so call sites read
-`hrx::`. Its features are explicit and `Cargo.lock` pins the complete dependency
+Krea uses [`hrx-rs`](https://crates.io/crates/hrx-rs) 0.2.0 from crates.io.
+The workspace renames it to `hrx`, so call sites read `hrx::`.
+Its features are explicit and `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
 There is no link-time libhrx dependency or runtime rpath in the binary.
@@ -32,7 +32,7 @@ already handed out.
 The compiler and runtime come from HRX's public, verified native bundle:
 
 ```sh
-cargo install --locked hrx-rs --features runner
+cargo install --locked hrx-rs --version 0.2.0 --features runner
 hrx prepare
 cargo build --release --workspace
 ```
@@ -45,10 +45,12 @@ hrx-rs = { path = "../hrx.rs" }
 ```
 
 Cargo updates the lockfile for a path override. Restore the registry dependency
-before committing that lockfile. `HRX_RUNTIME_DIR` selects a trusted native
-directory and `HRX_OFFLINE=1` refuses network provisioning. The artifact cache
-follows XDG: `$XDG_CACHE_HOME/hrx`, else `$HOME/.cache/hrx`. `HRX_LOOM_LIBRARY` or an explicit model compiler argument selects
-a compiler override.
+before committing a lockfile generated with a local override.
+
+`HRX_RUNTIME_DIR` selects a trusted native directory and `HRX_OFFLINE=1` refuses
+network provisioning. The artifact cache follows XDG: `$XDG_CACHE_HOME/hrx`,
+else `$HOME/.cache/hrx`. `HRX_LOOM_LIBRARY` or an explicit model compiler argument
+selects a compiler override.
 
 Krea's shape/bundle metadata and model-specific operation builders remain here.
 Both auxiliary and block compilation use the stream's target and `hrx::loom`.
