@@ -1,0 +1,46 @@
+amdgpu.target<gfx11-generic> @krea2_fusion_epilogue_target {subgroup_size = 32}
+config.decl @krea2.fusion_epilogue.count : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.fusion_epilogue.columns : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.fusion_epilogue.bias : %value: index where [range(%value, 0, 2)]
+config.decl @krea2.fusion_epilogue.grid_x : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_fusion_epilogue_target) export("krea2_fusion_epilogue") @krea2_fusion_epilogue() {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %grid = config.get @krea2.fusion_epilogue.grid_x : index
+  kernel.launch.config workgroups(%grid, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%input: buffer, %bias: buffer, %output: buffer) {
+  %zero = index.constant 0 : index
+  %offset = index.constant 0 : offset
+  %threads = index.constant 256 : index
+  %count = config.get @krea2.fusion_epilogue.count : index
+  %columns = config.get @krea2.fusion_epilogue.columns : index
+  %with_bias = config.get @krea2.fusion_epilogue.bias : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %base = index.mul %group, %threads : index
+  %index = index.add %base, %lane : index
+  %valid = index.cmp ult, %index, %count : index
+  %ig = buffer.assume.memory_space<global> %input : buffer
+  %bg = buffer.assume.memory_space<global> %bias : buffer
+  %og = buffer.assume.memory_space<global> %output : buffer
+  %iv = buffer.view %ig[%offset] : buffer -> view<[%count]xf32>
+  %bv = buffer.view %bg[%offset] : buffer -> view<[%columns]xbf16>
+  %ov = buffer.view %og[%offset] : buffer -> view<[%count]xbf16>
+  scf.if %valid {
+    %i = index.assume %index [range(%index, 0, 1073741824), lt(%index, %count)] : index
+    %x = view.load %iv[%i] : view<[%count]xf32> -> f32
+    %has_bias = index.cmp ne, %with_bias, %zero : index
+    %sum = scf.if %has_bias -> (f32) {
+      %col = index.rem %i, %columns : index
+      %b = view.load %bv[%col] : view<[%columns]xbf16> -> bf16
+      %bf = scalar.extf %b : bf16 to f32
+      %s = scalar.addf %x, %bf : f32
+      scf.yield %s : f32
+    } else {
+      scf.yield %x : f32
+    }
+    %rounded = scalar.fptrunc %sum : f32 to bf16
+    view.store %rounded, %ov[%i] : bf16, view<[%count]xbf16>
+  }
+  kernel.return
+}

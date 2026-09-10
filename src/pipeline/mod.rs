@@ -159,19 +159,40 @@ struct State {
     blocks: ShapeCache<Blocks>,
 }
 
+/// Optional execution policy. Auto uses only saved, passing NPU qualifications.
+#[derive(Clone, Debug, Default)]
+pub struct PipelineOptions {
+    pub fusion_backend: crate::fusion::FusionBackend,
+}
+
 impl Pipeline {
     /// `compiler` of `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
+        Self::with_options(files, compiler, PipelineOptions::default())
+    }
+
+    /// Open with an explicit policy for the fusion projection.
+    pub fn with_options(
+        files: Files,
+        compiler: Option<&str>,
+        options: PipelineOptions,
+    ) -> Result<Pipeline> {
         // Built before the state so the models allocate on the stream that will
         // later dispatch them; allocation only needs a shared borrow.
         let mut stream = Stream::open()?;
-        let models = Models::open(&mut stream, &files, compiler)?;
+        let mut models = Models::open(&mut stream, &files, compiler)?;
+        models.fusion.set_backend(options.fusion_backend);
         Ok(Pipeline {
             models,
             files,
             compiler: compiler.map(str::to_string),
             state: Mutex::new(State { stream, weights: None, blocks: ShapeCache::default() }),
         })
+    }
+
+    /// Backend and reason selected for the most recent fusion projection.
+    pub fn fusion_selection(&self) -> String {
+        self.models.fusion.reason()
     }
 
     /// Turbo: a fixed timestep shift and no guidance. Raw: neither.

@@ -274,6 +274,10 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         Ok(value) if value == "1" => true,
         _ => panic!("KREA2_QUALITY_MINT must be unset or exactly 1"),
     };
+    assert!(
+        !minting || std::env::var_os("KREA2_QUALITY_RESULT").is_none(),
+        "qualification cannot replace the accepted baseline"
+    );
     validate_fixture(&fixture, &manifest, minting).unwrap_or_else(|e| panic!("{e}"));
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.join("job.json")).unwrap()).unwrap();
@@ -319,8 +323,19 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let ops = Ops::new(pool.clone());
     let initial: Vec<_> = state.iter().map(|&v| from_f32(v)).collect();
     let resident = Tensor::from_slice(&pool, &mut stream, &initial, tokens, 64).unwrap();
-    let pipeline =
-        Pipeline::open(Files::of(&checkpoint).offline(true).resolve().unwrap(), None).unwrap();
+    let backend = match std::env::var("KREA2_QUALITY_FUSION_BACKEND").as_deref() {
+        Ok("npu") => krea2::fusion::FusionBackend::Npu,
+        Ok("gpu") | Err(_) => krea2::fusion::FusionBackend::Gpu,
+        Ok(other) => panic!("invalid quality fusion backend: {other}"),
+    };
+    let pipeline = Pipeline::with_options(
+        Files::of(&checkpoint).offline(true).resolve().unwrap(),
+        None,
+        krea2::pipeline::PipelineOptions { fusion_backend: backend },
+    )
+    .unwrap();
+    let evidence_path = std::env::var_os("KREA2_QUALITY_RESULT").map(PathBuf::from);
+    let noise = state.clone();
     for step in 0..steps {
         let sigma = krea2::pipeline::schedule::sigma(step, steps, shift);
         let next = krea2::pipeline::schedule::sigma(step + 1, steps, shift);
@@ -332,8 +347,8 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         state = resident.download(&mut stream).unwrap().into_iter().map(to_f32).collect();
         eprintln!("BF16 reference: step {}/{}", step + 1, steps);
     }
-    let (cosine, rms) = metrics(&state, &truth);
     let ours_rgb = pipeline.decode(&state, size, size).unwrap();
+    let (cosine, rms) = metrics(&state, &truth);
     if let Some(path) = std::env::var_os("KREA2_QUALITY_OUTPUT") {
         export_candidate(Path::new(&path), &state, &ours_rgb, size, &manifest);
     }
@@ -354,6 +369,41 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let loss_db = 20.0 * (rms / accepted_rms).log10();
     let accepted_psnr = image_psnr(&accepted_rgb, &truth_rgb);
     eprintln!("accepted: relative RMS {accepted_rms:.6}, PSNR {accepted_psnr:.6} dB, loss {loss_db:.6} dB");
+    if let Some(path) = evidence_path {
+        assert!(!minting, "qualification cannot replace the accepted baseline");
+        let request = krea2::pipeline::Request {
+            prompt: meta["prompt"].as_str().expect("qualification fixture needs a prompt"),
+            negative_prompt: "",
+            width: size,
+            height: size,
+            steps: Some(steps),
+            guidance: Some(0.0),
+            seed: meta["seed"].as_u64().unwrap(),
+            initial_latents: Some(&noise),
+        };
+        // Measure the production path after one complete warmup, including text
+        // encoding, fusion, denoising, decoding and final device completion.
+        let elapsed = if std::env::var_os("KREA2_FUSION_CAPTURE").is_some() {
+            // Capture obtains activations and quality evidence only; the ten
+            // later qualification processes measure production generation.
+            0.0
+        } else {
+            pipeline.generate(&request, None).unwrap();
+            let started = std::time::Instant::now();
+            pipeline.generate(&request, None).unwrap();
+            started.elapsed().as_secs_f64()
+        };
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "seconds": elapsed, "relative_rms_loss_db": loss_db,
+                "image_psnr_loss_db": accepted_psnr - psnr,
+                "reference_files": manifest["files"], "selection": pipeline.fusion_selection(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
     assert!(
         loss_db <= 0.1,
         "quality regressed against the unquantized reference by {loss_db} dB"

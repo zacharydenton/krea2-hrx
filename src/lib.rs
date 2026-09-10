@@ -10,6 +10,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod checkpoint;
+pub mod fusion;
 pub mod kernels;
 pub mod models;
 pub mod numerics;

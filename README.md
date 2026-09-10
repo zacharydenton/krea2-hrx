@@ -2,7 +2,7 @@
 
 Krea 2 Turbo and Raw inference on the **Radeon 8060S (gfx1151)**. GPU kernels
 are written in [Loom](https://github.com/ROCm/hrx-system); the Rust host uses
-HRX's C API. The native CLI runs the complete pipeline without Python or PyTorch.
+the shared `hrx-rs` Stream API. The native CLI runs the complete pipeline without Python or PyTorch.
 
 The runtime reads ComfyUI's int8 ConvRot checkpoints directly, using W8A8
 transformer GEMMs, fp16 attention, a Qwen3-VL-4B text encoder and a Qwen-Image
@@ -54,13 +54,19 @@ From this checkout. The shared runtime is a pinned dependency, so no sibling
 checkout is needed to build; the `hrx` runner is what stages the native bundle:
 
 ```sh
-cargo install --locked --version 0.2.0 --features runner hrx-rs
+cargo install --locked --git https://github.com/zacharydenton/hrx-rs \
+  --rev 6f5979fa3f0956e7390bb4de125dfef18857210b --features runner,npu hrx-rs
 hrx prepare
 cargo install --locked --path .
 ```
 
 The native bundle is pinned by hash. See the
 [runtime guide](docs/hrx-runtime.md) for what `hrx prepare` fetches.
+
+The optional [XDNA2 text-fusion pilot](docs/npu-fusion.md) uses a saved local
+qualification to select an NPU only when it meets latency and quality gates.
+`--fusion-backend gpu` selects GPU explicitly; `--no-default-features` builds
+without NPU support. Chess is needed only for explicit qualification.
 
 ## Models
 

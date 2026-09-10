@@ -1,7 +1,7 @@
 # Shared HRX runtime
 
 Krea pins a Git revision of [`hrx-rs`](https://github.com/zacharydenton/hrx-rs)
-for its caller-key kernel index, which is not yet in the crates.io release.
+for keyed kernel requests, the coordinated graph API and NPU integration.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
 Its features are explicit and `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
@@ -33,7 +33,8 @@ already handed out.
 The compiler and runtime come from HRX's public, verified native bundle:
 
 ```sh
-cargo install --locked hrx-rs --version 0.2.0 --features runner
+cargo install --locked --git https://github.com/zacharydenton/hrx-rs \
+  --rev 6f5979fa3f0956e7390bb4de125dfef18857210b --features runner,npu hrx-rs
 hrx prepare
 cargo build --release
 ```
@@ -127,3 +128,6 @@ Each run takes the median of nine 2,048-launch batches after three warmups and
 checks the output. Completed batches averaged 2.1–2.25 µs per tiny kernel.
 These are wall-clock costs, not GPU timestamps or whole-model latency. Image
 quality, checkpoint-scale load time and peak memory were not remeasured.
+
+See [NPU text fusion](npu-fusion.md) for scoped GPU handoffs, the bounded shape
+cache and explicit qualification. GPU inference remains the fallback.

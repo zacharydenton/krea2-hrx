@@ -23,6 +23,7 @@ const WIDTH: usize = 6144;
 
 /// ComfyUI's three checkpoints, loaded, and the graph over them.
 pub struct Models {
+    pub(crate) fusion: crate::fusion::Fusion,
     pub ops: Ops,
     pub tokenizer: Tokenizer,
     text: Weights,
@@ -57,6 +58,7 @@ impl Models {
     ) -> Result<Models> {
         let pool = Pool::new();
         let models = Models {
+            fusion: crate::fusion::Fusion::new(checkpoint),
             ops: Ops::with_compiler(Arc::clone(&pool), compiler),
             tokenizer: match tokenizer {
                 Some(path) => Tokenizer::from_file(path)?,
@@ -270,7 +272,18 @@ impl Models {
             &self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?,
             Unary::Silu,
         )?;
-        let up = self.lin(stream, &normed, w, &format!("{prefix}.mlp.up"))?;
+        let up = if prefix == "txtfusion.layerwise_blocks.0" {
+            let weight = w.get(&format!("{prefix}.mlp.up.weight"))?;
+            let bias_name = format!("{prefix}.mlp.up.bias");
+            let bias =
+                if w.has(&bias_name) { Some(w.get(&bias_name)?.values()?) } else { None };
+            match self.fusion.linear(stream, &self.ops, &normed, weight, bias)? {
+                Some(output) => output,
+                None => self.ops.linear(stream, &normed, weight, bias)?,
+            }
+        } else {
+            self.lin(stream, &normed, w, &format!("{prefix}.mlp.up"))?
+        };
         let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
         Ok(self.ops.binary(
             stream,

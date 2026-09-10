@@ -1213,8 +1213,8 @@ dependencies = [
 
 [[package]]
 name = "hrx-rs"
-version = "0.2.0"
-source = "git+https://github.com/zacharydenton/hrx-rs?rev=cd64a45#cd64a4565d121c9ada5a76d4dbfdd5a711041e08"
+version = "0.3.0"
+source = "git+https://github.com/zacharydenton/hrx-rs?rev=6f5979fa3f0956e7390bb4de125dfef18857210b#6f5979fa3f0956e7390bb4de125dfef18857210b"
 dependencies = [
  "flate2",
  "libc",
@@ -1617,6 +1617,7 @@ dependencies = [
  "rand_chacha",
  "rand_distr",
  "safetensors",
+ "serde",
  "serde_json",
  "tempfile",
  "tokenizers",
@@ -2873,7 +2874,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
