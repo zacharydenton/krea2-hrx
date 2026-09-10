@@ -8,7 +8,9 @@
 //! The seven are not a chain. The key mean and the query mean are computed from
 //! disjoint buffers, so the two quantizations are independent of each other and
 //! the V transpose of both; only the correction GEMM needs results from both
-//! sides. Recorded as a graph that is a critical path of four rather than seven.
+//! sides. Recorded as a graph that is a critical path of four rather than seven,
+//! which is free and true but not currently faster -- these grids already fill
+//! the device. `the_declared_concurrency_is_priced_against_a_chain` prices it.
 //!
 //! The nibble layout is head-major, `[heads][capacity][64 bytes]` for int4 and
 //! 128 for int8, with `[heads][capacity]` float32 scales, so one key tile is
@@ -264,8 +266,8 @@ impl Sage {
 
     /// Which already-recorded step each one waits for. The indices match
     /// `plans`: key partial, key mean, query mean, quantize q, quantize k,
-    /// transpose, correction. A benchmark passes a chain instead, to price the
-    /// concurrency this states against declaring none.
+    /// transpose, correction. Stating only the edges that exist is the point of
+    /// recording at all; a benchmark passes a chain instead to price it.
     const DIAMOND: [&'static [usize]; 7] = [&[], &[0], &[], &[2], &[1], &[], &[2, 4]];
 
     fn run_after<'g>(

@@ -81,6 +81,7 @@ as a memory/performance change.
   layout belongs to the weight; host and device session APIs share RoPE upload
   bookkeeping.
 
-See [attention](native-attention.md), [VAE measurements](vae-performance.md)
-and [contribution requirements](../CONTRIBUTING.md). Historical raw measurements
+See [attention](native-attention.md), [VAE measurements](vae-performance.md),
+[graph recording](graph-recording.md) and
+[contribution requirements](../CONTRIBUTING.md). Historical raw measurements
 remain under `docs/benchmarks/`; the chronological development log is in Git history.

@@ -8,10 +8,11 @@
 //! the device between blocks, in bf16, as ComfyUI keeps it.
 //!
 //! That chain is identical every forward, so it is recorded once as a graph and
-//! replayed. The chain is also genuinely serial -- each stage reads what the one
-//! before it wrote -- so recording buys nothing on its own; what it buys is the
-//! ability to state where the work is *not* serial, which today is the Sage
-//! preparation pass in [`sage`].
+//! replayed. Recording is not currently faster: the chain is genuinely serial,
+//! every kernel in it fills the device, and the host submission it saves is
+//! about 0.01% of a forward. It is kept as the form this pipeline's dependency
+//! structure should be stated in, for a runtime that can use it.
+//! [`docs/graph-recording.md`] has the measurements and what would change them.
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod bundle;
@@ -937,7 +938,16 @@ mod tests {
     #[test]
     #[ignore = "requires Krea checkpoint and gfx1151; a benchmark, not an assertion"]
     fn two_independent_forwards_are_priced_against_one_after_the_other() {
-        let (checkpoint, tokens) = fixture();
+        // Swept over sequence length because saturation is a property of the
+        // launch grids, and those shrink with the image: 4115 tokens is
+        // 1024x1024, 1043 is 512x512, 275 is 256x256.
+        for tokens in [275usize, 1043, 4115] {
+            overlap_probe(tokens);
+        }
+    }
+
+    fn overlap_probe(tokens: usize) {
+        let (checkpoint, _) = fixture();
         let mut stream = Stream::open().expect("a stream");
         let (file, plan) = Session::validate(&checkpoint, tokens, 2).expect("plan");
         let weights =
@@ -988,7 +998,7 @@ mod tests {
             stream.synchronize().expect("drain");
             let each = began.elapsed().as_secs_f64() * 1e3 / 4.0;
             eprintln!(
-                "{}: {each:.2} ms for two 2-block forwards",
+                "  {tokens} tokens, {}: {each:.2} ms",
                 if overlapped { "overlapped" } else { "sequential " }
             );
             timings.push((overlapped, each));
