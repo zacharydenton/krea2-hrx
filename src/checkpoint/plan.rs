@@ -228,9 +228,28 @@ fn operand(
     Ok((weights, scales))
 }
 
-/// An f32 vector copied as it is: the RMSNorm scales.
+/// An f32 vector: the RMSNorm scales, copied as they are, or upcast exactly from
+/// the bf16 a half-precision save stores them in.
 fn vector(file: &Checkpoint, name: &str) -> Result<Span> {
     let tensor = file.get(name)?;
+    if tensor.dtype == "BF16" {
+        let host: Vec<u8> = tensor
+            .bytes
+            .chunks_exact(2)
+            .flat_map(|bits| {
+                crate::numerics::to_f32(u16::from_le_bytes([bits[0], bits[1]])).to_le_bytes()
+            })
+            .collect();
+        return Ok(Span {
+            device_offset: 0,
+            device_bytes: host.len(),
+            rows: 0,
+            row_bytes: 0,
+            device_row_bytes: 0,
+            segments: Vec::new(),
+            host,
+        });
+    }
     if tensor.dtype != "F32" {
         return Err(Error(format!("{name} is {}, not float32", tensor.dtype)));
     }

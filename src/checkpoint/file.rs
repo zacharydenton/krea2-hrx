@@ -63,6 +63,24 @@ fn dtype_name(dtype: Dtype) -> &'static str {
     }
 }
 
+/// A tensor every transformer checkpoint carries, whatever wraps its names.
+const ANCHOR: &str = "blocks.0.attn.wq.weight";
+
+/// Removes the namespace a whole-model save puts around the transformer (ComfyUI's
+/// `ModelSave` writes its state dict under the wrapper's attribute path). The
+/// prefix is whatever precedes [`ANCHOR`], and only a prefix every tensor shares
+/// is removed, so text encoders and VAEs keep their names.
+fn unwrap_model(entries: BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
+    let prefix = match entries.keys().find_map(|name| name.strip_suffix(ANCHOR)) {
+        Some(prefix) if !prefix.is_empty() && prefix.ends_with('.') => prefix.to_string(),
+        _ => return entries,
+    };
+    if !entries.keys().all(|name| name.starts_with(&prefix)) {
+        return entries;
+    }
+    entries.into_iter().map(|(name, entry)| (name[prefix.len()..].to_string(), entry)).collect()
+}
+
 pub struct Checkpoint {
     path: PathBuf,
     map: Mmap,
@@ -113,6 +131,7 @@ impl Checkpoint {
                 })
                 .collect()
         };
+        let entries = unwrap_model(entries);
         Ok(Checkpoint { path: path.to_path_buf(), map, entries })
     }
 
@@ -201,6 +220,29 @@ mod tests {
         assert!(!file.has("__metadata__"), "metadata is not a tensor");
         let error = file.get("missing").unwrap_err();
         assert!(error.0.starts_with("missing tensor missing in "), "{error}");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn a_whole_model_save_reads_under_the_transformer_names() {
+        let header = r#"{"__metadata__":{"workflow":"{}"},
+            "model.diffusion_model.blocks.0.attn.wq.weight":{"dtype":"I8","shape":[1],"data_offsets":[0,1]},
+            "model.diffusion_model.first.weight":{"dtype":"I8","shape":[1],"data_offsets":[1,2]}}"#;
+        let path = write("wrapped.safetensors", header, &[7, 9]);
+        let file = Checkpoint::open(&path).expect("the fixture opens");
+        assert_eq!(file.get("first.weight").expect("unwrapped").bytes, &[9]);
+        assert_eq!(file.block_count(), 1);
+        assert!(!file.has("model.diffusion_model.first.weight"));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn names_without_a_shared_wrapper_are_kept() {
+        let header = r#"{"model.blocks.0.attn.wq.weight":{"dtype":"I8","shape":[1],"data_offsets":[0,1]},
+            "first.weight":{"dtype":"I8","shape":[1],"data_offsets":[1,2]}}"#;
+        let path = write("mixed.safetensors", header, &[7, 9]);
+        let file = Checkpoint::open(&path).expect("the fixture opens");
+        assert!(file.has("model.blocks.0.attn.wq.weight") && file.has("first.weight"));
         std::fs::remove_file(path).ok();
     }
 }
