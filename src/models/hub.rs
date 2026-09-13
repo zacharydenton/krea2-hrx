@@ -9,8 +9,7 @@ use hf_hub::{HFClientSync, HFError};
 
 use super::{Error, Result};
 
-/// ComfyUI's Krea 2 repository, whose layout is the models directory's:
-/// `diffusion_models/`, `text_encoders/`, `vae/`.
+/// The upstream quantized checkpoints; repository paths stay inside the HF cache.
 pub const REPO: (&str, &str) = ("Comfy-Org", "Krea-2");
 
 /// The text encoder's own repository, which is where its tokenizer lives.

@@ -74,12 +74,75 @@ fn default_model_reuses_the_standard_cache_and_environment_overrides() {
 }
 
 #[test]
-fn an_explicit_models_directory_still_supplies_the_default_checkpoint() {
+fn explicit_checkpoints_do_not_search_sibling_model_directories() {
     let home = tempfile::tempdir().unwrap();
-    let models = home.path().join("models");
-    std::fs::create_dir_all(models.join("diffusion_models")).unwrap();
-    let checkpoint = models.join("diffusion_models/krea2_turbo_int8_convrot.safetensors");
+    let checkpoint = home.path().join("diffusion_models/custom.safetensors");
+    std::fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(home.path().join("text_encoders")).unwrap();
     std::fs::write(&checkpoint, b"").unwrap();
-    let message = error(cli(home.path()).arg("--models").arg(&models));
-    assert!(message.contains("the text encoder was not found"), "{message}");
+    std::fs::write(home.path().join("text_encoders/qwen3vl_4b_bf16.safetensors"), b"").unwrap();
+    let message = error(cli(home.path()).arg("--model").arg(&checkpoint));
+    assert!(message.contains("text_encoders/qwen3vl_4b_bf16.safetensors"), "{message}");
+    assert!(message.contains("is not in the Hugging Face cache"), "{message}");
+}
+
+#[test]
+fn all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback() {
+    const CHILD: &str = "KREA2_TEST_CACHE_ROOT";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let snapshot = root.join("models--Comfy-Org--Krea-2/snapshots/test-revision");
+        let encoder = snapshot.join("text_encoders/qwen3vl_4b_bf16.safetensors");
+        let fp8 = snapshot.join("text_encoders/qwen3vl_4b_fp8_scaled.safetensors");
+        let vae = snapshot.join("vae/qwen_image_vae.safetensors");
+        let request =
+            krea2::models::Files::of(Path::new("krea2_turbo_int8_convrot")).offline(true);
+        let files = request.clone().resolve().unwrap();
+        assert_eq!(
+            files.checkpoint,
+            snapshot.join("diffusion_models/krea2_turbo_int8_convrot.safetensors")
+        );
+        assert_eq!(files.text_encoder, encoder);
+        assert_eq!(files.vae, vae);
+        assert!(files.distilled);
+        std::fs::remove_file(encoder).unwrap();
+        assert_eq!(request.clone().resolve().unwrap().text_encoder, fp8);
+        std::fs::remove_file(vae).unwrap();
+        let error = request.resolve().unwrap_err();
+        assert!(error.0.contains("vae/qwen_image_vae.safetensors"), "{error}");
+        assert!(error.0.contains("is not in the Hugging Face cache"), "{error}");
+        return;
+    }
+    // A subprocess isolates HF's cached client and environment from other tests.
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join("hub");
+    let repository = cache.join("models--Comfy-Org--Krea-2");
+    std::fs::create_dir_all(repository.join("refs")).unwrap();
+    std::fs::write(repository.join("refs/main"), "test-revision").unwrap();
+    for name in [
+        "diffusion_models/krea2_turbo_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_4b_bf16.safetensors",
+        "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+        "vae/qwen_image_vae.safetensors",
+    ] {
+        let path = repository.join("snapshots/test-revision").join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"").unwrap();
+    }
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback",
+        ])
+        .env(CHILD, &cache)
+        .env("HF_HUB_CACHE", &cache)
+        .env("HF_HUB_OFFLINE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

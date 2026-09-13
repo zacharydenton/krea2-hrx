@@ -84,23 +84,9 @@ with `HF_HOME` defaulting to `$XDG_CACHE_HOME/huggingface` when set, or
 `HF_HUB_OFFLINE=1` requires cached or local weights and disables downloads,
 including the optional tokenizer lookup; the embedded tokenizer works offline.
 
-To reuse a ComfyUI models directory, pass `--models /path/to/comfy-models`.
-This optional directory is searched before the HF cache and uses this layout:
-
-```text
-comfy-models/
-├── diffusion_models/
-│   ├── krea2_turbo_int8_convrot.safetensors
-│   └── krea2_raw_int8_convrot.safetensors     # optional
-├── text_encoders/
-│   └── qwen3vl_4b_bf16.safetensors
-└── vae/
-    └── qwen_image_vae.safetensors
-```
-
-The `qwen3vl_4b_fp8_scaled.safetensors` text encoder is also supported; bf16 is
-preferred when both are present. An existing ComfyUI models directory works
-without conversion.
+The checkpoint, Qwen3-VL-4B text encoder, and Qwen-Image VAE all resolve through
+the cache automatically. The bf16 text encoder is preferred; an already cached
+`qwen3vl_4b_fp8_scaled.safetensors` is also supported.
 
 To select a checkpoint by name explicitly:
 
@@ -108,14 +94,21 @@ To select a checkpoint by name explicitly:
 krea2 --model krea2_turbo_int8_convrot -p "a red fox in the snow"
 ```
 
-Explicit model paths require local weight files. Use `--text-encoder` and
-`--vae` to override those files individually.
+For individual files outside the cache, pass explicit paths. They can live
+anywhere; no directory layout is required. Components without an override
+continue to use the HF cache.
+
+```sh
+krea2 --model /path/to/checkpoint.safetensors \
+  --text-encoder /path/to/encoder.safetensors --vae /path/to/decoder.safetensors \
+  -p "a lighthouse at dusk"
+```
 
 ## Generate
 
 ```sh
 krea2 -p "a red fox in the snow" --out fox.png
-krea2 --models /path/to/comfy-models -p "a lighthouse at dusk" \
+krea2 -p "a lighthouse at dusk" \
   --width 768 --height 1024 --seed 7 --out lighthouse.png
 printf '%s\n' "a mountain lake at dawn" | krea2 --checkpoint raw \
   --negative "blurry" --guidance 3.5 --out lake.png

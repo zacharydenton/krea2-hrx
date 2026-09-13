@@ -47,24 +47,20 @@ struct Args {
     /// Classifier-free guidance, cond + g * (cond - uncond)
     #[arg(long)]
     guidance: Option<f32>,
-    /// Checkpoint to load from the Hugging Face cache or --models (default: turbo).
+    /// Checkpoint to load from the Hugging Face cache (default: turbo).
     /// Given explicitly it also selects the sampler.
     #[arg(long, value_parser = ["turbo", "raw"])]
     checkpoint: Option<String>,
     /// Attention kernels, chosen when a sequence length is first compiled
     #[arg(long, value_parser = ["f16", "i8", "i4"])]
     attn: Option<String>,
-    /// Optional ComfyUI models directory to search before the Hugging Face cache
-    #[arg(long)]
-    models: Option<String>,
-    /// The int8 ConvRot checkpoint, overriding --models: a path, or the name of
-    /// one in Comfy-Org/Krea-2 to fetch through the Hugging Face cache
+    /// The int8 ConvRot checkpoint: an explicit file or a name in Comfy-Org/Krea-2
     #[arg(long)]
     model: Option<PathBuf>,
-    /// Qwen3-VL-4B text encoder (default: beside the model)
+    /// Qwen3-VL-4B text encoder file (default: Hugging Face cache)
     #[arg(long)]
     text_encoder: Option<PathBuf>,
-    /// Qwen-Image VAE (default: beside the model)
+    /// Qwen-Image VAE file (default: Hugging Face cache)
     #[arg(long)]
     vae: Option<PathBuf>,
     /// Loom shared library override (default: HRX_LOOM_LIBRARY or the pinned bundle)
@@ -73,16 +69,6 @@ struct Args {
     /// Only the output lines
     #[arg(short, long)]
     quiet: bool,
-}
-
-fn expand_home(path: &str) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(rest) => match std::env::var_os("HOME") {
-            Some(home) => Path::new(&home).join(rest),
-            None => PathBuf::from(path),
-        },
-        None => PathBuf::from(path),
-    }
 }
 
 /// The name for image `index` of `count`: "fox.png" alone, else "fox-3.png".
@@ -154,8 +140,6 @@ fn run(args: Args) -> Result<()> {
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
         bail!("--guidance must be between 0 and 100");
     }
-    // Names use the standard Hugging Face cache; a local model tree is opt-in.
-    let models = args.models.as_deref().map(expand_home);
     let named = args.checkpoint.as_deref().unwrap_or("turbo");
     let model = args
         .model
@@ -185,7 +169,6 @@ fn run(args: Args) -> Result<()> {
 
     let loading = Instant::now();
     let files = Files::of(&model)
-        .models(models.as_deref())
         .text_encoder(args.text_encoder.as_deref())
         .vae(args.vae.as_deref())
         // Only when asked for: otherwise the file's own name decides, so
@@ -277,14 +260,6 @@ mod tests {
         // A name without an extension, and a directory with a dot in it.
         assert_eq!(numbered(Path::new("out"), 2, 3), PathBuf::from("out-2"));
         assert_eq!(numbered(Path::new("v1.2/fox"), 1, 2), PathBuf::from("v1.2/fox-1"));
-    }
-
-    #[test]
-    fn home_expands_only_at_the_front() {
-        std::env::set_var("HOME", "/home/someone");
-        assert_eq!(expand_home("~/comfy-models"), PathBuf::from("/home/someone/comfy-models"));
-        assert_eq!(expand_home("/models"), PathBuf::from("/models"));
-        assert_eq!(expand_home("./a~/b"), PathBuf::from("./a~/b"));
     }
 
     #[test]

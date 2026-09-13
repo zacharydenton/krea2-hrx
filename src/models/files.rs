@@ -1,7 +1,5 @@
-//! Model discovery from local ComfyUI directories and the Hugging Face cache.
-//!
-//! Names search local models before the hub. Explicit paths require local weight
-//! files. The Qwen tokenizer is resolved separately, with an embedded fallback.
+//! Model discovery through the standard Hugging Face cache or explicit files.
+//! The Qwen tokenizer is resolved separately, with an embedded fallback.
 use std::path::{Path, PathBuf};
 
 use super::hub;
@@ -24,14 +22,7 @@ impl Files {
     /// Resolves `checkpoint`, which is either a path to a file or the name of
     /// one in ComfyUI's Krea 2 repository (`krea2_turbo_int8_convrot`).
     pub fn of(checkpoint: &Path) -> Request<'_> {
-        Request {
-            checkpoint,
-            models: None,
-            text_encoder: None,
-            vae: None,
-            distilled: None,
-            offline: false,
-        }
+        Request { checkpoint, text_encoder: None, vae: None, distilled: None, offline: false }
     }
 }
 
@@ -39,7 +30,6 @@ impl Files {
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
     checkpoint: &'a Path,
-    models: Option<&'a Path>,
     text_encoder: Option<&'a Path>,
     vae: Option<&'a Path>,
     distilled: Option<bool>,
@@ -47,13 +37,6 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
-    /// ComfyUI's models directory, searched before the hub when the checkpoint
-    /// is named rather than pathed.
-    pub fn models(mut self, directory: Option<&'a Path>) -> Request<'a> {
-        self.models = directory;
-        self
-    }
-
     /// Overrides the text encoder, which is otherwise the bf16 one where both
     /// it and the fp8 one are present.
     pub fn text_encoder(mut self, path: Option<&'a Path>) -> Request<'a> {
@@ -80,50 +63,21 @@ impl<'a> Request<'a> {
     }
 
     pub fn resolve(self) -> Result<Files> {
-        // Only model names permit hub fallback; missing explicit paths are errors.
-        let beside = |path: &Path| path.parent().and_then(Path::parent).map(Path::to_path_buf);
-        let (checkpoint, root) =
+        let checkpoint =
             match std::path::absolute(self.checkpoint).ok().filter(|path| path.is_file()) {
-                Some(path) => {
-                    let root = beside(&path);
-                    (path, root)
-                }
-                // Not a file, so it is a name: the models directory, then the hub.
-                None => {
-                    let name = self.repository_name()?;
-                    match self.models.map(|root| root.join(&name)).filter(|path| path.is_file())
-                    {
-                        Some(path) => {
-                            let root = beside(&path);
-                            (path, root)
-                        }
-                        None => (hub::file(hub::REPO, &name, self.offline)?, None),
-                    }
-                }
+                Some(path) => path,
+                None => hub::file(hub::REPO, &self.repository_name()?, self.offline)?,
             };
-        let named = root.is_none();
         let text_encoder = match self.text_encoder {
             Some(path) => path.to_path_buf(),
-            None => self.find(
-                root.as_deref(),
-                &[
-                    "text_encoders/qwen3vl_4b_bf16.safetensors",
-                    "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
-                ],
-                named,
-                "text encoder",
-                "<models>/text_encoders/qwen3vl_4b_{bf16,fp8_scaled}.safetensors",
-            )?,
+            None => self.find(&[
+                "text_encoders/qwen3vl_4b_bf16.safetensors",
+                "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+            ])?,
         };
         let vae = match self.vae {
             Some(path) => path.to_path_buf(),
-            None => self.find(
-                root.as_deref(),
-                &["vae/qwen_image_vae.safetensors"],
-                named,
-                "VAE",
-                "<models>/vae/qwen_image_vae.safetensors",
-            )?,
+            None => self.find(&["vae/qwen_image_vae.safetensors"])?,
         };
         let distilled = self.distilled.unwrap_or_else(|| {
             !checkpoint
@@ -143,49 +97,23 @@ impl<'a> Request<'a> {
             .checkpoint
             .to_str()
             .ok_or_else(|| Error(format!("{} is not a name", self.checkpoint.display())))?;
-        if name.is_empty() || name.starts_with('/') || name.contains("..") {
+        if name.is_empty() || name.contains('/') || name.contains("..") {
             return Err(Error(format!("cannot read {name}")));
         }
         let name = match name.ends_with(".safetensors") {
             true => name.to_string(),
             false => format!("{name}.safetensors"),
         };
-        Ok(match name.contains('/') {
-            true => name,
-            false => format!("diffusion_models/{name}"),
-        })
+        Ok(format!("diffusion_models/{name}"))
     }
 
-    /// The first of `names` beside the checkpoint or in the Hugging Face
-    /// cache. `fetch` allows the network for a file neither one has.
-    fn find(
-        &self,
-        root: Option<&Path>,
-        names: &[&str],
-        fetch: bool,
-        what: &str,
-        expected: &str,
-    ) -> Result<PathBuf> {
-        if let Some(root) = root {
-            if let Some(path) = names.iter().map(|name| root.join(name)).find(|p| p.is_file()) {
-                return Ok(path);
-            }
-        }
+    /// Reuse the first cached variant, otherwise download the preferred one.
+    fn find(&self, names: &[&str]) -> Result<PathBuf> {
         if let Some(path) = names.iter().find_map(|name| hub::cached(hub::REPO, name)) {
             return Ok(path);
         }
         let wanted = names.first().ok_or_else(|| Error("nothing to look for".into()))?;
-        if fetch && !self.offline {
-            return hub::file(hub::REPO, wanted, false);
-        }
-        Err(Error(format!(
-            "the {what} was not found beside {} or in the Hugging Face cache \
-             (expected {expected}; pass it explicitly, or name a checkpoint to fetch \
-             the set from {}/{})",
-            self.checkpoint.display(),
-            hub::REPO.0,
-            hub::REPO.1
-        )))
+        hub::file(hub::REPO, wanted, self.offline)
     }
 }
 
@@ -193,93 +121,32 @@ impl<'a> Request<'a> {
 mod tests {
     use super::*;
 
-    /// A models directory with empty files, enough for path resolution.
-    fn layout(name: &str, text_encoder: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("krea2-files-{}-{name}", std::process::id()));
-        for directory in ["diffusion_models", "text_encoders", "vae"] {
-            std::fs::create_dir_all(root.join(directory)).expect("the layout");
+    #[test]
+    fn explicit_files_need_no_directory_layout_and_preserve_sampler_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let checkpoint = directory.path().join("custom_raw.safetensors");
+        let encoder = directory.path().join("encoder.safetensors");
+        let vae = directory.path().join("decoder.safetensors");
+        for path in [&checkpoint, &encoder, &vae] {
+            std::fs::write(path, b"").unwrap();
         }
-        std::fs::write(root.join("diffusion_models").join(name), b"").expect("the checkpoint");
-        std::fs::write(root.join("text_encoders").join(text_encoder), b"")
-            .expect("the encoder");
-        std::fs::write(root.join("vae/qwen_image_vae.safetensors"), b"").expect("the vae");
-        root
+        let request =
+            Files::of(&checkpoint).text_encoder(Some(&encoder)).vae(Some(&vae)).offline(true);
+        let files = request.clone().resolve().unwrap();
+        assert_eq!(files.checkpoint, checkpoint);
+        assert_eq!(files.text_encoder, encoder);
+        assert_eq!(files.vae, vae);
+        assert!(!files.distilled);
+        assert!(request.distilled(Some(true)).resolve().unwrap().distilled);
     }
 
     #[test]
-    fn the_siblings_are_found_and_the_name_says_which_sampler() {
-        let root =
-            layout("krea2_turbo_int8_convrot.safetensors", "qwen3vl_4b_bf16.safetensors");
-        let checkpoint = root.join("diffusion_models/krea2_turbo_int8_convrot.safetensors");
-        let files = Files::of(&checkpoint).resolve().expect("resolution");
-        assert_eq!(files.text_encoder, root.join("text_encoders/qwen3vl_4b_bf16.safetensors"));
-        assert_eq!(files.vae, root.join("vae/qwen_image_vae.safetensors"));
-        assert!(files.distilled, "a turbo checkpoint is distilled");
-
-        let raw = root.join("diffusion_models/krea2_raw_int8_convrot.safetensors");
-        std::fs::write(&raw, b"").expect("a raw checkpoint");
-        assert!(!Files::of(&raw).resolve().expect("resolution").distilled);
-        // An explicit choice wins over the name.
-        assert!(Files::of(&raw).distilled(Some(true)).resolve().expect("resolution").distilled);
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn the_fp8_encoder_is_the_fallback_and_a_missing_one_says_where_it_looked() {
-        let root = layout("krea2_turbo.safetensors", "qwen3vl_4b_fp8_scaled.safetensors");
-        let checkpoint = root.join("diffusion_models/krea2_turbo.safetensors");
-        let files = Files::of(&checkpoint).resolve().expect("resolution");
-        assert!(files.text_encoder.ends_with("qwen3vl_4b_fp8_scaled.safetensors"));
-
-        // A path was given, so a missing sibling is an error and never a
-        // download: the message names what is expected where.
-        std::fs::remove_file(&files.text_encoder).expect("removing the encoder");
-        let error = Files::of(&checkpoint).resolve().unwrap_err();
-        assert!(error.0.contains("the text encoder was not found beside"), "{error}");
-        assert!(error.0.contains("text_encoders/qwen3vl_4b_{bf16,fp8_scaled}"), "{error}");
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn a_named_checkpoint_is_found_in_the_models_directory_before_the_hub() {
-        // Offline, so if the models directory were skipped this would fail
-        // rather than quietly fetching thirteen gigabytes.
-        let root = layout("krea2_raw_int8_convrot.safetensors", "qwen3vl_4b_bf16.safetensors");
-        let files = Files::of(Path::new("krea2_raw_int8_convrot"))
-            .models(Some(&root))
-            .offline(true)
-            .resolve()
-            .expect("the local copy is found");
-        assert_eq!(
-            files.checkpoint,
-            root.join("diffusion_models/krea2_raw_int8_convrot.safetensors")
-        );
-        assert_eq!(files.text_encoder, root.join("text_encoders/qwen3vl_4b_bf16.safetensors"));
-        assert!(!files.distilled, "the name still decides the sampler");
-
-        // A name the directory does not have falls through to the hub.
-        let error = Files::of(Path::new("krea2_turbo_mxfp8"))
-            .models(Some(&root))
-            .offline(true)
-            .resolve()
-            .unwrap_err();
-        assert!(error.0.contains("diffusion_models/krea2_turbo_mxfp8.safetensors"), "{error}");
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn a_checkpoint_that_is_not_a_file_is_looked_for_in_the_repository() {
-        // Offline and uncached, so this reports the miss rather than fetching.
-        let error = Files::of(Path::new("krea2_turbo_int8_convrot"))
-            .offline(true)
-            .resolve()
-            .unwrap_err();
-        assert!(
-            error.0.contains(
-                "Comfy-Org/Krea-2/diffusion_models/krea2_turbo_int8_convrot.safetensors"
-            ),
-            "{error}"
-        );
+    fn missing_explicit_paths_are_errors_instead_of_hub_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let absolute = directory.path().join("missing.safetensors");
+        for path in [absolute.as_path(), Path::new("./missing.safetensors")] {
+            let error = Files::of(path).offline(true).resolve().unwrap_err();
+            assert!(error.0.contains("cannot read"), "{error}");
+        }
     }
 }
