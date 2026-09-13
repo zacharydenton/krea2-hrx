@@ -272,8 +272,12 @@ mod tests {
         let path = std::env::var_os("KREA2_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
-                std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"))
-                    .join("comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
+                crate::models::hub::file(
+                    crate::models::hub::REPO,
+                    "diffusion_models/krea2_turbo_int8_convrot.safetensors",
+                    true,
+                )
+                .expect("cache the Turbo checkpoint or set KREA2_MODEL")
             });
         Checkpoint::open(&path).expect("set KREA2_MODEL to a local checkpoint")
     }

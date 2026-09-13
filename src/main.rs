@@ -47,16 +47,16 @@ struct Args {
     /// Classifier-free guidance, cond + g * (cond - uncond)
     #[arg(long)]
     guidance: Option<f32>,
-    /// Which checkpoint to find under --models. Given explicitly it also picks
-    /// the sampler; left out, the checkpoint's own name decides.
+    /// Checkpoint to load from the Hugging Face cache or --models (default: turbo).
+    /// Given explicitly it also selects the sampler.
     #[arg(long, value_parser = ["turbo", "raw"])]
     checkpoint: Option<String>,
     /// Attention kernels, chosen when a sequence length is first compiled
     #[arg(long, value_parser = ["f16", "i8", "i4"])]
     attn: Option<String>,
-    /// ComfyUI's models directory, holding diffusion_models/, text_encoders/ and vae/
-    #[arg(long, default_value = "~/comfy-models")]
-    models: String,
+    /// Optional ComfyUI models directory to search before the Hugging Face cache
+    #[arg(long)]
+    models: Option<String>,
     /// The int8 ConvRot checkpoint, overriding --models: a path, or the name of
     /// one in Comfy-Org/Krea-2 to fetch through the Hugging Face cache
     #[arg(long)]
@@ -154,21 +154,13 @@ fn run(args: Args) -> Result<()> {
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
         bail!("--guidance must be between 0 and 100");
     }
-    // Without --model, require the selected checkpoint in the local models tree.
-    let models = expand_home(&args.models);
+    // Names use the standard Hugging Face cache; a local model tree is opt-in.
+    let models = args.models.as_deref().map(expand_home);
     let named = args.checkpoint.as_deref().unwrap_or("turbo");
-    let model = match &args.model {
-        Some(model) => model.clone(),
-        None => {
-            let path = models
-                .join("diffusion_models")
-                .join(format!("krea2_{named}_int8_convrot.safetensors"));
-            if !path.is_file() {
-                bail!("{} not found (--models DIR, or --model FILE)", path.display());
-            }
-            path
-        }
-    };
+    let model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("krea2_{named}_int8_convrot")));
     let directory = args.out.parent().filter(|p| !p.as_os_str().is_empty());
     if let Some(directory) = directory {
         if !directory.is_dir() {
@@ -193,7 +185,7 @@ fn run(args: Args) -> Result<()> {
 
     let loading = Instant::now();
     let files = Files::of(&model)
-        .models(Some(&models))
+        .models(models.as_deref())
         .text_encoder(args.text_encoder.as_deref())
         .vae(args.vae.as_deref())
         // Only when asked for: otherwise the file's own name decides, so

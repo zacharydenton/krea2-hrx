@@ -1075,8 +1075,12 @@ mod tests {
         use std::path::PathBuf;
         let checkpoint =
             std::env::var_os("KREA2_MODEL").map(PathBuf::from).unwrap_or_else(|| {
-                PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-                    .join("comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
+                crate::models::hub::file(
+                    crate::models::hub::REPO,
+                    "diffusion_models/krea2_turbo_int8_convrot.safetensors",
+                    true,
+                )
+                .expect("cache the Turbo checkpoint or set KREA2_MODEL")
             });
         assert!(checkpoint.is_file(), "set KREA2_MODEL to a local checkpoint");
         let tokens = 4115;

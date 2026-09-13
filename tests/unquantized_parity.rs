@@ -311,8 +311,12 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let accepted_rgb = (!minting).then(|| rgb(&fixture.join("w8a8.png"), size));
     let checkpoint =
         std::env::var_os("KREA2_CHECKPOINT").map(PathBuf::from).unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap())
-                .join("comfy-models/diffusion_models/krea2_turbo_int8_convrot.safetensors")
+            krea2::models::hub::file(
+                krea2::models::hub::REPO,
+                "diffusion_models/krea2_turbo_int8_convrot.safetensors",
+                true,
+            )
+            .expect("cache the Turbo checkpoint or set KREA2_CHECKPOINT")
         });
     // Run the production GPU Euler kernel, including its BF16 rounding, rather
     // than substituting a host sampler in the parity check.

@@ -115,7 +115,10 @@ regress; the measuring stick moved onto firmer ground.
 
 The default fixture directory is `build/quality`; `KREA2_QUALITY_FIXTURE` can point
 to another copy of the same frozen fixture. `KREA2_CHECKPOINT` selects the native
-candidate's checkpoint. Missing fixtures or weights fail explicitly. Reference
+candidate's checkpoint; otherwise the Turbo checkpoint must be present in the
+standard Hugging Face cache. Checkpoint and session tests use the same cache by
+default, with `KREA2_MODEL` as an explicit file override. These tests do not
+download missing weights. Missing fixtures or weights fail explicitly. Reference
 file hashes are pinned in `tests/fixtures/unquantized.json`; the
 runner never creates or updates its own ground truth. The test needs no Python,
 NumPy or Torch.

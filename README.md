@@ -52,7 +52,7 @@ cargo install --locked --version 0.4.0 --features runner,npu hrx-rs
 hrx prepare
 cargo install --locked --path .
 
-krea2 --model krea2_turbo_int8_convrot -p "a red fox in the snow" --out fox.png
+krea2 -p "a red fox in the snow" --out fox.png
 ```
 
 The repository and Cargo package are named `krea2-hrx`; the installed command is
@@ -69,8 +69,23 @@ without NPU support. Chess is needed only for explicit qualification.
 
 ## Models
 
-Use the files from [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2)
-in this layout (the default root is `~/comfy-models`):
+Models from [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2) are downloaded
+and reused in the **standard Hugging Face cache**, normally
+`~/.cache/huggingface/hub`. No separate models directory is needed:
+
+```sh
+krea2 -p "a red fox in the snow"                     # Turbo by default
+krea2 --checkpoint raw -p "a mountain lake at dawn"
+```
+
+`HF_HUB_CACHE` overrides the cache directory. Otherwise it is `$HF_HOME/hub`,
+with `HF_HOME` defaulting to `$XDG_CACHE_HOME/huggingface` when set, or
+`~/.cache/huggingface`. Existing cached downloads are reused before network access.
+`HF_HUB_OFFLINE=1` requires cached or local weights and disables downloads,
+including the optional tokenizer lookup; the embedded tokenizer works offline.
+
+To reuse a ComfyUI models directory, pass `--models /path/to/comfy-models`.
+This optional directory is searched before the HF cache and uses this layout:
 
 ```text
 comfy-models/
@@ -87,15 +102,14 @@ The `qwen3vl_4b_fp8_scaled.safetensors` text encoder is also supported; bf16 is
 preferred when both are present. An existing ComfyUI models directory works
 without conversion.
 
-To download missing models through the Hugging Face cache, use a model name:
+To select a checkpoint by name explicitly:
 
 ```sh
 krea2 --model krea2_turbo_int8_convrot -p "a red fox in the snow"
 ```
 
-Explicit model paths require local weight files. `HF_HUB_OFFLINE=1` disables
-network access, including the optional tokenizer lookup; the embedded tokenizer
-is available offline.
+Explicit model paths require local weight files. Use `--text-encoder` and
+`--vae` to override those files individually.
 
 ## Generate
 
