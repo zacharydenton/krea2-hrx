@@ -66,7 +66,7 @@ fn array(path: &Path, shape: &[usize]) -> Vec<f32> {
     let data = &bytes[start + len..];
     assert_eq!(data.len(), shape.iter().product::<usize>() * 4);
     let result: Vec<f32> =
-        data.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
+        data.as_chunks::<4>().0.iter().map(|v| f32::from_le_bytes(*v)).collect();
     assert!(result.iter().all(|v| v.is_finite()), "{}", path.display());
     result
 }
@@ -236,7 +236,7 @@ fn candidate_export_preserves_native_pixels_and_binds_reference() {
     assert_eq!(rgb(&sidecar(&path, ".png"), 16), pixels);
     let raw = std::fs::read(&path).unwrap();
     let restored: Vec<f32> =
-        raw.chunks_exact(4).map(|v| f32::from_le_bytes(v.try_into().unwrap())).collect();
+        raw.as_chunks::<4>().0.iter().map(|v| f32::from_le_bytes(*v)).collect();
     assert_eq!(restored, state);
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(sidecar(&path, ".json")).unwrap()).unwrap();

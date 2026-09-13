@@ -55,5 +55,9 @@ fn main() {
     }
     let mut result = [0u8; 512];
     stream.read_blocking(y.binding(), &mut result).unwrap();
-    assert!(result.chunks_exact(2).all(|b| u16::from_le_bytes([b[0], b[1]]) == 0x3f80));
+    assert!(result
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .all(|b| u16::from_le_bytes([b[0], b[1]]) == 0x3f80));
 }

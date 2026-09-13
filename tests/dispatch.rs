@@ -56,7 +56,7 @@ fn unary_one_writes_one_into_every_element() {
 
     let mut bytes = vec![0u8; COUNT * 2];
     stream.read_blocking(y.binding(), &mut bytes).expect("reading the output back");
-    for (index, half) in bytes.chunks_exact(2).enumerate() {
+    for (index, half) in bytes.as_chunks::<2>().0.iter().enumerate() {
         let bits = u16::from_le_bytes([half[0], half[1]]);
         assert_eq!(bits, 0x3f80, "element {index} is {bits:#06x}, not bf16 1.0");
     }

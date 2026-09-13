@@ -235,10 +235,10 @@ fn vector(file: &Checkpoint, name: &str) -> Result<Span> {
     if tensor.dtype == "BF16" {
         let host: Vec<u8> = tensor
             .bytes
-            .chunks_exact(2)
-            .flat_map(|bits| {
-                crate::numerics::to_f32(u16::from_le_bytes([bits[0], bits[1]])).to_le_bytes()
-            })
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|bits| crate::numerics::to_f32(u16::from_le_bytes(*bits)).to_le_bytes())
             .collect();
         return Ok(Span {
             device_offset: 0,

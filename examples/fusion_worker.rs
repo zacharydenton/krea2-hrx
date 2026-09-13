@@ -112,9 +112,11 @@ fn main() -> anyhow::Result<()> {
     // incomplete writes; restore the captured activation before timing.
     for variant in 0..3 {
         let changed: Vec<u8> = input
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|bytes| {
-                let mut value = u16::from_le_bytes(bytes.try_into().unwrap());
+                let mut value = u16::from_le_bytes(*bytes);
                 if variant == 1 {
                     value ^= 0x8000;
                 }
@@ -155,9 +157,9 @@ fn main() -> anyhow::Result<()> {
     stream.read_blocking(y.binding()?, &mut output)?;
     let mut squared = 0f64;
     let mut norm = 0f64;
-    for (a, b) in gpu.chunks_exact(2).zip(output.chunks_exact(2)) {
-        let a = f32::from_bits(u32::from(u16::from_le_bytes(a.try_into()?)) << 16) as f64;
-        let b = f32::from_bits(u32::from(u16::from_le_bytes(b.try_into()?)) << 16) as f64;
+    for (a, b) in gpu.as_chunks::<2>().0.iter().zip(output.as_chunks::<2>().0.iter()) {
+        let a = f32::from_bits(u32::from(u16::from_le_bytes(*a)) << 16) as f64;
+        let b = f32::from_bits(u32::from(u16::from_le_bytes(*b)) << 16) as f64;
         if !a.is_finite() || !b.is_finite() {
             samples.correct = false;
         }

@@ -238,7 +238,9 @@ fn channels_last(values: &[u8], shape: &[usize], element: usize) -> Vec<u8> {
 
 fn read_f32(bytes: &[u8], count: usize) -> Vec<f32> {
     bytes[..count * 4]
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("four bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }

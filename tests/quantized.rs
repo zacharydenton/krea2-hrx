@@ -63,9 +63,11 @@ fn bytes<T: bytemuck::Pod>(v: &[T]) -> Vec<u8> {
     bytemuck::cast_slice(v).to_vec()
 }
 fn halves(v: &[u8], bf: bool) -> Vec<f64> {
-    v.chunks_exact(2)
+    v.as_chunks::<2>()
+        .0
+        .iter()
         .map(|b| {
-            let n = u16::from_le_bytes(b.try_into().unwrap());
+            let n = u16::from_le_bytes(*b);
             if bf {
                 bf16::from_bits(n).to_f64()
             } else {
@@ -193,7 +195,9 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
                         if bits == 8 {
                             v.iter().map(|&x| x as u8).collect()
                         } else {
-                            v.chunks_exact(2)
+                            v.as_chunks::<2>()
+                                .0
+                                .iter()
                                 .map(|x| (x[0] as u8 & 15) | ((x[1] as u8 & 15) << 4))
                                 .collect()
                         }

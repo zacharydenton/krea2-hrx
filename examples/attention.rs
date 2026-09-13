@@ -80,8 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bytes = stream.read(bindings[3])?.wait(&mut stream)?;
         if let Some(ref original) = baseline {
             let different = bytes
-                .chunks_exact(2)
-                .zip(original.chunks_exact(2))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(original.as_chunks::<2>().0.iter())
                 .filter(|(a, b)| a != b)
                 .count();
             println!("{i}: differing output elements {different}/{}", tokens * 6144);
