@@ -48,7 +48,7 @@ fn default_model_reuses_the_standard_cache_and_environment_overrides() {
             _ => unreachable!(),
         };
         let repository = cache.join("models--Comfy-Org--Krea-2");
-        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let revision = krea2::models::hub::REVISION;
         let snapshot = repository.join("snapshots").join(revision);
         std::fs::create_dir_all(repository.join("refs")).unwrap();
         std::fs::create_dir_all(snapshot.join("diffusion_models")).unwrap();
@@ -81,17 +81,19 @@ fn explicit_checkpoints_do_not_search_sibling_model_directories() {
     std::fs::create_dir_all(home.path().join("text_encoders")).unwrap();
     std::fs::write(&checkpoint, b"").unwrap();
     std::fs::write(home.path().join("text_encoders/qwen3vl_4b_bf16.safetensors"), b"").unwrap();
-    let message = error(cli(home.path()).arg("--model").arg(&checkpoint));
+    let message =
+        error(cli(home.path()).arg("--model").arg(&checkpoint).args(["--checkpoint", "turbo"]));
     assert!(message.contains("text_encoders/qwen3vl_4b_bf16.safetensors"), "{message}");
     assert!(message.contains("is not in the Hugging Face cache"), "{message}");
 }
 
 #[test]
-fn all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback() {
+fn model_resolution_is_pinned_and_independent_of_cached_precision() {
     const CHILD: &str = "KREA2_TEST_CACHE_ROOT";
     if let Some(root) = std::env::var_os(CHILD) {
         let root = std::path::PathBuf::from(root);
-        let snapshot = root.join("models--Comfy-Org--Krea-2/snapshots/test-revision");
+        let snapshot =
+            root.join("models--Comfy-Org--Krea-2/snapshots").join(krea2::models::hub::REVISION);
         let encoder = snapshot.join("text_encoders/qwen3vl_4b_bf16.safetensors");
         let fp8 = snapshot.join("text_encoders/qwen3vl_4b_fp8_scaled.safetensors");
         let vae = snapshot.join("vae/qwen_image_vae.safetensors");
@@ -105,8 +107,13 @@ fn all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback() {
         assert_eq!(files.text_encoder, encoder);
         assert_eq!(files.vae, vae);
         assert!(files.distilled);
-        std::fs::remove_file(encoder).unwrap();
-        assert_eq!(request.clone().resolve().unwrap().text_encoder, fp8);
+        assert!(files.tokenizer.is_none(), "use the embedded tokenizer");
+        std::fs::remove_file(&encoder).unwrap();
+        let error = request.clone().resolve().unwrap_err();
+        assert!(error.0.contains("text_encoders/qwen3vl_4b_bf16.safetensors"), "{error}");
+        let explicit = request.clone().text_encoder(Some(&fp8)).resolve().unwrap();
+        assert_eq!(explicit.text_encoder, fp8);
+        std::fs::write(encoder, b"").unwrap();
         std::fs::remove_file(vae).unwrap();
         let error = request.resolve().unwrap_err();
         assert!(error.0.contains("vae/qwen_image_vae.safetensors"), "{error}");
@@ -118,22 +125,20 @@ fn all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback() {
     let cache = home.path().join("hub");
     let repository = cache.join("models--Comfy-Org--Krea-2");
     std::fs::create_dir_all(repository.join("refs")).unwrap();
-    std::fs::write(repository.join("refs/main"), "test-revision").unwrap();
+    std::fs::write(repository.join("refs/main"), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        .unwrap();
     for name in [
         "diffusion_models/krea2_turbo_int8_convrot.safetensors",
         "text_encoders/qwen3vl_4b_bf16.safetensors",
         "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
         "vae/qwen_image_vae.safetensors",
     ] {
-        let path = repository.join("snapshots/test-revision").join(name);
+        let path = repository.join("snapshots").join(krea2::models::hub::REVISION).join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"").unwrap();
     }
     let output = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback",
-        ])
+        .args(["--exact", "model_resolution_is_pinned_and_independent_of_cached_precision"])
         .env(CHILD, &cache)
         .env("HF_HUB_CACHE", &cache)
         .env("HF_HUB_OFFLINE", "1")
@@ -145,4 +150,41 @@ fn all_components_resolve_from_hf_snapshots_with_cached_encoder_fallback() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn cli_distinguishes_invalid_arguments_from_runtime_failures() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["--unknown"],
+        vec!["--width", "65"],
+        vec!["--guidance", "NaN"],
+        vec!["--seed", "18446744073709551615", "--images", "2"],
+        vec!["--model", "./redraw.safetensors"],
+        vec!["--out", "image.jpg"],
+        vec!["--out", "image.webp"],
+        vec!["--out", "image"],
+    ] {
+        let output = cli(home.path()).args(&args).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!home.path().join("image.jpg").exists());
+    }
+    // An empty offline cache and a missing output directory are operational failures.
+    for args in [vec![], vec!["--out", "missing/image.png"]] {
+        let output = cli(home.path()).args(&args).output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for option in ["--help", "--version"] {
+        assert!(cli(home.path()).arg(option).output().unwrap().status.success());
+    }
 }

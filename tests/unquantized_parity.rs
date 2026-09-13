@@ -312,7 +312,6 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let checkpoint =
         std::env::var_os("KREA2_CHECKPOINT").map(PathBuf::from).unwrap_or_else(|| {
             krea2::models::hub::file(
-                krea2::models::hub::REPO,
                 "diffusion_models/krea2_turbo_int8_convrot.safetensors",
                 true,
             )
@@ -333,7 +332,7 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         Ok(other) => panic!("invalid quality fusion backend: {other}"),
     };
     let pipeline = Pipeline::with_options(
-        Files::of(&checkpoint).offline(true).resolve().unwrap(),
+        Files::of(&checkpoint).distilled(Some(true)).offline(true).resolve().unwrap(),
         None,
         krea2::pipeline::PipelineOptions { fusion_backend: backend },
     )

@@ -273,7 +273,6 @@ mod tests {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 crate::models::hub::file(
-                    crate::models::hub::REPO,
                     "diffusion_models/krea2_turbo_int8_convrot.safetensors",
                     true,
                 )

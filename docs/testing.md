@@ -145,7 +145,9 @@ files. Minting creates a baseline; it does not check for a regression. For separ
 fixtures, use `--work DIR` and `--manifest FILE` on the capture commands and
 `KREA2_QUALITY_FIXTURE=DIR KREA2_QUALITY_MANIFEST=FILE` on the Rust runner.
 `--checkpoint` remains as a labelled fallback that maps a
-local ComfyUI-format file onto the same official modules; it is recorded in
+local ComfyUI-format transformer onto the same official modules; the text
+encoder, tokenizer, and VAE still come from the pinned official repository via
+the HF cache. No local folder layout is required. The override is recorded in
 `job.json` as such. Captured both ways on the same machine, the two agree
 bit-for-bit, so the mapping is exact -- but only the `from_pretrained` path is
 free of this repository's own interpretation of the weights.
@@ -237,3 +239,10 @@ The script is slow by construction — dequantisation and the Hadamard rotations
 eager torch, about two minutes per forward — and it needs the ComfyUI-format files
 rather than the diffusers repository, because `w8a8` reads the packed rows and
 `weight_scale` tensors that the diffusers export does not carry.
+
+## Reference-loader checks
+
+`python3 -m unittest discover -s tests -p 'test_*.py'` checks the reference
+loader's pinned repository and explicit transformer override using Python's
+standard library and mocked model loaders. CI runs these separately from the
+Rust CPU suite. They do not download weights or replace the full parity gate.

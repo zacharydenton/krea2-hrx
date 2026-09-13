@@ -4,11 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use krea2::pipeline::{Files, Pipeline, Request};
-
-/// Exit code for anything the user can fix in the command line (EX_USAGE).
-const USAGE: i32 = 64;
 
 #[derive(Parser)]
 #[command(
@@ -29,7 +26,7 @@ struct Args {
     /// Negative prompt (guided sampling only)
     #[arg(short, long)]
     negative: Option<String>,
-    /// Output image; ".png" writes PNG, any other extension a binary PPM
+    /// Output image (.png or .ppm)
     #[arg(short, long, default_value = "image.png")]
     out: PathBuf,
     /// Images to generate, from consecutive seeds, named out-0, out-1, ...
@@ -47,8 +44,7 @@ struct Args {
     /// Classifier-free guidance, cond + g * (cond - uncond)
     #[arg(long)]
     guidance: Option<f32>,
-    /// Checkpoint to load from the Hugging Face cache (default: turbo).
-    /// Given explicitly it also selects the sampler.
+    /// Turbo or Raw sampler; required with a custom --model file (default model: Turbo)
     #[arg(long, value_parser = ["turbo", "raw"])]
     checkpoint: Option<String>,
     /// Attention kernels, chosen when a sequence length is first compiled
@@ -85,21 +81,47 @@ fn numbered(path: &Path, index: u32, count: u32) -> PathBuf {
     path.with_file_name(name)
 }
 
+#[derive(Clone, Copy)]
+enum OutputFormat {
+    Png,
+    Ppm,
+}
+
+fn output_format(path: &Path) -> std::result::Result<OutputFormat, &'static str> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("png") => Ok(OutputFormat::Png),
+        Some(extension) if extension.eq_ignore_ascii_case("ppm") => Ok(OutputFormat::Ppm),
+        _ => Err("--out must have a .png or .ppm extension"),
+    }
+}
+
 fn write_image(path: &Path, rgb: &[u8], width: i32, height: i32) -> Result<()> {
+    // Validate before creating the file so an unsupported extension never
+    // truncates an existing output or leaves misleading image bytes behind.
+    let format = output_format(path).map_err(anyhow::Error::msg)?;
     let file = std::fs::File::create(path)
         .with_context(|| format!("cannot write {}", path.display()))?;
     let mut file = std::io::BufWriter::new(file);
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("png")) {
-        let mut encoder = png::Encoder::new(file, width as u32, height as u32);
-        encoder.set_color(png::ColorType::Rgb);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.write_header()?.write_image_data(rgb)?;
-    } else {
-        write!(file, "P6\n{width} {height}\n255\n")?;
-        file.write_all(rgb)?;
-        file.flush()?;
+    match format {
+        OutputFormat::Png => {
+            let mut encoder = png::Encoder::new(&mut file, width as u32, height as u32);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(rgb)?;
+            writer.finish()?;
+        }
+        OutputFormat::Ppm => {
+            write!(file, "P6\n{width} {height}\n255\n")?;
+            file.write_all(rgb)?;
+        }
     }
+    file.flush()?;
     Ok(())
+}
+
+fn usage(message: impl Into<String>) -> anyhow::Error {
+    Args::command().error(clap::error::ErrorKind::ValueValidation, message.into()).into()
 }
 
 /// One line of sampling progress, redrawn in place, with the time left.
@@ -129,16 +151,20 @@ fn run(args: Args) -> Result<()> {
         None => prompt_from_stdin()?,
     };
     if prompt.trim().is_empty() {
-        bail!("no prompt (give -p \"...\" or pipe it on stdin)");
+        return Err(usage("no prompt (give -p \"...\" or pipe it on stdin)"));
     }
     if args.width % 16 != 0 || args.height % 16 != 0 {
-        bail!("--width and --height must be multiples of 16");
+        return Err(usage("--width and --height must be multiples of 16"));
     }
     if !(64..=2048).contains(&args.width) || !(64..=2048).contains(&args.height) {
-        bail!("--width and --height must be between 64 and 2048");
+        return Err(usage("--width and --height must be between 64 and 2048"));
     }
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
-        bail!("--guidance must be between 0 and 100");
+        return Err(usage("--guidance must be between 0 and 100"));
+    }
+    output_format(&args.out).map_err(usage)?;
+    if args.seed.checked_add(u64::from(args.images - 1)).is_none() {
+        return Err(usage("--seed plus --images exceeds the maximum seed"));
     }
     let named = args.checkpoint.as_deref().unwrap_or("turbo");
     let model = args
@@ -168,13 +194,14 @@ fn run(args: Args) -> Result<()> {
     }
 
     let loading = Instant::now();
-    let files = Files::of(&model)
+    let request = Files::of(&model)
         .text_encoder(args.text_encoder.as_deref())
         .vae(args.vae.as_deref())
-        // Only when asked for: otherwise the file's own name decides, so
-        // --model .../krea2_raw_... is not silently sampled as Turbo.
-        .distilled(args.checkpoint.as_deref().map(|choice| choice == "turbo"))
-        .resolve()?;
+        .distilled(args.checkpoint.as_deref().map(|choice| choice == "turbo"));
+    request
+        .is_distilled()
+        .map_err(|error| usage(format!("{error}; pass --checkpoint turbo or raw")))?;
+    let files = request.resolve()?;
     let compiler =
         args.compiler_library.as_ref().map(|path| path.to_string_lossy().into_owned());
     let pipeline = Pipeline::with_options(
@@ -231,19 +258,13 @@ fn run(args: Args) -> Result<()> {
 }
 
 fn main() {
-    // clap exits 2 on a bad command line; this CLI uses 64 (EX_USAGE) for every
-    // usage error, as the sibling runtimes do, and 0 for --help and --version.
-    let args = Args::try_parse().unwrap_or_else(|error| {
-        let _ = error.print();
-        std::process::exit(if error.use_stderr() { USAGE } else { 0 });
-    });
+    let args = Args::parse();
     if let Err(error) = run(args) {
+        if let Some(error) = error.downcast_ref::<clap::Error>() {
+            error.exit();
+        }
         eprintln!("krea2: {error:#}");
-        // Everything run() rejects itself is a usage error; the runtime's own
-        // failures arrive as krea2::pipeline::Error and take a distinct code.
-        let code =
-            if error.downcast_ref::<krea2::pipeline::Error>().is_some() { 1 } else { USAGE };
-        std::process::exit(code);
+        std::process::exit(1);
     }
 }
 
@@ -260,6 +281,19 @@ mod tests {
         // A name without an extension, and a directory with a dot in it.
         assert_eq!(numbered(Path::new("out"), 2, 3), PathBuf::from("out-2"));
         assert_eq!(numbered(Path::new("v1.2/fox"), 1, 2), PathBuf::from("v1.2/fox-1"));
+    }
+
+    #[test]
+    fn unsupported_formats_do_not_create_or_truncate_outputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("image.jpg");
+        assert!(write_image(&path, &[1, 2, 3], 1, 1).is_err());
+        assert!(!path.exists());
+        std::fs::write(&path, b"original").unwrap();
+        assert!(write_image(&path, &[1, 2, 3], 1, 1).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"original");
+        assert!(matches!(output_format(Path::new("image.PNG")), Ok(OutputFormat::Png)));
+        assert!(matches!(output_format(Path::new("image.PPM")), Ok(OutputFormat::Ppm)));
     }
 
     #[test]

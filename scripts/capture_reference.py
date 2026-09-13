@@ -50,8 +50,9 @@ from a build that has already drifted is the one mistake this gate cannot surviv
 capture is a new fixture with new hashes, so `manifest` has to be run after it and the result
 committed deliberately.
 
-Weights live outside the repository (`~/krea2-models` by default, `--models` to move it):
-`krea2_turbo_bf16.safetensors`, `qwen3-vl-4b/`, `qwen-image/vae/`.
+Model components use the standard Hugging Face cache. The optional --checkpoint
+fallback replaces only the transformer; other components come from the pinned
+official repository.
 """
 import argparse
 import hashlib
@@ -66,7 +67,6 @@ import numpy as np
 # Torch is imported by the stages that need it, not here: `manifest` is pure hashing and must
 # stay runnable on a box that has neither Torch nor Diffusers installed.
 ROOT = Path(__file__).resolve().parent.parent
-MODELS = Path.home() / "krea2-models"
 REPO = "krea/Krea-2-Turbo"
 # Immutable official snapshot present in the capture machine's Hugging Face cache.
 # This pins future captures; it does not retroactively attribute older fixtures.
@@ -161,10 +161,8 @@ def build(a, dtype):
         pipe = Krea2Pipeline.from_pretrained(a.repo, revision=revision, dtype=dtype)
         return pipe.to(a.device), {"repo": a.repo, "revision": revision}
 
-    from diffusers import AutoencoderKLQwenImage, FlowMatchEulerDiscreteScheduler
     from diffusers.models.transformers.transformer_krea2 import Krea2Transformer2DModel
     from safetensors.torch import load_file
-    from transformers import AutoTokenizer, Qwen3VLModel
 
     comfy = load_file(str(a.checkpoint), device=a.device)
     with torch.device("meta"):
@@ -183,16 +181,13 @@ def build(a, dtype):
     assert not unexpected, unexpected[:5]
     assert not missing, missing[:5]
     transformer = cast_transformer(transformer, dtype)
-    vae = AutoencoderKLQwenImage.from_pretrained(str(a.models / "qwen-image" / "vae"),
-                                                 torch_dtype=dtype).to(a.device)
-    vae.enable_tiling()
-    pipe = Krea2Pipeline(
-        scheduler=FlowMatchEulerDiscreteScheduler(**SCHEDULER), vae=vae,
-        text_encoder=Qwen3VLModel.from_pretrained(str(a.models / "qwen3-vl-4b"),
-                                                  torch_dtype=dtype).to(a.device),
-        tokenizer=AutoTokenizer.from_pretrained(str(a.models / "qwen3-vl-4b")),
-        transformer=transformer, is_distilled=True)
-    return pipe, {"checkpoint": str(a.checkpoint), "loaded_by": "local ComfyUI name mapping"}
+    revision = model_revision(a)
+    pipe = Krea2Pipeline.from_pretrained(
+        a.repo, revision=revision, dtype=dtype, transformer=transformer)
+    pipe.vae.enable_tiling()
+    return pipe.to(a.device), {"checkpoint": str(a.checkpoint),
+                              "loaded_by": "local ComfyUI name mapping",
+                              "repo": a.repo, "revision": revision}
 
 
 def unpack(latents, height, width, vae_scale=8, p=2):
@@ -399,7 +394,6 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("stage", choices=["reference", "accept", "manifest"])
     ap.add_argument("--work", type=Path, default=ROOT / "build/quality")
-    ap.add_argument("--models", type=Path, default=MODELS)
     ap.add_argument("--repo", default=REPO,
                     help="the official diffusers repository the reference is defined by")
     ap.add_argument("--revision", default=None,

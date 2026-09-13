@@ -81,12 +81,16 @@ krea2 --checkpoint raw -p "a mountain lake at dawn"
 `HF_HUB_CACHE` overrides the cache directory. Otherwise it is `$HF_HOME/hub`,
 with `HF_HOME` defaulting to `$XDG_CACHE_HOME/huggingface` when set, or
 `~/.cache/huggingface`. Existing cached downloads are reused before network access.
-`HF_HUB_OFFLINE=1` requires cached or local weights and disables downloads,
-including the optional tokenizer lookup; the embedded tokenizer works offline.
+`HF_HUB_OFFLINE=1` requires cached or local weights and disables downloads.
+HF boolean variables follow the [standard convention](https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables#boolean-values):
+`1`, `ON`, `YES`, and `TRUE` enable them (case-insensitive); other values, including
+`false`, leave them disabled. The bundled tokenizer needs no download.
 
 The checkpoint, Qwen3-VL-4B text encoder, and Qwen-Image VAE all resolve through
-the cache automatically. The bf16 text encoder is preferred; an already cached
-`qwen3vl_4b_fp8_scaled.safetensors` is also supported.
+the cache automatically, pinned to upstream revision
+[`e5ea8b4dd7f38f348b138eb0fe29f92c0e367e96`](https://huggingface.co/Comfy-Org/Krea-2/tree/e5ea8b4dd7f38f348b138eb0fe29f92c0e367e96).
+The default text encoder is always BF16. To use FP8, pass its file explicitly
+with `--text-encoder`; cache contents never change the default precision.
 
 To select a checkpoint by name explicitly:
 
@@ -99,7 +103,7 @@ anywhere; no directory layout is required. Components without an override
 continue to use the HF cache.
 
 ```sh
-krea2 --model /path/to/checkpoint.safetensors \
+krea2 --model /path/to/checkpoint.safetensors --checkpoint turbo \
   --text-encoder /path/to/encoder.safetensors --vae /path/to/decoder.safetensors \
   -p "a lighthouse at dusk"
 ```
@@ -121,12 +125,15 @@ printf '%s\n' "a mountain lake at dawn" | krea2 --checkpoint raw \
 
 `--steps` overrides the step count. `--images N` uses consecutive seeds and
 numbered output files. Dimensions must be multiples of 16 between 64 and 2048;
-text plus image tokens must fit the 16,896-token limit. PNG output is selected
-by `.png`; other extensions produce binary PPM.
+text plus image tokens must fit the 16,896-token limit. Output supports `.png`
+and `.ppm` (case-insensitive); unsupported extensions fail before model loading.
 
-Use `--model`, `--text-encoder` and `--vae` for individual files. The checkpoint
-name selects the sampler unless `--checkpoint` overrides it. `krea2 --help`
-lists all options. `KREA2_NATIVE_PROFILE=1` enables diagnostic stage timings.
+Use `--model`, `--text-encoder` and `--vae` for individual files. Custom checkpoint
+paths require `--checkpoint turbo` or `--checkpoint raw`; the two built-in model
+identifiers select their corresponding sampler. Filenames are never guessed.
+`krea2 --help` lists all options. Invalid arguments exit with code 2; model,
+runtime, and file I/O failures exit with code 1. `KREA2_NATIVE_PROFILE=1` enables
+diagnostic stage timings.
 
 ## Gallery
 
@@ -179,6 +186,8 @@ krea2 = { package = "krea2-hrx", git = "https://github.com/zacharydenton/krea2-h
 Pin a `rev` for reproducible downstream builds. The Rust import remains `krea2`:
 `krea2::pipeline` provides prompt-to-RGB generation and the individual
 pipeline components; `krea2::session` provides resident transformer block sessions.
+For custom checkpoint paths, library callers select the sampler with
+`Files::of(path).distilled(Some(true))` for Turbo or `Some(false)` for Raw.
 
 There is no C ABI. Consuming applications bind the Rust library directly — an
 Elixir application wraps `krea2::pipeline::Pipeline` with Rustler, which needs no

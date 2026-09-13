@@ -1,5 +1,5 @@
 //! Model discovery through the standard Hugging Face cache or explicit files.
-//! The Qwen tokenizer is resolved separately, with an embedded fallback.
+//! The default text encoder is BF16 and the tokenizer is embedded.
 use std::path::{Path, PathBuf};
 
 use super::hub;
@@ -11,8 +11,7 @@ pub struct Files {
     pub checkpoint: PathBuf,
     pub text_encoder: PathBuf,
     pub vae: PathBuf,
-    /// Qwen's `tokenizer.json`, when the hub could supply it. `None` means the
-    /// embedded copy, which is the same bytes.
+    /// Optional explicit tokenizer override. `None` uses the bundled tokenizer.
     pub tokenizer: Option<PathBuf>,
     /// Turbo: a fixed timestep shift and no guidance. Raw: neither.
     pub distilled: bool,
@@ -37,8 +36,7 @@ pub struct Request<'a> {
 }
 
 impl<'a> Request<'a> {
-    /// Overrides the text encoder, which is otherwise the bf16 one where both
-    /// it and the fp8 one are present.
+    /// Overrides the default BF16 text encoder with an explicit local file.
     pub fn text_encoder(mut self, path: Option<&'a Path>) -> Request<'a> {
         self.text_encoder = path;
         self
@@ -49,8 +47,7 @@ impl<'a> Request<'a> {
         self
     }
 
-    /// Overrides the sampler, which the checkpoint's file name otherwise
-    /// decides: "raw" anywhere in it means Raw.
+    /// Selects Turbo (`true`) or Raw (`false`); required for custom checkpoints.
     pub fn distilled(mut self, distilled: Option<bool>) -> Request<'a> {
         self.distilled = distilled;
         self
@@ -62,31 +59,39 @@ impl<'a> Request<'a> {
         self
     }
 
+    /// Known model identifiers have a defined sampler. Custom files need an
+    /// explicit choice; renaming a file must not silently change its sampler.
+    pub fn is_distilled(&self) -> Result<bool> {
+        if let Some(value) = self.distilled {
+            return Ok(value);
+        }
+        match self.checkpoint.to_str() {
+            Some("krea2_turbo_int8_convrot" | "krea2_turbo_int8_convrot.safetensors") => {
+                Ok(true)
+            }
+            Some("krea2_raw_int8_convrot" | "krea2_raw_int8_convrot.safetensors") => Ok(false),
+            _ => {
+                Err(Error("custom checkpoints require an explicit Turbo or Raw sampler".into()))
+            }
+        }
+    }
+
     pub fn resolve(self) -> Result<Files> {
+        let distilled = self.is_distilled()?;
         let checkpoint =
             match std::path::absolute(self.checkpoint).ok().filter(|path| path.is_file()) {
                 Some(path) => path,
-                None => hub::file(hub::REPO, &self.repository_name()?, self.offline)?,
+                None => hub::file(&self.repository_name()?, self.offline)?,
             };
         let text_encoder = match self.text_encoder {
             Some(path) => path.to_path_buf(),
-            None => self.find(&[
-                "text_encoders/qwen3vl_4b_bf16.safetensors",
-                "text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
-            ])?,
+            None => hub::file("text_encoders/qwen3vl_4b_bf16.safetensors", self.offline)?,
         };
         let vae = match self.vae {
             Some(path) => path.to_path_buf(),
-            None => self.find(&["vae/qwen_image_vae.safetensors"])?,
+            None => hub::file("vae/qwen_image_vae.safetensors", self.offline)?,
         };
-        let distilled = self.distilled.unwrap_or_else(|| {
-            !checkpoint
-                .file_name()
-                .map(|name| name.to_string_lossy().to_lowercase().contains("raw"))
-                .unwrap_or(false)
-        });
-        // Fall back to the embedded tokenizer when the hub is unavailable.
-        let tokenizer = hub::file(hub::TOKENIZER_REPO, "tokenizer.json", self.offline).ok();
+        let tokenizer = None;
         Ok(Files { checkpoint, text_encoder, vae, tokenizer, distilled })
     }
 
@@ -106,15 +111,6 @@ impl<'a> Request<'a> {
         };
         Ok(format!("diffusion_models/{name}"))
     }
-
-    /// Reuse the first cached variant, otherwise download the preferred one.
-    fn find(&self, names: &[&str]) -> Result<PathBuf> {
-        if let Some(path) = names.iter().find_map(|name| hub::cached(hub::REPO, name)) {
-            return Ok(path);
-        }
-        let wanted = names.first().ok_or_else(|| Error("nothing to look for".into()))?;
-        hub::file(hub::REPO, wanted, self.offline)
-    }
 }
 
 #[cfg(test)]
@@ -130,8 +126,11 @@ mod tests {
         for path in [&checkpoint, &encoder, &vae] {
             std::fs::write(path, b"").unwrap();
         }
-        let request =
-            Files::of(&checkpoint).text_encoder(Some(&encoder)).vae(Some(&vae)).offline(true);
+        let request = Files::of(&checkpoint)
+            .text_encoder(Some(&encoder))
+            .vae(Some(&vae))
+            .distilled(Some(false))
+            .offline(true);
         let files = request.clone().resolve().unwrap();
         assert_eq!(files.checkpoint, checkpoint);
         assert_eq!(files.text_encoder, encoder);
@@ -141,11 +140,29 @@ mod tests {
     }
 
     #[test]
+    fn custom_names_never_guess_a_sampler() {
+        for name in [
+            "redraw.safetensors",
+            "raw.safetensors",
+            "turbo.safetensors",
+            "./krea2_raw_int8_convrot.safetensors",
+        ] {
+            let request = Files::of(Path::new(name));
+            assert!(request.is_distilled().is_err(), "{name}");
+            assert!(request.clone().distilled(Some(true)).is_distilled().unwrap());
+            assert!(!request.distilled(Some(false)).is_distilled().unwrap());
+        }
+        assert!(Files::of(Path::new("krea2_turbo_int8_convrot")).is_distilled().unwrap());
+        assert!(!Files::of(Path::new("krea2_raw_int8_convrot")).is_distilled().unwrap());
+    }
+
+    #[test]
     fn missing_explicit_paths_are_errors_instead_of_hub_names() {
         let directory = tempfile::tempdir().unwrap();
         let absolute = directory.path().join("missing.safetensors");
         for path in [absolute.as_path(), Path::new("./missing.safetensors")] {
-            let error = Files::of(path).offline(true).resolve().unwrap_err();
+            let error =
+                Files::of(path).distilled(Some(true)).offline(true).resolve().unwrap_err();
             assert!(error.0.contains("cannot read"), "{error}");
         }
     }

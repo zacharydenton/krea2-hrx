@@ -28,6 +28,8 @@ the supported GPU and link performance claims to the recorded methodology.
   Check default NPU-enabled and `--no-default-features` builds.
 - Review the staged files and repository history for credentials, private data,
   model weights, and generated artifacts. Preserve third-party license notices.
+- Verify `src/models/hub.rs::REVISION` when updating default model weights;
+  review the upstream snapshot and rerun model-dependent quality checks.
 - Confirm the repository name, description, topics, links, and version. Record
   the tested Rust/runtime versions and any known limitations in release notes.
 - Make the repository public when publication is intended, then tag the tested

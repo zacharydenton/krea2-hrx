@@ -27,3 +27,5 @@ jobs:
           target/release/krea2 --version
       - name: Check GPU-only configuration
         run: cargo check --locked --all-targets --no-default-features
+      - name: Reference tool checks (Python standard library only)
+        run: python3 -m unittest discover -s tests -p 'test_*.py'

@@ -1,4 +1,4 @@
-//! Model and tokenizer downloads through the Hugging Face hub cache.
+//! Pinned model downloads through the standard Hugging Face hub cache.
 //! Cached files are reused before network access; offline mode refuses downloads.
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -12,47 +12,46 @@ use super::{Error, Result};
 /// The upstream quantized checkpoints; repository paths stay inside the HF cache.
 pub const REPO: (&str, &str) = ("Comfy-Org", "Krea-2");
 
-/// The text encoder's own repository, which is where its tokenizer lives.
-pub const TOKENIZER_REPO: (&str, &str) = ("Qwen", "Qwen3-VL-4B-Instruct");
-
-/// The path a file already has in the cache, without touching the network.
-pub fn cached(repo: (&str, &str), name: &str) -> Option<PathBuf> {
-    client()
-        .ok()?
-        .model(repo.0, repo.1)
-        .download_file()
-        .filename(name)
-        .local_files_only(true)
-        .send()
-        .ok()
-}
+/// Immutable upstream snapshot shared by all default model components.
+pub const REVISION: &str = "e5ea8b4dd7f38f348b138eb0fe29f92c0e367e96";
 
 /// The cached file, downloaded into the cache if it is not there yet.
 ///
 /// `offline`, or `HF_HUB_OFFLINE` in the environment, makes a cache miss an
 /// error instead of a download.
-pub fn file(repo: (&str, &str), name: &str, offline: bool) -> Result<PathBuf> {
+pub fn file(name: &str, offline: bool) -> Result<PathBuf> {
     let client = client()?;
-    let repository = client.model(repo.0, repo.1);
-    let local = repository.download_file().filename(name).local_files_only(true).send();
+    let repository = client.model(REPO.0, REPO.1);
+    let local = repository
+        .download_file()
+        .filename(name)
+        .revision(REVISION)
+        .local_files_only(true)
+        .send();
     match local {
         Ok(path) => return Ok(path),
         Err(HFError::LocalEntryNotFound { .. }) => {}
-        Err(error) => return Err(named(repo, name, error)),
+        Err(error) => return Err(named(name, error)),
     }
     if offline || offline_by_environment() {
         return Err(Error(format!(
             "{}/{}/{name} is not in the Hugging Face cache, and downloading is off",
-            repo.0, repo.1
+            REPO.0, REPO.1
         )));
     }
     // A silent ten-minute pause on a multi-gigabyte fetch is not feedback.
     repository
         .download_file()
         .filename(name)
-        .maybe_progress(std::io::stderr().is_terminal().then(Bar::default))
+        .revision(REVISION)
+        .maybe_progress(
+            (std::io::stderr().is_terminal()
+                && !std::env::var("HF_HUB_DISABLE_PROGRESS_BARS")
+                    .is_ok_and(|value| true_value(&value)))
+            .then(Bar::default),
+        )
         .send()
-        .map_err(|error| named(repo, name, error))
+        .map_err(|error| named(name, error))
 }
 
 /// The client owns a tokio runtime thread, so it is made once and shared.
@@ -64,12 +63,17 @@ fn client() -> Result<HFClientSync> {
         .map_err(|e| Error(format!("cannot reach the Hugging Face hub: {e}")))
 }
 
-fn named(repo: (&str, &str), name: &str, error: HFError) -> Error {
-    Error(format!("cannot fetch {}/{}/{name}: {error}", repo.0, repo.1))
+fn named(name: &str, error: HFError) -> Error {
+    Error(format!("cannot fetch {}/{}/{name}: {error}", REPO.0, REPO.1))
 }
 
 fn offline_by_environment() -> bool {
-    std::env::var_os("HF_HUB_OFFLINE").is_some_and(|value| value != "0" && !value.is_empty())
+    std::env::var("HF_HUB_OFFLINE").is_ok_and(|value| true_value(&value))
+}
+
+// Match huggingface_hub's documented boolean environment-variable semantics.
+fn true_value(value: &str) -> bool {
+    ["1", "ON", "YES", "TRUE"].iter().any(|truth| value.eq_ignore_ascii_case(truth))
 }
 
 /// A one-line percentage on stderr, redrawn in place. These files are measured
@@ -118,27 +122,17 @@ mod tests {
 
     #[test]
     fn a_cache_miss_offline_is_an_error_and_not_a_download() {
-        let error =
-            file(REPO, "diffusion_models/not-a-real-file.safetensors", true).unwrap_err();
+        let error = file("diffusion_models/not-a-real-file.safetensors", true).unwrap_err();
         assert!(error.0.contains("is not in the Hugging Face cache"), "{error}");
     }
 
-    /// The prompt encoding is a contract, so the hub's tokenizer and the one
-    /// compiled in must be the same bytes. Skipped when the hub has not been
-    /// asked for it yet, so an offline box does not fail on a missing file.
     #[test]
-    fn the_hub_tokenizer_is_the_embedded_one() {
-        let Some(path) = cached(TOKENIZER_REPO, "tokenizer.json") else {
-            return;
-        };
-        let bytes = std::fs::read(&path).expect("the cached tokenizer");
-        assert_eq!(
-            bytes.len(),
-            crate::tokenizer::EMBEDDED.len(),
-            "{}/{} tokenizer.json is no longer the embedded one",
-            TOKENIZER_REPO.0,
-            TOKENIZER_REPO.1
-        );
-        assert!(bytes == crate::tokenizer::EMBEDDED, "the hub tokenizer changed under us");
+    fn hf_boolean_values_follow_the_documented_convention() {
+        for value in ["1", "ON", "on", "YES", "yes", "TRUE", "true", "True"] {
+            assert!(true_value(value), "{value}");
+        }
+        for value in ["", "0", "false", "FALSE", "off", "no", "anything", " true "] {
+            assert!(!true_value(value), "{value}");
+        }
     }
 }

@@ -1076,7 +1076,6 @@ mod tests {
         let checkpoint =
             std::env::var_os("KREA2_MODEL").map(PathBuf::from).unwrap_or_else(|| {
                 crate::models::hub::file(
-                    crate::models::hub::REPO,
                     "diffusion_models/krea2_turbo_int8_convrot.safetensors",
                     true,
                 )
