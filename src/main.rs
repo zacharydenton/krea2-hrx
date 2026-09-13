@@ -13,7 +13,7 @@ const USAGE: i32 = 64;
 #[derive(Parser)]
 #[command(
     name = "krea2",
-    about = "Krea 2 (Turbo and Raw), prompt to image, on one Radeon 8060S",
+    about = env!("CARGO_PKG_DESCRIPTION"),
     after_help = "The prompt comes from -p or from stdin. Steps and guidance default to the \
                   checkpoint: Turbo 8 unguided, Raw 52 at 3.5. KREA2_NATIVE_PROFILE=1 prints \
                   per-stage times.",

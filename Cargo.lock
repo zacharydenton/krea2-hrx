@@ -1603,7 +1603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e037a2e1d8d5fdbd49b16a4ea09d5d6401c1f29eca5ff29d03d3824dba16256a"
 
 [[package]]
-name = "krea2"
+name = "krea2-hrx"
 version = "0.1.0"
 dependencies = [
  "anyhow",

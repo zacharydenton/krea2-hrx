@@ -2,7 +2,7 @@
 # scripts/test.sh fails when this and `cargo tree` disagree, so an upstream default
 # cannot enlarge the binary unseen. Regenerate deliberately:
 #
-#   cargo tree -p krea2 --edges normal --prefix none |
+#   cargo tree -p krea2-hrx --edges normal --prefix none |
 #     cut -d' ' -f1 | grep -v '^$' | LC_ALL=C sort -u
 #
 adler2
@@ -130,7 +130,7 @@ itertools
 itoa
 konst
 konst_proc_macros
-krea2
+krea2-hrx
 lazy_static
 libc
 libloading

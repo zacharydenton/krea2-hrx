@@ -13,3 +13,10 @@ target/
 
 # Local dependency overrides (see docs/hrx-runtime.md)
 .cargo/config.toml
+
+# Local models, credentials, and tool caches
+*.safetensors
+.env
+.env.*
+!.env.example
+.ruff_cache/

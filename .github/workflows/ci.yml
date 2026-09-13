@@ -1,0 +1,29 @@
+name: CPU checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+      - name: Formatting, lint, documentation, and CPU tests
+        run: scripts/test.sh --cpu
+      - name: Build and check the installed command
+        run: |
+          cargo build --locked --release --bin krea2
+          target/release/krea2 --help
+          target/release/krea2 --version
+      - name: Check GPU-only configuration
+        run: cargo check --locked --all-targets --no-default-features

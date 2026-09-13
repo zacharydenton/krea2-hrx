@@ -6,14 +6,14 @@ Measured on one idle Radeon 8060S on 2026-09-08. Both backends used Krea 2 Turbo
 int8 ConvRot, 1024×1024, eight Euler steps, batch one, seed 0 and prompt
 `a red fox in the snow`. ComfyUI used CFG 1; the native Turbo path was unguided.
 
-| Warm timing | ComfyUI INT8 ConvRot | krea2-loom W8A8 |
+| Warm timing | ComfyUI INT8 ConvRot | krea2-hrx W8A8 |
 | --- | ---: | ---: |
 | Generation median | 36.31 s | 27.30 s |
 | Denoising | 34.52 s | About 24 s |
 | VAE decode | 0.652 s | 0.586 s |
 
 Warm generation samples were 36.83 and 35.80 s for ComfyUI, and 27.30, 27.13
-and 28.06 s for krea2-loom. The generation ratio is 1.33× on these samples.
+and 28.06 s for krea2-hrx. The generation ratio is 1.33× on these samples.
 The [VAE report](vae-performance.md) describes the decoder change.
 September 8 samples are recorded in commit `0a8651f`; separate machine-readable
 logs were not committed. [September 7 raw logs](benchmarks/comfyui-2026-09-07.txt)
@@ -51,7 +51,7 @@ python /path/to/krea2-loom/tools/bench_comfyui.py \
   --size 1024 --steps 8 --runs 4 --output-dir /path/to/comfy-results
 ```
 
-From the krea2-loom checkout:
+From the historical krea2-loom checkout:
 
 
 > These commands are recorded as they were run. The Python benchmark

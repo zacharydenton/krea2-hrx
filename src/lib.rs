@@ -1,4 +1,4 @@
-//! Krea 2 image generation on one Radeon 8060S, through HRX and Loom.
+//! Krea 2 image generation on AMD Strix Halo, powered by Loom kernels and HRX.
 //!
 //! The layering is a chain, and each module depends only on the ones above it:
 //! [`numerics`] and [`tokenizer`] are self-contained; [`kernels`] holds the

@@ -9,7 +9,7 @@
 //!
 //! That chain is identical every forward, so it is recorded once as a graph and
 //! replayed. Measurements have not established an end-to-end speedup. See
-//! [graph recording](https://github.com/zacharydenton/krea2-loom/blob/main/docs/graph-recording.md)
+//! [graph recording](https://github.com/zacharydenton/krea2-hrx/blob/master/docs/graph-recording.md)
 //! for the benchmark scope and replay constraints.
 #![deny(unsafe_op_in_unsafe_fn)]
 
