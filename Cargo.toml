@@ -23,10 +23,10 @@ strip = true
 
 [features]
 default = ["npu"]
-npu = ["hrx/npu-compile"]
+npu = ["hrx/npu"]
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.5.0", default-features = false, features = ["download", "loom"] }
+hrx = { package = "hrx-rs", version = "0.6.0" }
 
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }

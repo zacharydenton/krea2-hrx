@@ -6,6 +6,7 @@
 pub mod noise;
 pub mod profile;
 pub mod schedule;
+mod shared;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,9 @@ use crate::models::Models;
 use crate::numerics::{from_f32, to_f32};
 use crate::ops::Tensor;
 use crate::session::{Session, Weights};
+use hrx::inference::ModelContext;
 use hrx::Stream;
+use shared::{native_stream, BlockCache, BlockShape, Blocks, Bridge};
 
 use self::profile::Profile;
 
@@ -103,46 +106,11 @@ struct Rope {
     sin: Vec<f32>,
 }
 
-/// A prepared sequence length and its geometry-dependent tables.
-struct Blocks {
-    session: Session,
-    rope: Rope,
-}
-
-/// At most two scratch workspaces: the positive and negative guidance shapes.
-/// Evict before constructing a third so peak residency stays bounded.
-struct ShapeCache<T> {
-    entries: Vec<(usize, T)>,
-}
-
-impl<T> Default for ShapeCache<T> {
-    fn default() -> Self {
-        Self { entries: Vec::new() }
-    }
-}
-
-impl<T> ShapeCache<T> {
-    fn get_or_try_insert_with(
-        &mut self,
-        tokens: usize,
-        build: impl FnOnce() -> Result<T>,
-    ) -> Result<&mut T> {
-        if let Some(index) = self.entries.iter().position(|(key, _)| *key == tokens) {
-            let entry = self.entries.remove(index);
-            self.entries.push(entry);
-        } else {
-            if self.entries.len() == 2 {
-                self.entries.remove(0);
-            }
-            self.entries.push((tokens, build()?));
-        }
-        Ok(&mut self.entries.last_mut().expect("prepared shape").1)
-    }
-}
-
 /// Everything resident: the three models, the block weights, and whichever
 /// two most recently used block sessions.
 pub struct Pipeline {
+    context: ModelContext,
+    bridge: Arc<Bridge>,
     files: Files,
     compiler: Option<String>,
     models: Models,
@@ -156,7 +124,7 @@ pub struct Pipeline {
 struct State {
     stream: Stream,
     weights: Option<Arc<Weights>>,
-    blocks: ShapeCache<Blocks>,
+    blocks: BlockCache,
 }
 
 /// Optional execution policy. Auto uses only saved, passing NPU qualifications.
@@ -177,17 +145,41 @@ impl Pipeline {
         compiler: Option<&str>,
         options: PipelineOptions,
     ) -> Result<Pipeline> {
+        Self::open_in(files, &ModelContext::new(Default::default())?, compiler, options)
+    }
+
+    /// Share block execution, tensors and dependency tracking with other clients.
+    /// Auxiliary model operations keep their private native stream and are
+    /// drained at the explicit device-copy boundary; no pixels/latents read back.
+    pub fn open_in(
+        files: Files,
+        context: &ModelContext,
+        compiler: Option<&str>,
+        options: PipelineOptions,
+    ) -> Result<Pipeline> {
         // Built before the state so the models allocate on the stream that will
         // later dispatch them; allocation only needs a shared borrow.
-        let mut stream = Stream::open()?;
+        let mut stream = native_stream(context)?;
         let mut models = Models::open(&mut stream, &files, compiler)?;
         models.fusion.set_backend(options.fusion_backend);
         Ok(Pipeline {
+            context: context.clone(),
+            bridge: Arc::new(Bridge::new(native_stream(context)?)),
             models,
             files,
             compiler: compiler.map(str::to_string),
-            state: Mutex::new(State { stream, weights: None, blocks: ShapeCache::default() }),
+            state: Mutex::new(State {
+                stream,
+                weights: None,
+                blocks: BlockCache::new(2, |blocks| blocks.plan.is_idle())?,
+            }),
         })
+    }
+
+    /// Shared scheduler statistics cover coordinated tensors and block work;
+    /// native model weights and auxiliary pools are accounted separately.
+    pub fn context(&self) -> &ModelContext {
+        &self.context
     }
 
     /// Backend and reason selected for the most recent fusion projection.
@@ -223,6 +215,7 @@ impl Pipeline {
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let State { stream, .. } = &mut *state;
+        self.bridge.check()?;
         let ids = self.models.tokenizer.prompt(prompt).map_err(crate::models::Error::from)?;
         let taps = self.models.encode(stream, &ids)?;
         stream.synchronize()?;
@@ -237,6 +230,7 @@ impl Pipeline {
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let State { stream, .. } = &mut *state;
+        self.bridge.check()?;
         let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
         let rgb = self.models.decode(stream, &packed, height, width)?;
         stream.synchronize()?;
@@ -263,6 +257,7 @@ impl Pipeline {
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let State { stream, weights, blocks } = &mut *state;
+        self.bridge.check()?;
         let taps = self.upload(stream, text, text_tokens * 12, 2560)?;
         let conditioning = self.models.text_fusion(stream, &taps)?;
         let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
@@ -302,6 +297,7 @@ impl Pipeline {
             .lock()
             .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
         let State { stream, weights, blocks } = &mut *state;
+        self.bridge.check()?;
         let began = std::time::Instant::now();
         let mut timing = Profile::new(stream, "generate");
 
@@ -361,7 +357,7 @@ impl Pipeline {
         &self,
         stream: &mut Stream,
         weights: &mut Option<Arc<Weights>>,
-        cache: &mut ShapeCache<Blocks>,
+        cache: &BlockCache,
         latents: &Tensor,
         text: &Tensor,
         timestep: f32,
@@ -382,17 +378,14 @@ impl Pipeline {
 
         timing.mark(stream, "embeddings")?;
         let mods = self.models.modulation(stream, &modulation)?;
-        let blocks = self.prepare(stream, weights, cache, tokens)?;
-        timing.mark(stream, "prepare session")?;
-        self.rope(&mut blocks.rope, width, height, text.rows());
-        timing.mark(stream, "modulation and rope")?;
-        blocks.session.run_device(
+        let blocks = self.prepare(
             stream,
-            x.binding()?,
-            mods.binding(),
-            &blocks.rope.cos,
-            &blocks.rope.sin,
+            weights,
+            cache,
+            BlockShape { width, height, text_tokens: text.rows() },
         )?;
+        timing.mark(stream, "prepare session")?;
+        self.run_blocks(stream, &blocks, &x, mods)?;
         timing.mark(stream, "blocks")?;
 
         let output = x.view(image_tokens, WIDTH, text.rows() * WIDTH)?;
@@ -402,13 +395,13 @@ impl Pipeline {
     }
 
     /// Reuse either guidance shape. Weights are shared by both workspaces.
-    fn prepare<'a>(
+    fn prepare(
         &self,
         stream: &mut Stream,
         weights: &mut Option<Arc<Weights>>,
-        cache: &'a mut ShapeCache<Blocks>,
-        tokens: usize,
-    ) -> Result<&'a mut Blocks> {
+        cache: &BlockCache,
+        shape: BlockShape,
+    ) -> Result<Arc<Blocks>> {
         let resident = match &*weights {
             Some(weights) => Arc::clone(weights),
             None => {
@@ -417,11 +410,23 @@ impl Pipeline {
                 loaded
             }
         };
-        cache.get_or_try_insert_with(tokens, || {
-            let session =
-                Session::with_weights(stream, resident, tokens, 28, self.compiler.as_deref())?;
-            Ok(Blocks { session, rope: Rope::default() })
-        })
+        let build = || -> Result<Blocks> {
+            let mut private = native_stream(&self.context)?;
+            let session = Session::with_weights(
+                &mut private,
+                resident,
+                shape.tokens(),
+                28,
+                self.compiler.as_deref(),
+            )?;
+            let mut rope = Rope::default();
+            self.rope(&mut rope, shape.width, shape.height, shape.text_tokens);
+            let plan = session.into_prepared(&self.context, private, rope.cos, rope.sin)?;
+            Blocks::new(&self.context, plan, shape.tokens())
+        };
+        Ok(cache.get_or_prepare(shape, || {
+            build().map_err(|e| hrx::Error::Message(e.to_string()))
+        })?)
     }
 
     /// The rope tables, rebuilt when the geometry changes. Geometry, not just
@@ -510,26 +515,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn guidance_shapes_are_reused_and_a_third_evicts_the_least_recent() {
-        let mut cache = ShapeCache::default();
+    fn geometry_keys_distinguish_equal_sequence_lengths() {
+        let portrait = BlockShape { width: 64, height: 128, text_tokens: 3 };
+        let landscape = BlockShape { width: 128, height: 64, text_tokens: 3 };
+        assert_eq!(portrait.tokens(), landscape.tokens());
+        assert_ne!(portrait, landscape);
+        let cache = hrx::plan_cache::PlanCache::new(2, |_: &usize| true).unwrap();
         let mut builds = 0;
-        for tokens in [4115, 4097, 4115, 4097, 4115] {
-            let value = cache
-                .get_or_try_insert_with(tokens, || {
+        for shape in [portrait, landscape, portrait, landscape] {
+            let result = cache
+                .get_or_prepare(shape, || {
                     builds += 1;
-                    Ok(tokens)
+                    Ok(shape.tokens())
                 })
                 .unwrap();
-            assert_eq!(*value, tokens);
+            assert_eq!(*result, shape.tokens());
         }
         assert_eq!(builds, 2);
-        cache.get_or_try_insert_with(8192, || Ok(8192)).unwrap();
-        assert_eq!(cache.entries.iter().map(|(key, _)| *key).collect::<Vec<_>>(), [4115, 8192]);
-        assert!(cache
-            .get_or_try_insert_with(9000, || Err(Error("failed preparation".into())))
-            .is_err());
-        assert_eq!(cache.entries.len(), 1);
-        assert_eq!(cache.entries[0].0, 8192);
     }
 
     #[test]

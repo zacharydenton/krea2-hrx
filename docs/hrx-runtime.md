@@ -1,18 +1,33 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs` 0.5](https://crates.io/crates/hrx-rs) for keyed kernel
+Krea uses [`hrx-rs` 0.6](https://crates.io/crates/hrx-rs) for keyed kernel
 requests, the coordinated graph API and NPU integration.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
-Its features are explicit and `Cargo.lock` pins the complete dependency
+GPU and Loom are unconditional; `npu` is the only optional HRX feature.
+`Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
 There is no link-time libhrx dependency or runtime rpath in the binary.
 
-Each pipeline owns an ordered stream. Block sessions and their tensor pools use
-that same stream; a standalone session uses its caller's stream. Dispatches,
-fills and copies borrow the stream; transfers and waits need it mutably. Calls sharing
-one pipeline are serialized. Native command buffers retain recorded resources,
-so releasing an ordinary buffer does not wait for GPU execution.
+Each pipeline owns an explicit HRX `ModelContext`; `Pipeline::open_in` lets an
+application share that context with other models. Transformer block plans use
+one private inference slot each, retaining their native stream, graph and RoPE
+tables. HRX's bounded `PlanCache` keeps two idle-evictable shapes, keyed by image
+width, height and text length, so equal token counts do not alias different RoPE
+geometries. Immutable block weights are shared across those plans.
+
+Auxiliary models and their tensor pool use a separate ordered native stream.
+Owned device-copy handoffs drain each boundary without reading intermediate
+latents back to the host. A failed handoff quarantines its stream and captured
+owners; later calls reject reuse. Calls sharing one pipeline remain serialized.
+`Pipeline::context` exposes coordinated statistics, which do not include native
+model weights or auxiliary pools and are not a total GPU memory measurement.
+When the context has a `memory_budget`, all pipeline GPU streams use it before
+allocating, including native weights, auxiliary pools, block workspace and
+transfer staging. Residency statistics include those native allocations;
+coordinated Runtime statistics still cover only tracked tensors. Optional NPU
+fusion buffers and instructions inherit that same budget. Driver/compiler memory
+and native allocator rounding remain outside it.
 
 Transfers and dispatch use HRX `View` regions. Uploads copy into HRX-owned staging
 and queue work on the stream. Weight loading uses chunks of at most 16 MiB;
@@ -32,17 +47,19 @@ already handed out.
 
 The compiler and runtime come from HRX's public, verified native bundle:
 
+Install the matching CLI from crates.io:
+
 ```sh
-cargo install --locked --version 0.4.0 --features runner,npu hrx-rs
+cargo install --locked hrx-rs --version 0.6.0 --features npu
 hrx prepare
 cargo build --release
 ```
 
-For local HRX development, use an ignored `.cargo/config.toml`:
+For local HRX development, add a temporary patch in `Cargo.toml`:
 
 ```toml
 [patch.crates-io]
-hrx-rs = { path = "../hrx.rs" }
+hrx-rs = { path = "../hrx-rs" }
 ```
 
 Cargo updates the lockfile for a path override. Restore the registry dependency

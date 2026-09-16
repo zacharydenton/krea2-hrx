@@ -84,8 +84,8 @@ fn main() -> anyhow::Result<()> {
         "captured input differs from the compiled case"
     );
     // The explicit qualification command supplies artifacts from its own compile step.
-    let pilot = unsafe { npu::Pilot::load(&record, &weights, &biases) }?;
     let mut stream = hrx::Stream::open()?;
+    let pilot = unsafe { npu::Pilot::load(&record, &weights, &biases, &stream) }?;
     let ops = krea2::ops::Ops::new(hrx::BufferPool::new());
     let x = ops.tensor(&stream, case.shape.m, case.shape.k)?;
     stream.upload(x.binding()?, &input)?;

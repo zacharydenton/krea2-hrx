@@ -113,10 +113,16 @@ pub struct Pilot {
 }
 impl Pilot {
     /// Load an artifact produced by this implementation's qualification command.
+    /// Pilot data and NPU instructions share the calling stream's memory budget.
     /// # Safety
     /// The record and artifact store must be trusted. Hashes detect changes; they
     /// do not prove that arbitrary native code obeys the recorded memory contract.
-    pub unsafe fn load(record: &Record, weights: &[u8], bias: &[u8]) -> Result<Self> {
+    pub unsafe fn load(
+        record: &Record,
+        weights: &[u8],
+        bias: &[u8],
+        stream: &Stream,
+    ) -> Result<Self> {
         let shape = &record.case.shape;
         let bytes =
             shape.storage_bytes().filter(|bytes| *bytes <= STORAGE_LIMIT).ok_or_else(|| {
@@ -135,7 +141,10 @@ impl Pilot {
             &hrx::bundle::digest(weights),
             &hrx::bundle::digest(bias),
         )?;
-        let runtime = Runtime::new()?;
+        let runtime = Runtime::with_options(hrx::execution::RuntimeOptions {
+            memory_budget: stream.memory_budget().cloned(),
+            ..Default::default()
+        })?;
         if runtime.gpu()?.target().as_str() != "gfx1151" {
             return Err(Error::Unsupported(
                 "fusion pilot is qualified only on gfx1151/XDNA2".into(),
@@ -349,7 +358,7 @@ impl Cache {
                 )?;
                 // The profile directory is the user's trusted, local compiler
                 // output store; verify binds its artifacts to this implementation.
-                unsafe { Pilot::load(&record, &weights, &biases) }
+                unsafe { Pilot::load(&record, &weights, &biases, stream) }
             })();
             let (pilot, reason) = match loaded {
                 Ok(pilot) => (Some(pilot), "NPU: verified fusion specialization".into()),

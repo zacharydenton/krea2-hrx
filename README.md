@@ -41,14 +41,13 @@ and [native tests](docs/testing.md) for validation.
 
 ## Quick start
 
-Clone the repository and install the runtime runner and CLI. The shared runtime
-is a pinned dependency; no sibling checkout is needed:
+Clone the repository and install the runtime CLI:
 
 ```sh
 git clone https://github.com/zacharydenton/krea2-hrx.git
 cd krea2-hrx
 
-cargo install --locked --version 0.4.0 --features runner,npu hrx-rs
+cargo install --locked hrx-rs --version 0.6.0 --features npu
 hrx prepare
 cargo install --locked --path .
 

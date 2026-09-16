@@ -199,6 +199,82 @@ pub struct Session {
 }
 
 impl Session {
+    /// Move an existing fixed-shape session and its stream into the shared
+    /// scheduler. One private slot preserves the session's graph and RoPE cache.
+    /// Inputs are BF16 `[tokens,6144]` and F32 `[layers,6,6144]`; the BF16
+    /// residual output is independently owned and retains the slot while live.
+    pub fn into_prepared(
+        self,
+        context: &hrx::inference::ModelContext,
+        mut stream: Stream,
+        cos: Vec<f32>,
+        sin: Vec<f32>,
+    ) -> Result<hrx::inference::PreparedModel> {
+        use hrx::{
+            execution::GpuAccess,
+            inference::PreparedModel,
+            tensor::{DType, Layout, TensorDesc},
+            Access,
+        };
+        self.check_stream(&stream)?;
+        if stream.device_id()
+            != hrx::Device::open(context.runtime().gpu()?.index())?.stream()?.device_id()
+        {
+            return Err(Error::invalid("session belongs to another model context device"));
+        }
+        if cos.len() != self.tokens * HEAD_DIM as usize || sin.len() != cos.len() {
+            return Err(Error::invalid("cos/sin have the wrong element count"));
+        }
+        self.upload_rope(&mut stream, &cos, &sin)?;
+        // Record before handing the stream to workers; no compilation or graph
+        // preparation is deferred to warm inference.
+        if self.graph.borrow().is_none() {
+            let mut recording = Recording { graph: stream.graph()?, last: After::None };
+            for index in 0..self.layers {
+                self.block(
+                    &mut Sink::Record(&mut recording),
+                    index,
+                    self.buffers.mods.binding(),
+                )?;
+            }
+            *self.graph.borrow_mut() = Some(recording.graph.finish()?);
+        }
+        stream.synchronize()?;
+        let x = TensorDesc::new(DType::BF16, vec![self.tokens, HIDDEN as usize])?
+            .with_layout(Layout::Rows)?;
+        let mods = TensorDesc::new(DType::F32, vec![self.layers, 6, HIDDEN as usize])?;
+        let mut owned = Some((self, stream, cos, sin));
+        Ok(PreparedModel::prepare(
+            context,
+            &[x.clone(), mods],
+            &[x],
+            1,
+            |context, inputs, outputs| {
+                let (session, mut stream, cos, sin) =
+                    owned.take().expect("one fixed-shape slot");
+                let bindings = [
+                    GpuAccess { view: inputs[0].binding().unwrap(), access: Access::Read },
+                    GpuAccess { view: inputs[1].binding().unwrap(), access: Access::Read },
+                    GpuAccess { view: outputs[0].binding().unwrap(), access: Access::Write },
+                ];
+                let mut graph = context.runtime().graph();
+                // Safety: the closure owns the only session/stream and retains all
+                // graph buffers and weights. Only declared views escape the private
+                // workspace, and synchronization drains every access before return.
+                unsafe {
+                    graph.gpu_scoped(&bindings, move |views| {
+                        stream.copy(views[2], views[0])?;
+                        session
+                            .run_device(&mut stream, views[2], views[1], &cos, &sin)
+                            .map_err(|error| hrx::Error::Message(error.to_string()))?;
+                        stream.synchronize()
+                    })?;
+                }
+                graph.prepare()
+            },
+        )?)
+    }
+
     /// Load a checkpoint and prepare its kernel specializations through HRX.
     pub fn open(
         stream: &mut Stream,
@@ -919,6 +995,28 @@ mod tests {
         let cos = vec![angle.cos(); tokens * HEAD_DIM as usize];
         let sin = vec![angle.sin(); cos.len()];
         (x, mods, cos, sin)
+    }
+
+    #[test]
+    #[ignore = "requires cached Krea checkpoint and gfx1151"]
+    fn shared_context_slots_preserve_native_results_and_retained_outputs() {
+        let (checkpoint, tokens) = fixture();
+        let context = hrx::inference::ModelContext::new(Default::default()).unwrap();
+        let mut stream = Stream::open().unwrap();
+        let session = Session::open(&mut stream, &checkpoint, tokens, 1).unwrap();
+        let (start, mods, cos, sin) = inputs(tokens, 1, 0);
+        let mut expected = start.clone();
+        session.run(&mut stream, &mut expected, &mods, &cos, &sin, 0, None).unwrap();
+        let model = session.into_prepared(&context, stream, cos, sin).unwrap();
+        let result = model
+            .submit_host(&[bytemuck::cast_slice(&start), bytemuck::cast_slice(&mods)])
+            .unwrap();
+        let output = result.outputs()[0].clone();
+        let actual = result.download().unwrap().wait().unwrap().remove(0);
+        assert_eq!(actual, bytemuck::cast_slice::<_, u8>(&expected));
+        assert!(matches!(model.try_acquire(), Err(hrx::Error::Busy(_))));
+        drop(output);
+        drop(model.try_acquire().unwrap());
     }
 
     #[test]
