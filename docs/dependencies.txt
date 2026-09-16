@@ -163,6 +163,7 @@ num-conv
 num-traits
 once_cell
 oneshot
+onnx-protobuf
 openssl-probe
 option-ext
 os_str_bytes
@@ -179,6 +180,8 @@ powerfmt
 ppv-lite86
 prettyplease
 proc-macro2
+protobuf
+protobuf-support
 quote
 rand
 rand_chacha
@@ -231,7 +234,6 @@ sync_wrapper
 synstructure
 sysinfo
 tar
-target-features
 tempfile
 terminal_size
 thiserror
@@ -241,7 +243,6 @@ time
 time-core
 tinystr
 tinyvec
-tinyvec_macros
 tokenizers
 tokio
 tokio-macros
