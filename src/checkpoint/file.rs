@@ -3,8 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use memmap2::Mmap;
-use safetensors::tensor::{Dtype, SafeTensors};
+use hrx::artifacts::safetensors::{DType, FileView};
 
 use super::{Error, Result};
 
@@ -35,28 +34,27 @@ impl Tensor<'_> {
 struct Entry {
     dtype: &'static str,
     shape: Vec<usize>,
-    start: usize,
-    end: usize,
+    original: String,
 }
 
 /// The dtype names this runtime matches on, which are safetensors' own.
-fn dtype_name(dtype: Dtype) -> &'static str {
+fn dtype_name(dtype: DType) -> &'static str {
     match dtype {
-        Dtype::BOOL => "BOOL",
-        Dtype::U8 => "U8",
-        Dtype::I8 => "I8",
-        Dtype::F8_E4M3 => "F8_E4M3",
-        Dtype::F8_E5M2 => "F8_E5M2",
-        Dtype::I16 => "I16",
-        Dtype::U16 => "U16",
-        Dtype::F16 => "F16",
-        Dtype::BF16 => "BF16",
-        Dtype::I32 => "I32",
-        Dtype::U32 => "U32",
-        Dtype::F32 => "F32",
-        Dtype::F64 => "F64",
-        Dtype::I64 => "I64",
-        Dtype::U64 => "U64",
+        DType::BOOL => "BOOL",
+        DType::U8 => "U8",
+        DType::I8 => "I8",
+        DType::F8_E4M3 => "F8_E4M3",
+        DType::F8_E5M2 => "F8_E5M2",
+        DType::I16 => "I16",
+        DType::U16 => "U16",
+        DType::F16 => "F16",
+        DType::BF16 => "BF16",
+        DType::I32 => "I32",
+        DType::U32 => "U32",
+        DType::F32 => "F32",
+        DType::F64 => "F64",
+        DType::I64 => "I64",
+        DType::U64 => "U64",
         // Something this runtime has never seen. Every consumer matches on the
         // names above and reports the rest as unsupported, which this is.
         _ => "UNSUPPORTED",
@@ -83,7 +81,7 @@ fn unwrap_model(entries: BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
 
 pub struct Checkpoint {
     path: PathBuf,
-    map: Mmap,
+    file: FileView,
     entries: BTreeMap<String, Entry>,
 }
 
@@ -102,37 +100,27 @@ impl Checkpoint {
                 path.display()
             )));
         }
-        let file = std::fs::File::open(path)
-            .map_err(|e| Error(format!("cannot open {}: {e}", path.display())))?;
-        // Safety: the checkpoint must not be modified or truncated while mapped.
-        // Model files are opened read-only and expected to remain immutable.
+        // Safety: model checkpoints are opened read-only and must remain immutable
+        // and untruncated while the session retains their mapping.
         #[allow(unsafe_code)]
-        let map = unsafe { Mmap::map(&file) }
-            .map_err(|e| Error(format!("cannot map {}: {e}", path.display())))?;
-        // The crate validates the header and every tensor's span; the index
-        // keeps where each one lives so the views can be rebuilt per call
-        // without reparsing 13 GB worth of header.
-        let base = map.as_ptr() as usize;
-        let entries = {
-            let tensors = SafeTensors::deserialize(&map)
-                .map_err(|e| Error(format!("cannot read {}: {e}", path.display())))?;
-            tensors
-                .tensors()
-                .into_iter()
-                .map(|(name, view)| {
-                    let start = view.data().as_ptr() as usize - base;
-                    let entry = Entry {
-                        dtype: dtype_name(view.dtype()),
-                        shape: view.shape().to_vec(),
-                        start,
-                        end: start + view.data().len(),
-                    };
-                    (name, entry)
-                })
-                .collect()
-        };
+        let file = unsafe { FileView::map(path) }
+            .map_err(|error| Error(format!("cannot read {}: {error}", path.display())))?;
+        let entries = file
+            .entries()
+            .iter()
+            .map(|(name, entry)| {
+                (
+                    name.clone(),
+                    Entry {
+                        dtype: dtype_name(entry.dtype),
+                        shape: entry.shape.clone(),
+                        original: name.clone(),
+                    },
+                )
+            })
+            .collect();
         let entries = unwrap_model(entries);
-        Ok(Checkpoint { path: path.to_path_buf(), map, entries })
+        Ok(Checkpoint { path: path.to_path_buf(), file, entries })
     }
 
     pub fn path(&self) -> &Path {
@@ -150,7 +138,11 @@ impl Checkpoint {
         Ok(Tensor {
             dtype: entry.dtype,
             shape: &entry.shape,
-            bytes: &self.map[entry.start..entry.end],
+            bytes: self
+                .file
+                .get(&entry.original)
+                .map_err(|error| Error(error.to_string()))?
+                .bytes,
         })
     }
 

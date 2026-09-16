@@ -28,12 +28,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let source = sources::auxiliary(name).unwrap();
         let mut spec = Specialization::new(format!("krea2_{name}"));
         for (key, value) in &config {
-            spec.config.insert(format!("krea2.{name}.{key}"), value.to_string());
+            spec.set_config(format!("krea2.{name}.{key}"), value.to_string());
         }
         for axis in ["x", "y"] {
-            spec.config.insert(format!("krea2.{name}.grid_{axis}"), "1".into());
+            spec.set_config(format!("krea2.{name}.grid_{axis}"), "1");
         }
-        spec.report = krea2::kernels::kernel_reports();
+        spec.set_report(krea2::kernels::kernel_reports());
         // Both caches are warm before timing. All source is embedded and trusted.
         unsafe { source_cache.get(&stream, source, &spec)? };
         keyed_cache.get(&stream, name, config.clone(), (1, 1))?;

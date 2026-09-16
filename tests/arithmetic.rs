@@ -1,15 +1,16 @@
 //! Device operations checked against CPU arithmetic and alternate layouts.
 //! Scheduler rounding is checked exactly; convolution reduction orders use a
 //! tolerance. Run explicitly with --ignored on gfx1151.
+use hrx::BufferPool;
 use hrx::Stream;
 use krea2::numerics::{from_f32, to_f32};
-use krea2::ops::{Binary, Layout, Ops, Pool, Tensor, Unary, Weight};
+use krea2::ops::{Binary, Layout, Ops, Tensor, Unary, Weight};
 
 /// A stream and the operations over it. Every test needs both, and the stream
 /// has to outlive the tensors allocated on it.
 fn opened() -> (Stream, Ops) {
     let stream = Stream::open().expect("a stream");
-    let ops = Ops::new(Pool::new());
+    let ops = Ops::new(BufferPool::new());
     (stream, ops)
 }
 

@@ -251,12 +251,13 @@ fn specialization(job: &Job) -> Result<(&'static str, hrx::loom::Specialization)
     let source = sources::block(&job.source)
         .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
     let mut request = hrx::loom::Specialization::new(format!("krea2_{}", job.source));
-    request.config = job
-        .config
-        .iter()
-        .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
-        .collect();
-    request.report = super::kernel_reports();
+    request.replace_config(
+        job.config
+            .iter()
+            .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
+            .collect(),
+    );
+    request.set_report(super::kernel_reports());
     Ok((source, request))
 }
 

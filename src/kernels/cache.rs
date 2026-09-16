@@ -133,9 +133,10 @@ fn specialization(
         config.insert("grid_y".into(), u64::from(grid.1));
     }
     let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
-    request.config =
-        config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect();
-    request.report = report;
+    request.replace_config(
+        config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect(),
+    );
+    request.set_report(report);
     request
 }
 
@@ -153,9 +154,12 @@ mod tests {
     fn the_grid_joins_the_configuration_except_where_the_kernel_takes_any() {
         let config = super::super::config([("tokens", 4115)]);
         let joined = specialization("unary_one", &config, (7, 3), false);
-        assert_eq!(joined.config.get("krea2.unary_one.grid_x").map(String::as_str), Some("7"));
-        assert_eq!(joined.symbol, "krea2_unary_one");
+        assert_eq!(
+            joined.configuration().get("krea2.unary_one.grid_x").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(joined.symbol(), "krea2_unary_one");
         let any = specialization("sage_transpose", &config, (7, 3), false);
-        assert!(!any.config.contains_key("krea2.sage_transpose.grid_x"));
+        assert!(!any.configuration().contains_key("krea2.sage_transpose.grid_x"));
     }
 }

@@ -1,6 +1,6 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs` 0.4](https://crates.io/crates/hrx-rs) for keyed kernel
+Krea uses [`hrx-rs` 0.5](https://crates.io/crates/hrx-rs) for keyed kernel
 requests, the coordinated graph API and NPU integration.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
 Its features are explicit and `Cargo.lock` pins the complete dependency

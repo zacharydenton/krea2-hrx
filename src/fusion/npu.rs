@@ -47,7 +47,7 @@ pub fn compile(tools: &Path, case: Case) -> Result<Record> {
         ("bias", usize::from(shape.bias)),
         ("grid_x", (shape.m * shape.n).div_ceil(256)),
     ] {
-        spec.config.insert(format!("krea2.fusion_epilogue.{key}"), value.to_string());
+        spec.set_config(format!("krea2.fusion_epilogue.{key}"), value.to_string());
     }
     let epilogue = loom
         .module(include_str!("../../kernels/native/fusion_epilogue.loom"))

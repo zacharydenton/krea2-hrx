@@ -23,10 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("tokens", tokens),
         ("token_capacity", capacity),
     ] {
-        spec.config.insert(format!("krea2.{stem}.{key}"), value.to_string());
+        spec.set_config(format!("krea2.{stem}.{key}"), value.to_string());
     }
-    spec.config.insert(format!("krea2.{stem}.scale"), "0.08838834764831845".into());
-    spec.report = true;
+    spec.set_config(format!("krea2.{stem}.scale"), "0.08838834764831845");
+    spec.set_report(true);
     let mut loaded = Vec::new();
     for (i, path) in sources.iter().enumerate() {
         let artifact = compiler.module(&std::fs::read_to_string(path)?).compile(&spec)?;

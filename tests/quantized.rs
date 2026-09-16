@@ -34,10 +34,11 @@ impl Harness {
         let source = std::fs::read_to_string(path).unwrap();
         let symbol = format!("krea2_{stem}");
         let mut request = hrx::loom::Specialization::new(&symbol);
-        request.config = cfg
-            .iter()
-            .map(|(key, value)| (format!("krea2.{stem}.{key}"), value.clone()))
-            .collect();
+        request.replace_config(
+            cfg.iter()
+                .map(|(key, value)| (format!("krea2.{stem}.{key}"), value.clone()))
+                .collect(),
+        );
         let path = self.compiler.module(&source).compile(&request).unwrap();
         // Safety: trusted checked-in source compiled through HRX. Every test below
         // sizes the bindings from the same dimensions passed as kernel configuration.
@@ -307,9 +308,9 @@ fn production_attention_has_no_scratch_spills() {
             ("tokens", tokens),
             ("token_capacity", shape.capacity as usize),
         ] {
-            request.config.insert(format!("krea2.{stem}.{key}"), value.to_string());
+            request.set_config(format!("krea2.{stem}.{key}"), value.to_string());
         }
-        request.config.insert(format!("krea2.{stem}.scale"), "0.08838834764831845".into());
+        request.set_config(format!("krea2.{stem}.scale"), "0.08838834764831845");
         let artifact = compiler.module(source).compile(&request).unwrap();
         let spills: Vec<_> = artifact
             .diagnostics()

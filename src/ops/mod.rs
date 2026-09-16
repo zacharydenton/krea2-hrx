@@ -8,11 +8,11 @@ use std::sync::{Arc, OnceLock};
 
 use crate::kernels::cache::PreparedKernels;
 pub use crate::kernels::Scalars;
-use hrx::{Buffer, Stream, View};
+use hrx::{Buffer, BufferPool, Stream, View};
 
 pub use crate::kernels::Config;
 
-pub use tensor::{Pool, Scratch, Tensor};
+pub use tensor::Tensor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -155,19 +155,19 @@ impl Weight {
 
 /// The operations, over one buffer pool.
 pub struct Ops {
-    pool: Arc<Pool>,
+    pool: Arc<BufferPool>,
     kernels: PreparedKernels,
     /// Compiler override for this operation set's auxiliary kernels.
     compiler: Option<String>,
 }
 
 impl Ops {
-    pub fn new(pool: Arc<Pool>) -> Ops {
+    pub fn new(pool: Arc<BufferPool>) -> Ops {
         Ops { pool, compiler: None, kernels: PreparedKernels::default() }
     }
 
     /// The same, with an explicit compiler instead of `HRX_LOOM_LIBRARY` or the pinned bundle.
-    pub fn with_compiler(pool: Arc<Pool>, compiler: Option<&str>) -> Ops {
+    pub fn with_compiler(pool: Arc<BufferPool>, compiler: Option<&str>) -> Ops {
         Ops {
             pool,
             compiler: compiler.map(str::to_string),
@@ -179,7 +179,7 @@ impl Ops {
         self.compiler.as_deref()
     }
 
-    pub fn pool(&self) -> &Arc<Pool> {
+    pub fn pool(&self) -> &Arc<BufferPool> {
         &self.pool
     }
 
@@ -496,7 +496,7 @@ impl Ops {
             .collect::<Result<Vec<_>>>()?;
 
         let count = batch * heads * tokens * tokens;
-        let scores = self.pool.scratch(stream, count * 4)?;
+        let scores = self.pool.acquire(stream, count * 4)?;
         self.matmul(
             stream,
             "gemm_bf16_f32_nt",

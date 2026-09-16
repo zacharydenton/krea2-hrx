@@ -1,135 +1,15 @@
-//! BF16 device matrices and pooled allocations.
-//! A [`Pool`] reuses released buffers up to its cache limit. Tensors and views
-//! retain ownership of their backing allocation.
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+//! BF16 device matrices backed by HRX pooled allocations.
+use std::sync::Arc;
 
-use hrx::{Buffer, Stream, View};
+use hrx::{Buffer, BufferPool, PooledBuffer, Stream, View};
 
 use super::{Error, Result};
-
-/// Cached device memory, capped so a long run does not hoard it.
-const LIMIT: usize = 512 << 20;
-
-#[derive(Default)]
-struct FreeList {
-    cached: usize,
-    blocks: BTreeMap<usize, Vec<Buffer>>,
-    /// The stream every block here came from, once one has. See [`Pool`].
-    stream: Option<usize>,
-}
-
-/// A source of device buffers that reuses what it has been given back.
-///
-/// It exists because `Stream::recycle` needs a mutable stream, which a tensor
-/// destructor does not have.
-///
-/// **One pool serves one stream.** A block goes back on the free list as soon
-/// as its last owner drops, which is typically while the work reading it is
-/// still queued. Reissuing it is safe only because the stream that runs that
-/// work also runs whatever writes it next, in that order. Across streams there
-/// is no such order, and the second stream would overwrite bytes the first has
-/// not finished with -- events can order cross-stream *use*, but not reuse the
-/// pool has already handed out. Buffers themselves are device-scoped and HRX
-/// will not object, so the pool keeps this invariant itself: it records the
-/// stream it first served and refuses another.
-#[derive(Default)]
-pub struct Pool {
-    free: Mutex<FreeList>,
-}
-
-impl Pool {
-    pub fn new() -> Arc<Pool> {
-        Arc::new(Pool::default())
-    }
-
-    /// A buffer of at least `bytes`. A cached block is taken when it is not
-    /// more than twice the size asked for, which is what keeps the free list
-    /// from returning a 100 MB block for a 1 KB tensor.
-    fn take(self: &Arc<Self>, stream: &Stream, bytes: usize) -> Result<Pooled> {
-        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
-        match free.stream {
-            Some(owner) if owner != stream.id() => {
-                return Err(Error(
-                    "a buffer pool serves one stream: reuse is ordered by the queue that \
-                     last used the block, and another stream is not in that order"
-                        .into(),
-                ))
-            }
-            Some(_) => {}
-            None => free.stream = Some(stream.id()),
-        }
-        let reusable = free
-            .blocks
-            .range_mut(bytes..)
-            .next()
-            .filter(|(&size, _)| size - bytes <= bytes)
-            .map(|(&size, blocks)| (size, blocks.pop()));
-        if let Some((size, Some(buffer))) = reusable {
-            free.cached -= size;
-            if free.blocks[&size].is_empty() {
-                free.blocks.remove(&size);
-            }
-            return Ok(Pooled { buffer: Some(buffer), pool: self.clone() });
-        }
-        drop(free);
-        Ok(Pooled { buffer: Some(stream.allocate(bytes)?), pool: self.clone() })
-    }
-
-    fn give_back(&self, buffer: Buffer) {
-        let mut free = self.free.lock().unwrap_or_else(|e| e.into_inner());
-        if buffer.bytes() > LIMIT.saturating_sub(free.cached) {
-            return; // dropping the buffer releases it
-        }
-        free.cached += buffer.bytes();
-        free.blocks.entry(buffer.bytes()).or_default().push(buffer);
-    }
-
-    /// Raw pooled bytes, for the one intermediate that is not bf16: attention
-    /// scores, which the GEMM writes as float32.
-    pub fn scratch(self: &Arc<Self>, stream: &Stream, bytes: usize) -> Result<Scratch> {
-        if bytes == 0 {
-            return Err(Error("empty scratch".into()));
-        }
-        Ok(Scratch(self.take(stream, bytes)?))
-    }
-}
-
-/// Pooled device bytes with no shape.
-pub struct Scratch(Pooled);
-
-impl Scratch {
-    /// The whole scratch allocation, as a kernel binding.
-    pub fn binding(&self) -> View<'_> {
-        self.0.buffer().binding()
-    }
-}
-
-/// A buffer that returns to its pool when dropped.
-struct Pooled {
-    buffer: Option<Buffer>,
-    pool: Arc<Pool>,
-}
-
-impl Pooled {
-    fn buffer(&self) -> &Buffer {
-        self.buffer.as_ref().expect("a live buffer")
-    }
-}
-
-impl Drop for Pooled {
-    fn drop(&mut self) {
-        if let Some(buffer) = self.buffer.take() {
-            self.pool.give_back(buffer);
-        }
-    }
-}
 
 /// Backing allocation retained by a tensor and its views, and where in it this
 /// tensor starts. Views are borrowed from the allocation rather than taken as
 /// addresses, so a tensor can no longer outlive the memory it names.
 enum Storage {
-    Owned(Pooled),
+    Owned(PooledBuffer),
     Shared { buffer: Arc<Buffer>, base: usize },
 }
 
@@ -162,8 +42,13 @@ pub struct Tensor {
 impl Tensor {
     /// Allocates uninitialized storage. Initialize every element before reading it;
     /// call [`Tensor::zero`] when zero-filled storage is required.
-    pub fn new(pool: &Arc<Pool>, stream: &Stream, rows: usize, cols: usize) -> Result<Tensor> {
-        let storage = pool.take(stream, bytes(rows, cols)?)?;
+    pub fn new(
+        pool: &Arc<BufferPool>,
+        stream: &Stream,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Tensor> {
+        let storage = pool.acquire(stream, bytes(rows, cols)?)?;
         Ok(Tensor { rows, cols, storage: Arc::new(Storage::Owned(storage)), offset: 0 })
     }
 
@@ -199,7 +84,7 @@ impl Tensor {
     }
 
     pub fn from_slice(
-        pool: &Arc<Pool>,
+        pool: &Arc<BufferPool>,
         stream: &mut Stream,
         values: &[u16],
         rows: usize,
@@ -287,7 +172,7 @@ mod tests {
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_tensor_round_trips_through_the_device() {
         let mut stream = Stream::open().expect("a stream");
-        let pool = Pool::new();
+        let pool = BufferPool::new();
         let values: Vec<u16> = (0..64u16).map(|i| i.wrapping_mul(577)).collect();
         let tensor = Tensor::from_slice(&pool, &mut stream, &values, 8, 8).expect("upload");
         assert_eq!(tensor.download(&mut stream).expect("download"), values);
@@ -297,7 +182,7 @@ mod tests {
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn a_view_reads_the_rows_it_names() {
         let mut stream = Stream::open().expect("a stream");
-        let pool = Pool::new();
+        let pool = BufferPool::new();
         let values: Vec<u16> = (0..64u16).collect();
         let tensor = Tensor::from_slice(&pool, &mut stream, &values, 8, 8).expect("upload");
         let second = tensor.view(1, 8, 8).expect("the second row");
@@ -352,7 +237,7 @@ mod tests {
         let device = hrx::Device::open(0).expect("a device");
         let first = device.stream().expect("first stream");
         let second = device.stream().expect("second stream");
-        let pool = Pool::new();
+        let pool = BufferPool::new();
 
         let tensor = Tensor::new(&pool, &first, 16, 16).expect("a tensor");
         drop(tensor); // back on the free list, possibly with work still queued
@@ -369,17 +254,17 @@ mod tests {
     #[ignore = "requires gfx1151 and provisioned HRX"]
     fn dropped_storage_comes_back_from_the_pool() {
         let stream = Stream::open().expect("a stream");
-        let pool = Pool::new();
+        let pool = BufferPool::new();
         let first = Tensor::new(&pool, &stream, 16, 16).expect("a tensor");
         let shared = first.clone();
         drop(first);
-        assert_eq!(pool.free.lock().unwrap().cached, 0, "a live alias prevents recycling");
+        assert_eq!(pool.cached_bytes(), 0, "a live alias prevents recycling");
         drop(shared);
-        assert_eq!(pool.free.lock().unwrap().cached, 512);
+        assert_eq!(pool.cached_bytes(), 512);
         let second = Tensor::new(&pool, &stream, 8, 16).expect("a smaller tensor");
         assert_eq!(second.binding().unwrap().owner().bytes(), 512);
-        assert_eq!(pool.free.lock().unwrap().cached, 0, "the cached block was consumed");
+        assert_eq!(pool.cached_bytes(), 0, "the cached block was consumed");
         drop(second);
-        assert_eq!(pool.free.lock().unwrap().cached, 512);
+        assert_eq!(pool.cached_bytes(), 512);
     }
 }

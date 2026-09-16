@@ -108,8 +108,8 @@ fn auxiliary_compilation_uses_the_shared_hrx_artifact() {
     let source = krea2::kernels::sources::auxiliary("euler").unwrap();
     let compiler = krea2::kernels::compiler(None).unwrap();
     let mut request = hrx::loom::Specialization::new("krea2_euler");
-    request.config.insert("krea2.euler.grid_x".into(), "4".into());
-    request.config.insert("krea2.euler.grid_y".into(), "1".into());
+    request.set_config("krea2.euler.grid_x", "4");
+    request.set_config("krea2.euler.grid_y", "1");
     PreparedKernels::default()
         .get(&stream, "euler", krea2::kernels::Config::new(), (4, 1))
         .unwrap();

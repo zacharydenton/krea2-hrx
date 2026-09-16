@@ -26,7 +26,7 @@ default = ["npu"]
 npu = ["hrx/npu-compile"]
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.4.1", default-features = false, features = ["download", "loom"] }
+hrx = { package = "hrx-rs", version = "0.5.0", default-features = false, features = ["download", "loom"] }
 
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
@@ -34,13 +34,10 @@ serde_json = "1"
 anyhow = "1"
 bytemuck = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
-hf-hub = { version = "1.0", default-features = false, features = ["blocking", "rustls-tls"] }
-memmap2 = "0.9"
 png = "0.17"
 rand = "0.9"
 rand_chacha = "0.9"
 rand_distr = "0.5"
-safetensors = "0.8"
 # default-features = false keeps this pure Rust: fancy-regex instead of the
 # oniguruma C library, and no progress bars or HTTP.
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }

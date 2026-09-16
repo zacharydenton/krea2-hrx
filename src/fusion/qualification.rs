@@ -106,7 +106,7 @@ fn percentile(values: &[f64], p: usize) -> Option<f64> {
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
-    Some(sorted[(sorted.len() * p).div_ceil(100).saturating_sub(1)])
+    Some(hrx::benchmark::percentile(&sorted, p))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

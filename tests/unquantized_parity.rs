@@ -259,8 +259,9 @@ fn candidate_export_preserves_native_pixels_and_binds_reference() {
 #[test]
 #[ignore = "requires gfx1151, local weights and the unquantized BF16 reference fixture"]
 fn unquantized_bf16_reference_quality_does_not_regress() {
+    use hrx::BufferPool;
     use krea2::numerics::{from_f32, to_f32};
-    use krea2::ops::{Ops, Pool, Tensor};
+    use krea2::ops::{Ops, Tensor};
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture = std::env::var_os("KREA2_QUALITY_FIXTURE")
         .map(PathBuf::from)
@@ -322,7 +323,7 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     // Its own stream: the pipeline owns one internally, and these tensors are
     // only ever read back to the host between steps, never shared with it.
     let mut stream = hrx::Stream::open().unwrap();
-    let pool = Pool::new();
+    let pool = BufferPool::new();
     let ops = Ops::new(pool.clone());
     let initial: Vec<_> = state.iter().map(|&v| from_f32(v)).collect();
     let resident = Tensor::from_slice(&pool, &mut stream, &initial, tokens, 64).unwrap();

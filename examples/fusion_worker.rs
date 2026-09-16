@@ -86,7 +86,7 @@ fn main() -> anyhow::Result<()> {
     // The explicit qualification command supplies artifacts from its own compile step.
     let pilot = unsafe { npu::Pilot::load(&record, &weights, &biases) }?;
     let mut stream = hrx::Stream::open()?;
-    let ops = krea2::ops::Ops::new(krea2::ops::Pool::new());
+    let ops = krea2::ops::Ops::new(hrx::BufferPool::new());
     let x = ops.tensor(&stream, case.shape.m, case.shape.k)?;
     stream.upload(x.binding()?, &input)?;
     let storage = Arc::new(stream.allocate(weights.len())?);

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use crate::checkpoint::Checkpoint;
 use crate::kernels::Scalars;
 use crate::numerics::{from_f32, to_f32};
-use crate::ops::{config, Binary, Config, Norm, Ops, Pool, Scratch, Tensor, Unary};
+use crate::ops::{config, Binary, Config, Norm, Ops, Tensor, Unary};
 use crate::tokenizer::Tokenizer;
-use hrx::Stream;
+use hrx::{BufferPool, PooledBuffer, Stream};
 
 use super::files::Files;
 use super::weights::Weights;
@@ -56,7 +56,7 @@ impl Models {
         tokenizer: Option<&std::path::Path>,
         compiler: Option<&str>,
     ) -> Result<Models> {
-        let pool = Pool::new();
+        let pool = BufferPool::new();
         let models = Models {
             fusion: crate::fusion::Fusion::new(checkpoint),
             ops: Ops::with_compiler(Arc::clone(&pool), compiler),
@@ -104,7 +104,7 @@ impl Models {
         let (count, tokens) = (ids.len(), ids.len() - 34);
         let mut x = self.ops.tensor(stream, count, TEXT_WIDTH)?;
         let taps = self.ops.tensor(stream, tokens * 12, TEXT_WIDTH)?;
-        let identifiers = self.ops.pool().scratch(stream, count * 4)?;
+        let identifiers = self.ops.pool().acquire(stream, count * 4)?;
         stream.upload(identifiers.binding(), bytemuck::cast_slice(ids))?;
         let args_scalars = Scalars::new().index(x.size());
         let args = [embedding.values()?, identifiers.binding(), x.binding()?];
@@ -389,11 +389,11 @@ impl Models {
 
     /// Every block's modulation table added to this timestep's vector, as the
     /// float32 buffer the block session reads.
-    pub fn modulation(&self, stream: &Stream, vector: &Tensor) -> Result<Scratch> {
+    pub fn modulation(&self, stream: &Stream, vector: &Tensor) -> Result<PooledBuffer> {
         if vector.size() != 6 * WIDTH {
             return Err(Error("modulation dimensions".into()));
         }
-        let out = self.ops.pool().scratch(stream, MODULATION_ELEMENTS * 4)?;
+        let out = self.ops.pool().acquire(stream, MODULATION_ELEMENTS * 4)?;
         let args_scalars = Scalars::new().index(MODULATION_ELEMENTS);
         let args = [vector.binding()?, self.block_tables.binding()?, out.binding()];
         unsafe {

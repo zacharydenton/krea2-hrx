@@ -1,14 +1,15 @@
 //! Constant logits have exactly known probabilities, so a repeated resident
 //! dispatch exposes an LDS read/write race with no model, no random data and
 //! no reference implementation to disagree with.
+use hrx::BufferPool;
 use krea2::numerics::from_f32;
-use krea2::ops::{config, Ops, Pool, Scalars};
+use krea2::ops::{config, Ops, Scalars};
 
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
     let mut stream = hrx::Stream::open().expect("a stream");
-    let ops = Ops::new(Pool::new());
+    let ops = Ops::new(BufferPool::new());
     for tokens in [256usize, 33, 257, 1024] {
         for causal in [false, true] {
             let rows = 8 * tokens;
@@ -17,7 +18,7 @@ fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
             // it gets the long repeat.
             let repeats = if tokens == 256 { 256 } else { 32 };
 
-            let scores = ops.pool().scratch(&stream, count * 4).expect("scores");
+            let scores = ops.pool().acquire(&stream, count * 4).expect("scores");
             stream
                 .upload(scores.binding(), bytemuck::cast_slice(&vec![20f32; count]))
                 .expect("upload");
