@@ -212,7 +212,7 @@ impl Session {
     ) -> Result<hrx::inference::PreparedModel> {
         use hrx::{
             execution::GpuAccess,
-            inference::PreparedModel,
+            inference::{InferenceGraph, PreparedModel},
             tensor::{DType, Layout, TensorDesc},
             Access,
         };
@@ -244,35 +244,30 @@ impl Session {
             .with_layout(Layout::Rows)?;
         let mods = TensorDesc::new(DType::F32, vec![self.layers, 6, HIDDEN as usize])?;
         let mut owned = Some((self, stream, cos, sin));
-        Ok(PreparedModel::prepare(
-            context,
-            &[x.clone(), mods],
-            &[x],
-            1,
-            |context, inputs, outputs| {
-                let (session, mut stream, cos, sin) =
-                    owned.take().expect("one fixed-shape slot");
-                let bindings = [
-                    GpuAccess { view: inputs[0].binding().unwrap(), access: Access::Read },
-                    GpuAccess { view: inputs[1].binding().unwrap(), access: Access::Read },
-                    GpuAccess { view: outputs[0].binding().unwrap(), access: Access::Write },
-                ];
-                let mut graph = context.runtime().graph();
-                // Safety: the closure owns the only session/stream and retains all
-                // graph buffers and weights. Only declared views escape the private
-                // workspace, and synchronization drains every access before return.
-                unsafe {
-                    graph.gpu_scoped(&bindings, move |views| {
-                        stream.copy(views[2], views[0])?;
-                        session
-                            .run_device(&mut stream, views[2], views[1], &cos, &sin)
-                            .map_err(|error| hrx::Error::Message(error.to_string()))?;
-                        stream.synchronize()
-                    })?;
-                }
-                graph.prepare()
-            },
-        )?)
+        Ok(PreparedModel::prepare(context, 1, |context| {
+            let inputs = vec![context.allocate(x.clone())?, context.allocate(mods.clone())?];
+            let outputs = vec![context.allocate(x.clone())?];
+            let (session, mut stream, cos, sin) = owned.take().expect("one fixed-shape slot");
+            let bindings = [
+                GpuAccess { view: inputs[0].binding().unwrap(), access: Access::Read },
+                GpuAccess { view: inputs[1].binding().unwrap(), access: Access::Read },
+                GpuAccess { view: outputs[0].binding().unwrap(), access: Access::Write },
+            ];
+            let mut graph = context.runtime().graph();
+            // Safety: the closure owns the only session/stream and retains all
+            // graph buffers and weights. Only declared views escape the private
+            // workspace, and synchronization drains every access before return.
+            unsafe {
+                graph.gpu_scoped(&bindings, move |views| {
+                    stream.copy(views[2], views[0])?;
+                    session
+                        .run_device(&mut stream, views[2], views[1], &cos, &sin)
+                        .map_err(|error| hrx::Error::Message(error.to_string()))?;
+                    stream.synchronize()
+                })?;
+            }
+            Ok(InferenceGraph { inputs, outputs, graph: graph.prepare()? })
+        })?)
     }
 
     /// Load a checkpoint and prepare its kernel specializations through HRX.
