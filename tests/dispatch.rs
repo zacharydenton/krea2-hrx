@@ -81,12 +81,16 @@ fn a_span_past_the_end_of_an_allocation_is_rejected() {
 fn the_process_maps_no_hip_torch_or_system_crypto() {
     // Touch the device so the provider is loaded before the maps are read.
     let mut stream = Stream::open().expect("a stream");
+    let buffer = stream.allocate(64).expect("allocation");
+    stream.fill(buffer.binding(), 0).expect("native fill");
     stream.synchronize().expect("draining the stream");
     let maps = std::fs::read_to_string("/proc/self/maps").expect("reading /proc/self/maps");
-    for required in ["libhrx.so", "libhsa-runtime64"] {
+    for required in ["libamdf.so", "libhrx_fabric.so"] {
         assert!(maps.contains(required), "{required} is not mapped");
     }
     for forbidden in [
+        "libhrx.so",
+        "libhsa-runtime64",
         "libamdhip64",
         "libhipblas",
         "librocblas",

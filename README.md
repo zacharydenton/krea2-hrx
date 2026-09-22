@@ -47,7 +47,7 @@ Clone the repository and install the runtime CLI:
 git clone https://github.com/zacharydenton/krea2-hrx.git
 cd krea2-hrx
 
-cargo install --locked hrx-rs --version 0.8.0
+cargo install --locked hrx-rs --version 0.8.2
 hrx prepare
 cargo install --locked --path .
 

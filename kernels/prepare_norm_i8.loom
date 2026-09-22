@@ -99,7 +99,43 @@ kernel.def target(@krea2_prepare_norm_i8_gfx11) export("krea2_prepare_norm_i8") 
     scf.yield %ss_next : vector<8xf32>
   }
   %ss = vector.reduce<addf> %ss_v, %zero : vector<8xf32>, f32
-  %total = kernel.workgroup.reduce<addf> %ss : f32
+  // The model's BF16 rounding depends on the addition order between waves.
+  // Publish wave sums, then combine 0+4, 2+6, 1+5, 3+7 explicitly.
+  %sum_bytes = index.constant 32 : offset
+  %sum_lds = buffer.alloca<workgroup> align(16) %sum_bytes : buffer
+  %sum_view = buffer.view %sum_lds[%c0_offset] : buffer -> view<8xf32>
+  %sum_wave = kernel.subgroup.id : index
+  %sum_lane = kernel.subgroup.lane.id : index
+  %sum_leader = index.cmp eq, %sum_lane, %c0 : index
+  %sum_partial = kernel.subgroup.reduce<addf> %ss : f32
+  scf.if %sum_leader {
+    %sum_wave_b = index.assume %sum_wave [range(%sum_wave, 0, 7)] : index
+    view.store %sum_partial, %sum_view[%sum_wave_b] : f32, view<8xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %sum_i0 = index.constant 0 : index
+  %sum_p0 = view.load %sum_view[%sum_i0] : view<8xf32> -> f32
+  %sum_i1 = index.constant 1 : index
+  %sum_p1 = view.load %sum_view[%sum_i1] : view<8xf32> -> f32
+  %sum_i2 = index.constant 2 : index
+  %sum_p2 = view.load %sum_view[%sum_i2] : view<8xf32> -> f32
+  %sum_i3 = index.constant 3 : index
+  %sum_p3 = view.load %sum_view[%sum_i3] : view<8xf32> -> f32
+  %sum_i4 = index.constant 4 : index
+  %sum_p4 = view.load %sum_view[%sum_i4] : view<8xf32> -> f32
+  %sum_i5 = index.constant 5 : index
+  %sum_p5 = view.load %sum_view[%sum_i5] : view<8xf32> -> f32
+  %sum_i6 = index.constant 6 : index
+  %sum_p6 = view.load %sum_view[%sum_i6] : view<8xf32> -> f32
+  %sum_i7 = index.constant 7 : index
+  %sum_p7 = view.load %sum_view[%sum_i7] : view<8xf32> -> f32
+  %sum_pair0 = scalar.addf %sum_p0, %sum_p4 : f32
+  %sum_pair1 = scalar.addf %sum_p1, %sum_p5 : f32
+  %sum_pair2 = scalar.addf %sum_p2, %sum_p6 : f32
+  %sum_pair3 = scalar.addf %sum_p3, %sum_p7 : f32
+  %sum_even = scalar.addf %sum_pair0, %sum_pair2 : f32
+  %sum_odd = scalar.addf %sum_pair1, %sum_pair3 : f32
+  %total = scalar.addf %sum_even, %sum_odd : f32
   %width_i = index.cast %width : index to i32
   %width_f = scalar.sitofp %width_i : i32 to f32
   %mean = scalar.divf %total, %width_f : f32
