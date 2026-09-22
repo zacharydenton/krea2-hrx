@@ -11,6 +11,9 @@
 Selection is recorded in the compiled bundle metadata. The default kernel is
 `kernels/attention_gqa_lds_f16_wmma.loom`. Experimental query32 attention is
 not selected by either production builder; see [its evaluation](attention-2x.md).
+The pinned HRX 0.8 compiler rejects its accumulator-to-RHS repack with
+`AMDGPU/041` / `layout_strategy`. Production CPU-oracle tests cover query16;
+a separate diagnostic test records this query32 limitation.
 
 The default kernel consumes V fragments in pairs to avoid VGPR spills. See the
 [register-pressure investigation](attention-spills.md) for disassembly findings,

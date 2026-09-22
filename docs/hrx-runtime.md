@@ -49,7 +49,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 Install the matching CLI from crates.io:
 
 ```sh
-cargo install --locked hrx-rs --version 0.8.3
+cargo install --locked hrx-rs --version 0.8.5
 hrx prepare
 cargo build --release
 ```
@@ -145,3 +145,25 @@ quality, checkpoint-scale load time and peak memory were not remeasured.
 
 The [native NPU text-fusion experiment](npu-fusion.md) uses Loom on HRX 0.8.3.
 Auto uses GPU; explicit NPU selection is not performance or quality qualified.
+
+## HRX 0.8.5 qualification — 2026-09-23
+
+The bounded command reuse introduced in 0.8.4 improves the warm 256×256,
+two-step generation benchmark from 789.979 to 748.233 ms (5.3%) versus 0.8.3.
+Five alternating fresh-process pairs use Turbo int8 ConvRot, seed 37 and the
+red-ceramic-cup prompt. All captured RGB is exact; seven warm samples per process
+include text encoding, denoising and VAE. Warm residency stays constant and
+releases on teardown. No builds or other GPU jobs run during timing.
+
+Twenty-two selected GPU/compiler checks and five native NPU shapes pass. The
+NPU checks use three changed inputs per shape, exact BF16/f64-oracle results,
+stable allocations/imports and zero residency after teardown. Experimental NPU
+selection stays opt-in: its prior failed production latency gate still applies.
+The full unquantized reference fixture remains absent; no new baseline is minted.
+
+The production attention oracle now tests query16 at all three token lengths.
+Experimental query32 has a separate test for the pinned compiler's documented
+`AMDGPU/041` layout rejection. No production kernel or precision policy changed.
+
+[Raw measurements and shared qualification](https://github.com/zacharydenton/hrx-rs/blob/main/docs/CLIENT-COMPOSITION.md)
+record the runtime and binary identities.

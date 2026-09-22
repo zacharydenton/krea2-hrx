@@ -360,35 +360,26 @@ fn production_attention_tiles_match_grouped_cpu_softmax() {
                 }
             }
         }
-        for query32 in [false, true] {
-            let stem = if query32 { "attention_query32" } else { "attention_gqa_lds_f16_wmma" };
-            let mut config = cfg(&[
-                ("q_stride", heads * d),
-                ("kv_stride", kv * d),
-                ("tokens", tokens),
-                ("token_capacity", capacity),
-                ("out_stride", heads * d),
-            ]);
-            config.push(("scale", (1. / (d as f64).sqrt()).to_string()));
-            let vv = if query32 {
-                (0..kv * d)
-                    .flat_map(|c| (0..capacity).map(move |t| (t, c)))
-                    .map(|(t, c)| v[t * kv * d + c])
-                    .collect::<Vec<_>>()
-            } else {
-                v.clone()
-            };
-            let rows = if query32 { 32 } else { 16 };
-            let out = h.run(
-                stem,
-                &config,
-                [tokens.div_ceil(rows) as u32, kv as u32, 1],
-                if query32 { 256 } else { 128 },
-                &[tokens as u64, 0],
-                &[bytes(&q), bytes(&k), bytes(&vv), vec![0; tokens * heads * d * 2]],
-            );
-            close(&halves(&out[3], false), &want, 2e-2, 2e-2);
-        }
+        // The shipping kernel uses query16. Experimental query32 requires a
+        // repack layout rejected by the pinned HRX 0.8 compiler (checked below).
+        let stem = "attention_gqa_lds_f16_wmma";
+        let mut config = cfg(&[
+            ("q_stride", heads * d),
+            ("kv_stride", kv * d),
+            ("tokens", tokens),
+            ("token_capacity", capacity),
+            ("out_stride", heads * d),
+        ]);
+        config.push(("scale", (1. / (d as f64).sqrt()).to_string()));
+        let out = h.run(
+            stem,
+            &config,
+            [tokens.div_ceil(16) as u32, kv as u32, 1],
+            128,
+            &[tokens as u64, 0],
+            &[bytes(&q), bytes(&k), bytes(&v), vec![0; tokens * heads * d * 2]],
+        );
+        close(&halves(&out[3], false), &want, 2e-2, 2e-2);
     }
 }
 
@@ -527,4 +518,29 @@ fn quantized_preparation_matches_the_kronecker_hadamard_and_preserves_padding() 
             );
         }
     }
+}
+
+#[test]
+#[ignore = "requires the pinned HRX 0.8 Loom compiler"]
+fn experimental_query32_reports_unsupported_repack() {
+    let compiler = krea2::kernels::compiler(None).unwrap();
+    let source = include_str!("../kernels/attention_query32.loom");
+    let mut request = hrx::loom::Specialization::new("krea2_attention_query32");
+    for (key, value) in [
+        ("q_stride", "512"),
+        ("kv_stride", "128"),
+        ("out_stride", "512"),
+        ("tokens", "17"),
+        ("token_capacity", "128"),
+        ("scale", "0.08838834764831845"),
+    ] {
+        request.set_config(format!("krea2.attention_query32.{key}"), value);
+    }
+    let error = match compiler.module(source).compile(&request) {
+        Ok(_) => panic!(
+            "query32 now compiles: qualify its CPU oracle and image quality before enabling"
+        ),
+        Err(error) => format!("{error:?}"),
+    };
+    assert!(error.contains("AMDGPU/041") && error.contains("layout_strategy"), "{error}");
 }
