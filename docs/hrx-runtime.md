@@ -1,13 +1,13 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs` 0.6](https://crates.io/crates/hrx-rs) for keyed kernel
-requests, the coordinated graph API and NPU integration.
+Krea uses [`hrx-rs` 0.8](https://crates.io/crates/hrx-rs) for keyed kernel
+requests and the coordinated graph API.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
-GPU and Loom are unconditional; `npu` is the only optional HRX feature.
+GPU, NPU and Loom now use the unified HRX 0.8 native bundle.
 `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
-There is no link-time libhrx dependency or runtime rpath in the binary.
+The unified native bundle loads dynamically; no runtime rpath is embedded in the binary.
 
 Each pipeline owns an explicit HRX `ModelContext`; `Pipeline::open_in` lets an
 application share that context with other models. Transformer block plans use
@@ -25,8 +25,7 @@ model weights or auxiliary pools and are not a total GPU memory measurement.
 When the context has a `memory_budget`, all pipeline GPU streams use it before
 allocating, including native weights, auxiliary pools, block workspace and
 transfer staging. Residency statistics include those native allocations;
-coordinated Runtime statistics still cover only tracked tensors. Optional NPU
-fusion buffers and instructions inherit that same budget. Driver/compiler memory
+coordinated Runtime statistics still cover only tracked tensors. Driver/compiler memory
 and native allocator rounding remain outside it.
 
 Transfers and dispatch use HRX `View` regions. Uploads copy into HRX-owned staging
@@ -36,9 +35,7 @@ padded rows are assembled in a reusable host buffer. Blocking reads wait for
 completion. Profiling and progress callbacks add explicit waits when needed.
 
 Tensor storage returns to the model's pool when its final owner is dropped.
-This pool is intentional: HRX's `Stream::recycle` needs mutable stream access,
-which tensor destructors do not have. One pool serves one stream, and refuses
-another. Buffers are device-scoped, so HRX permits a block on any stream and
+One pool serves one ordered stream and refuses another. Buffers are device-scoped, so HRX permits a block on any stream and
 `record_event`/`wait_event` order that use — but a pooled block returns to the
 free list while the work reading it is still queued, and reissuing it is safe
 only because the stream that runs that work also runs whatever writes it next.
@@ -50,7 +47,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 Install the matching CLI from crates.io:
 
 ```sh
-cargo install --locked hrx-rs --version 0.6.0 --features npu
+cargo install --locked hrx-rs --version 0.8.0
 hrx prepare
 cargo build --release
 ```
@@ -102,9 +99,8 @@ Kernel sources live in `kernels`; tokenizer assets live in
 `assets`. Generators and tests use these paths directly.
 Package builds carry the same assets without depending on files outside the package.
 
-H3, Krea and kernel test libraries can coexist: HRX initializes under an OS lock
-across Rust crate copies, uses the same native library, and never unloads or
-globally shuts it down on model teardown.
+Applications combining model crates should resolve to one HRX package version
+and source, sharing a `ModelContext` when they need coordinated ownership.
 
 ## Interface
 
@@ -145,5 +141,5 @@ checks the output. Completed batches averaged 2.1–2.25 µs per tiny kernel.
 These are wall-clock costs, not GPU timestamps or whole-model latency. Image
 quality, checkpoint-scale load time and peak memory were not remeasured.
 
-See [NPU text fusion](npu-fusion.md) for scoped GPU handoffs, the bounded shape
-cache and explicit qualification. GPU inference remains the fallback.
+The [legacy NPU text-fusion pilot](npu-fusion.md) is retired. Auto uses GPU;
+a native replacement requires fresh latency and quality qualification.

@@ -26,13 +26,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         spec.set_config(format!("krea2.{stem}.{key}"), value.to_string());
     }
     spec.set_config(format!("krea2.{stem}.scale"), "0.08838834764831845");
-    spec.set_report(true);
+    spec.set_report(hrx::loom::ReportMode::Summary);
     let mut loaded = Vec::new();
     for (i, path) in sources.iter().enumerate() {
         let artifact = compiler.module(&std::fs::read_to_string(path)?).compile(&spec)?;
         std::fs::write(out.join(format!("{i}.hsaco")), artifact.bytes())?;
         if let Some(report) = artifact.report() {
-            std::fs::write(out.join(format!("{i}.json")), report.to_string())?;
+            std::fs::write(out.join(format!("{i}.json")), report.json().to_string())?;
         }
         let diagnostics = artifact
             .diagnostics()

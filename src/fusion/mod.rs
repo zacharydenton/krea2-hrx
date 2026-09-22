@@ -1,77 +1,68 @@
 //! Backend selection for the first text-fusion block's up projection.
 use crate::ops::{Ops, Tensor, Weight};
 use hrx::Stream;
-use std::{
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::path::Path;
 
-#[cfg(feature = "npu")]
-pub mod npu;
-#[cfg(feature = "npu")]
-pub mod qualification;
+const RETIRED: &str = "the legacy Chess NPU fusion pilot is retired in HRX 0.8; use auto or gpu until a native Loom implementation passes latency and quality qualification";
 
-/// Selection applies only to the qualified fusion projection; other work stays on GPU.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum FusionBackend {
-    /// Use an NPU only when a matching saved qualification passes every gate.
+    /// Use the qualified GPU implementation.
     #[default]
     Auto,
     /// Always execute the existing GPU operation.
     Gpu,
-    /// Require a verified NPU artifact for the selected projection.
+    /// Report that the legacy NPU pilot is retired.
     Npu,
 }
 
 pub(crate) struct Fusion {
     backend: FusionBackend,
-    checkpoint: PathBuf,
-    #[cfg(feature = "npu")]
-    state: Mutex<npu::Cache>,
-    reason: Mutex<String>,
 }
 impl Fusion {
-    pub fn new(checkpoint: &Path) -> Self {
-        Self {
-            backend: FusionBackend::Auto,
-            checkpoint: checkpoint.into(),
-            #[cfg(feature = "npu")]
-            state: Mutex::new(npu::Cache::default()),
-            reason: Mutex::new("GPU: no qualified NPU selection".into()),
-        }
+    pub fn new(_checkpoint: &Path) -> Self {
+        Self { backend: FusionBackend::Auto }
     }
     pub fn set_backend(&mut self, backend: FusionBackend) {
         self.backend = backend;
     }
     pub fn reason(&self) -> String {
-        self.reason.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        match self.backend {
+            FusionBackend::Gpu => "GPU: explicitly selected",
+            FusionBackend::Auto => "GPU: no qualified native NPU fusion implementation",
+            FusionBackend::Npu => RETIRED,
+        }
+        .into()
+    }
+    fn validate(&self) -> crate::ops::Result<()> {
+        if self.backend == FusionBackend::Npu {
+            return Err(crate::ops::Error(RETIRED.into()));
+        }
+        Ok(())
     }
     pub fn linear(
         &self,
-        stream: &mut Stream,
-        ops: &Ops,
-        x: &Tensor,
-        w: &Weight,
-        bias: Option<hrx::View<'_>>,
+        _stream: &mut Stream,
+        _ops: &Ops,
+        _x: &Tensor,
+        _w: &Weight,
+        _bias: Option<hrx::View<'_>>,
     ) -> crate::ops::Result<Option<Tensor>> {
-        #[cfg(feature = "npu")]
-        {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| crate::ops::Error("fusion cache poisoned".into()))?;
-            let result =
-                state.linear((self.backend, &self.checkpoint), stream, ops, x, w, bias);
-            *self.reason.lock().unwrap_or_else(|e| e.into_inner()) = state.reason.clone();
-            result
-        }
-        #[cfg(not(feature = "npu"))]
-        {
-            let _ = (&self.checkpoint, stream, ops, x, w, bias);
-            if self.backend == FusionBackend::Npu {
-                return Err(crate::ops::Error("NPU support was not compiled in".into()));
-            }
-            Ok(None)
-        }
+        self.validate()?;
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn gpu_modes_work_and_forced_legacy_npu_fails_before_device_access() {
+        let mut fusion = Fusion::new(Path::new("unused"));
+        assert!(fusion.validate().is_ok());
+        fusion.set_backend(FusionBackend::Gpu);
+        assert!(fusion.validate().is_ok());
+        fusion.set_backend(FusionBackend::Npu);
+        assert!(fusion.validate().unwrap_err().to_string().contains("retired"));
     }
 }

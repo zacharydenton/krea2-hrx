@@ -257,7 +257,11 @@ fn specialization(job: &Job) -> Result<(&'static str, hrx::loom::Specialization)
             .map(|(k, v)| (format!("krea2.{}.{k}", job.source), v.clone()))
             .collect(),
     );
-    request.set_report(super::kernel_reports());
+    request.set_report(if super::kernel_reports() {
+        hrx::loom::ReportMode::Summary
+    } else {
+        hrx::loom::ReportMode::None
+    });
     Ok((source, request))
 }
 

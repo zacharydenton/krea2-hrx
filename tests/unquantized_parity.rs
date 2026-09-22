@@ -387,16 +387,10 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         };
         // Measure the production path after one complete warmup, including text
         // encoding, fusion, denoising, decoding and final device completion.
-        let elapsed = if std::env::var_os("KREA2_FUSION_CAPTURE").is_some() {
-            // Capture obtains activations and quality evidence only; the ten
-            // later qualification processes measure production generation.
-            0.0
-        } else {
-            pipeline.generate(&request, None).unwrap();
-            let started = std::time::Instant::now();
-            pipeline.generate(&request, None).unwrap();
-            started.elapsed().as_secs_f64()
-        };
+        pipeline.generate(&request, None).unwrap();
+        let started = std::time::Instant::now();
+        pipeline.generate(&request, None).unwrap();
+        let elapsed = started.elapsed().as_secs_f64();
         std::fs::write(
             path,
             serde_json::to_vec_pretty(&serde_json::json!({

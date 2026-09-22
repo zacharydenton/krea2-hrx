@@ -43,6 +43,7 @@ pub fn compiler_for_target(
         workers,
         module_cache_capacity: 256,
         target: target.clone(),
+        processor_mode: hrx::loom::ProcessorMode::Default,
     };
     Ok(hrx::loom::Compiler::shared(override_path.map(Path::new), options)?)
 }
@@ -136,7 +137,11 @@ fn specialization(
     request.replace_config(
         config.iter().map(|(k, v)| (format!("krea2.{name}.{k}"), v.to_string())).collect(),
     );
-    request.set_report(report);
+    request.set_report(if report {
+        hrx::loom::ReportMode::Summary
+    } else {
+        hrx::loom::ReportMode::None
+    });
     request
 }
 

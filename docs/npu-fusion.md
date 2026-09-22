@@ -1,4 +1,13 @@
-# NPU text-fusion pilot
+# Retired NPU text-fusion pilot
+
+HRX 0.8 removes the legacy Chess/IRON runtime and compiler APIs. This failed
+pilot is retired: `auto` and `gpu` use GPU, while `npu` reports an explicit error.
+The old `npu` Cargo feature is retained as an empty compatibility flag.
+Saved legacy profiles cannot enable NPU execution. A native Loom replacement
+must pass fresh latency and quality qualification before it can be enabled.
+
+The following describes the historical experiment on HRX 0.7; its commands
+require that older checkout.
 
 `--fusion-backend auto|gpu|npu` selects the backend for
 `txtfusion.layerwise_blocks.0.mlp.up`. Other operations use the existing GPU path.

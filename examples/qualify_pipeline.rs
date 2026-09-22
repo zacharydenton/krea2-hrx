@@ -22,6 +22,9 @@ fn main() -> Result<()> {
                 .write_all(bytes)?;
         } else {
             let expected = std::fs::read(&path).with_context(|| path.display().to_string())?;
+            if expected != bytes {
+                std::fs::write(path.with_extension("actual"), bytes)?;
+            }
             ensure!(
                 expected == bytes,
                 "{} differs from the pre-migration pipeline",

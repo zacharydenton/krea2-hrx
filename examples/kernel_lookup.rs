@@ -33,7 +33,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for axis in ["x", "y"] {
             spec.set_config(format!("krea2.{name}.grid_{axis}"), "1");
         }
-        spec.set_report(krea2::kernels::kernel_reports());
+        spec.set_report(if krea2::kernels::kernel_reports() {
+            hrx::loom::ReportMode::Summary
+        } else {
+            hrx::loom::ReportMode::None
+        });
         // Both caches are warm before timing. All source is embedded and trusted.
         unsafe { source_cache.get(&stream, source, &spec)? };
         keyed_cache.get(&stream, name, config.clone(), (1, 1))?;

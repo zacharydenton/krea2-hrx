@@ -81,7 +81,7 @@ pub fn report(name: &str, artifact: &hrx::loom::Artifact) {
         );
     }
     if let Some(report) = artifact.report() {
-        eprintln!("krea2 kernel {name} report: {report}");
+        eprintln!("krea2 kernel {name} report: {}", report.json());
     }
 }
 

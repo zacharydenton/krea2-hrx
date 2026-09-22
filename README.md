@@ -47,7 +47,7 @@ Clone the repository and install the runtime CLI:
 git clone https://github.com/zacharydenton/krea2-hrx.git
 cd krea2-hrx
 
-cargo install --locked hrx-rs --version 0.6.0 --features npu
+cargo install --locked hrx-rs --version 0.8.0
 hrx prepare
 cargo install --locked --path .
 
@@ -61,10 +61,9 @@ it takes longer than a warm run. See [Models](#models) to reuse local weights.
 The native bundle is pinned by hash. See the
 [runtime guide](docs/hrx-runtime.md) for what `hrx prepare` fetches.
 
-The optional [XDNA2 text-fusion pilot](docs/npu-fusion.md) uses a saved local
-qualification to select an NPU only when it meets latency and quality gates.
-`--fusion-backend gpu` selects GPU explicitly; `--no-default-features` builds
-without NPU support. Chess is needed only for explicit qualification.
+The [legacy XDNA2 text-fusion pilot](docs/npu-fusion.md) was retired with HRX 0.8
+because it failed latency and quality qualification. `auto` and `gpu` use GPU;
+forced `npu` selection reports an error. A native replacement needs new evidence.
 
 ## Models
 

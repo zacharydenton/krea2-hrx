@@ -22,11 +22,12 @@ path = "src/main.rs"
 strip = true
 
 [features]
-default = ["npu"]
-npu = ["hrx/npu"]
+default = []
+# Compatibility flag; the unsuccessful legacy fusion pilot is retired.
+npu = []
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.7.0" }
+hrx = { package = "hrx-rs", version = "0.8.0" }
 
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
@@ -46,7 +47,3 @@ unicode-normalization = "0.1"
 [dev-dependencies]
 # An independent implementation of the same rounding, for the oracle tests only.
 half = { version = "2", features = ["bytemuck"] }
-
-[[example]]
-name = "fusion_worker"
-required-features = ["npu"]
