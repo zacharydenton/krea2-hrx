@@ -1,0 +1,48 @@
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+kernel.def target(@target) export("fusion_pack") @fusion_pack() {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %grid = index.constant $GRID : index
+  kernel.launch.config workgroups(%grid, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %zero = index.constant 0 : index
+  %eight = index.constant 8 : index
+  %m = index.constant $M : index
+  %k = index.constant $K : index
+  %kp = index.constant $KP : index
+  %count = index.constant $COUNT : index
+  %threads = index.constant 256 : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %group_base = index.mul %group, %threads : index
+  %index = index.add %group_base, %lane : index
+  %valid = index.cmp ult, %index, %count : index
+  %ig = buffer.assume.memory_space<global> %input : buffer
+  %og = buffer.assume.memory_space<global> %output : buffer
+  %iv = buffer.view %ig[%base] : buffer -> view<$M x $K x bf16>
+  %ov = buffer.view %og[%base] : buffer -> view<$COUNT x bf16>
+  scf.if %valid {
+    %i = index.assume %index [range(%index, 0, $COUNT)] : index
+    %row_lane = index.rem %i, %eight : index
+    %kk = index.div %i, %eight : index
+    %column = index.rem %kk, %kp : index
+    %tile = index.div %kk, %kp : index
+    %row_base = index.mul %tile, %eight : index
+    %row = index.add %row_base, %row_lane : index
+    %in_row = index.cmp ult, %row, %m : index
+    %in_col = index.cmp ult, %column, %k : index
+    %inside = scalar.andi %in_row, %in_col : i1
+    %value = scf.if %inside -> (bf16) {
+      %r = index.assume %row [range(%row, 0, $M)] : index
+      %c = index.assume %column [range(%column, 0, $K)] : index
+      %v = view.load %iv[%r, %c] : view<$M x $K x bf16> -> bf16
+      scf.yield %v : bf16
+    } else {
+      %v = scalar.constant 0.0 : bf16
+      scf.yield %v : bf16
+    }
+    view.store %value, %ov[%i] : bf16, view<$COUNT x bf16>
+  }
+  kernel.return
+}

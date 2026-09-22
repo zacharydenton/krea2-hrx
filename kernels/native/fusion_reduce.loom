@@ -1,0 +1,48 @@
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+kernel.def target(@target) export("fusion_reduce") @fusion_reduce() {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %grid = index.constant $GRID : index
+  kernel.launch.config workgroups(%grid, %one, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%input: buffer, %bias: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %eight = index.constant 8 : index
+  %n = index.constant $N : index
+  %blocks = index.constant $KB : index
+  %count = index.constant $COUNT : index
+  %threads = index.constant 256 : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %group_base = index.mul %group, %threads : index
+  %index = index.add %group_base, %lane : index
+  %valid = index.cmp ult, %index, %count : index
+  %ig = buffer.assume.memory_space<global> %input : buffer
+  %bg = buffer.assume.memory_space<global> %bias : buffer
+  %og = buffer.assume.memory_space<global> %output : buffer
+  %iv = buffer.view %ig[%base] : buffer -> view<$MT x $NT x $KB x 8x8xf32>
+  %bv = buffer.view %bg[%base] : buffer -> view<$N x bf16>
+  %ov = buffer.view %og[%base] : buffer -> view<$COUNT x bf16>
+  scf.if %valid {
+    %i = index.assume %index [range(%index, 0, $COUNT)] : index
+    %row = index.div %i, %n : index
+    %col = index.rem %i, %n : index
+    %mt = index.div %row, %eight : index
+    %nt = index.div %col, %eight : index
+    %mr = index.rem %row, %eight : index
+    %nc = index.rem %col, %eight : index
+    %initial = scalar.constant 0.0 : f32
+    %sum = scf.for %block = [%zero to %blocks step %one](%acc = %initial : f32) -> (f32) {
+      %value = view.load %iv[%mt, %nt, %block, %mr, %nc] : view<$MT x $NT x $KB x 8x8xf32> -> f32
+      %next = scalar.addf %acc, %value : f32
+      scf.yield %next : f32
+    }
+    %bias_value = view.load %bv[%col] : view<$N x bf16> -> bf16
+    %bias_f32 = scalar.extf %bias_value : bf16 to f32
+    %biased = scalar.addf %sum, %bias_f32 : f32
+    %rounded = scalar.fptrunc %biased : f32 to bf16
+    view.store %rounded, %ov[%i] : bf16, view<$COUNT x bf16>
+  }
+  kernel.return
+}

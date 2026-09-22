@@ -1,125 +1,94 @@
-# Retired NPU text-fusion pilot
+# Native Loom NPU text fusion
 
-HRX 0.8 removes the legacy Chess/IRON runtime and compiler APIs. This failed
-pilot is retired: `auto` and `gpu` use GPU, while `npu` reports an explicit error.
-The old `npu` Cargo feature is retained as an empty compatibility flag.
-Saved legacy profiles cannot enable NPU execution. A native Loom replacement
-must pass fresh latency and quality qualification before it can be enabled.
-
-The following describes the historical experiment on HRX 0.7; its commands
-require that older checkout.
-
-`--fusion-backend auto|gpu|npu` selects the backend for
-`txtfusion.layerwise_blocks.0.mlp.up`. Other operations use the existing GPU path.
-The library exposes the same choice through `PipelineOptions`.
-
-Auto is the default. Without a matching, passing local qualification it uses the
-GPU without opening an NPU or compiling a kernel. `gpu` forces the existing
-implementation. `npu` requires a verified compiled artifact and reports errors;
-it bypasses the qualification gates for explicit measurement. Device execution
-errors propagate once offload starts.
-
-Build with `--no-default-features` to omit NPU support. Such a build accepts Auto
-and GPU, and rejects forced NPU selection.
-
-## Operation and lifetime
-
-The pilot keeps native BF16 inputs and weights, accumulates into F32, then applies
-the original optional bias and BF16 rounding in a GPU epilogue. It does not use
-BFP16 emulation. The checked-in IRON generator and tile sources are in
-`native/npu`; their upstream attribution and license are beside them. Chess and
-its license are supplied separately.
-
-The generator uses a 4-column XDNA2 array with 64×64×32 tiles. Wide outputs
-use one row block per DMA transfer to stay within the descriptor stride limit. M is padded to a
-multiple of 512; K must be divisible by 64 and N by 128. Unsupported shapes use
-GPU in Auto mode. Each specialization retains resident NPU weights, shared
-input/F32 output, a GPU epilogue and one prepared HRX graph. Input and output
-copies use `Runtime::with_gpu_access` on the pipeline's existing stream. Completed
-stage timing includes both copies, cache maintenance, graph submission and waits.
-
-The cache holds at most two shapes and 512 MiB of tracked buffer storage in total.
-Eviction is least recently used and occurs only after execution has completed.
-This limit excludes driver/program metadata, compiler memory and the existing
-GPU model workspace. No background compilation or first-use benchmarking occurs.
-
-## Compile and qualify
-
-Use the installed MLIR-AIE/IRON environment and Chess compiler. For the local
-DINO toolchain described in this workspace:
+The `npu` feature enables a native Loom/XDNA implementation on HRX 0.8.3.
+[Measured results](npu-fusion-native-results.md) show a working but much slower
+candidate; automatic selection stays on GPU.
+It replaces the retired Chess/IRON execution path for
+`txtfusion.layerwise_blocks.0.mlp.up`. Other operations remain on GPU.
 
 ```sh
-source ../dinov3-xdna2/env.sh
-python3 ../hrx.rs/scripts/pin-npu-toolchain.py \
-  --python ../dinov3-xdna2/.toolchain/bin/python \
-  --aiecc ../dinov3-xdna2/.toolchain/bin/aiecc \
-  --backend Chess --identity-root "$HOME/tools/rai/bin" \
-  --output build/fusion-toolchain-chess.json
-python3 scripts/qualify-fusion.py --toolchain build/fusion-toolchain-chess.json
+cargo build --release --features npu
+cargo run --release --features npu -- --fusion-backend npu \
+  -p "a red ceramic cup on a wooden table" --out cup.png
 ```
 
-The Chess intrinsic wrapper must match the installed compiler. The recorder
-preserves the environment's wrapper precedence and hashes the installed compiler
-files; it does not install or modify the toolchain. Keep the resulting local
-manifest private because it contains local paths and license environment settings.
+No Chess license, IRON environment, Python compiler or vendor SDK is needed.
+Loom compiles the checked-in `kernels/native/fusion*.loom` sources into the
+canonical native image and GPU handoff kernels using HRX's verified bundle.
+The AMD XDNA driver and accessible NPU are required for forced NPU execution.
 
-Qualification requires the existing immutable `build/quality` fixture and its
-checked-in `tests/fixtures/unquantized.json` manifest. `--fixture`, `--manifest`
-and `--checkpoint` select other existing inputs. It refuses baseline minting.
-The command captures real fusion activations, compiles the specialization, checks
-changed-input graph replays against a scalar f64 oracle, and measures five fresh
-processes with 10 warmups and 100 alternating completed-stage samples per backend.
-It then runs the unchanged reference quality gate and warm production
-`Pipeline::generate` measurements in five fresh processes per backend.
+`auto` and `gpu` use GPU without opening the NPU or compiling a native image.
+`npu` is an explicit experiment; compilation and device errors propagate.
+Without the Cargo feature, forced NPU returns a rebuild instruction.
+Legacy qualification profiles are never read. `Pipeline::fusion_selection()`
+reports the selection and reason.
 
-Selection requires all of the following:
+## Execution and limits
 
-- At least 5% lower median completed-stage latency, using the median of the five
-  process medians; the median process p95 must be no worse than GPU.
-- Median full-generation time no more than 5% slower than GPU.
-- The existing relative-RMS and image-PSNR gates, each allowing at most 0.1 dB
-  regression against the pinned accepted baseline.
-- Matching shape, checkpoint and weight hashes, implementation/dependency
-  identity, compiled artifacts, runtime bundles, hardware, driver, firmware and
-  power configuration.
+Inputs and weights remain BF16. Native 8×8×512 outer products accumulate in
+FP32; a GPU kernel reduces the K blocks, applies optional BF16 bias, and rounds
+to BF16. This does not use BFP quantization. Reduction ordering differs from GPU,
+so successful arithmetic checks do not establish full-model quality parity.
 
-Evidence and logs stay in `build/fusion-qualification/run-*`. Profiles are saved
-atomically under `$XDG_CACHE_HOME/hrx/krea2-fusion` (or `~/.cache/hrx/krea2-fusion`).
-Use `--profiles` when qualifying and `KREA2_FUSION_PROFILES` when running to select
-another directory. This is a trusted local compiler-output store: hashes detect
-changes, but do not make arbitrary native artifacts safe. Runtime/library
-provisioning overrides prevent qualification. A slower candidate is recorded as
-unqualified, so Auto continues using GPU.
+M, K and N tails are zero-padded. Width is processed in chunks of at most 256
+output tiles to respect the shim DMA repeat limit. One native worker and one
+prepared native run are reused across the projection: larger worker layouts
+exhausted compiler stream routing, and a separate native run for every matrix
+tile exhausted hardware contexts. Zero-offset shared staging buffers satisfy the
+native image's binding contracts. These constraints and the required transfers
+make this a correctness experiment, not an optimized matrix implementation.
 
-Qualification is checked when a shape first enters a pipeline's cache. Restart
-the pipeline after changing profiles or power configuration. Read
-`Pipeline::fusion_selection()` for the selected backend or fallback reason; the
-CLI prints it after generation unless `--quiet` is set.
+A projection retains packed weights, activations, partial sums and staging.
+One specialization is cached per model; changing the activation shape evicts it
+before replacement. Execution is serialized across the cache, and fresh input
+is packed on every call. GPU/NPU transfers declare access through HRX's
+`with_gpu_access`; all handoffs and outputs complete before the operation returns.
 
-## Measured result: keep GPU
+Dimensions are bounded to M≤4096, K≤16384 and N≤32768, with a stricter 512 MiB
+cap on padded data allocations. The cache inherits the model stream's residency
+budget. The data cap excludes compiler, executable and driver metadata, CPU
+weight download scratch, and the existing GPU model. Auto never allocates this
+cache.
 
-On 2026-09-10, the Turbo fixture's 228×2560→6912 projection failed qualification:
+## Reproduce arithmetic and performance checks
 
-| Completed stage | GPU | Chess NPU + GPU epilogue |
-| --- | ---: | ---: |
-| Median of five process medians | 1.588 ms | 14.488 ms |
-| Median of five process p95 values | 3.679 ms | 17.975 ms |
+Small deterministic cases check all outputs against a scalar f64 oracle,
+including unaligned dimensions, split K, output chunk boundaries, bias and
+changed-input replays:
 
-The isolated projection passed the scalar f64 oracle and changed-input replay
-checks. Tracked residency was 55,332,352 bytes, with no new HRX allocations or
-imports during replay. This implementation nevertheless misses the latency gate
-by a wide margin.
+```sh
+cargo run --release --features npu --example fusion_npu
+```
 
-The full-model NPU run increased latent relative-RMS loss by 0.429612 dB against
-the accepted baseline, exceeding the 0.1 dB limit. Image PSNR improved by
-0.119227 dB, which does not excuse failure of the separate latent gate. The first
-warm generation pair measured 42.922 s on GPU and 46.386 s with the NPU pilot.
-Qualification stopped at the quality failure, so this is one pair, not a completed
-five-process end-to-end timing comparison. No Auto profile was published.
+Capture a real stage input while measuring GPU generation, then benchmark that
+immutable capture. Capture files are diagnostic inputs, not quality references.
+Use a fresh capture directory for a different checkpoint or prompt.
 
-[Raw measurements and identities](benchmarks/npu-fusion-2026-09-10.json) retain
-the stage samples, first generation pair, artifact hashes and reference hashes.
-These results describe the checked-in four-column pilot, not peak NPU capability.
-First use also hashes the full checkpoint when considering an eligible profile;
-on the local USB filesystem that read took minutes. Auto without an eligible
-profile avoids that read and keeps the existing GPU operation.
+```sh
+KREA2_FUSION_CAPTURE=build/native-fusion/cases \
+  cargo run --release --features npu --example bench_runtime -- \
+  build/native-fusion/gpu.rgb gpu
+cargo run --release --features npu --example fusion_npu -- \
+  build/native-fusion/cases/156x2560x6912
+cargo run --release --features npu --example bench_runtime -- \
+  build/native-fusion/npu.rgb npu
+```
+
+The stage benchmark validates capture hashes, checks 1,024 scalar-f64 output
+samples on original and changed inputs, compares full outputs with GPU, and
+checks that warm execution creates no tracked allocations or imports. Each
+process performs ten warmup pairs and 100 pairs with alternating backend order.
+Run five fresh processes for a timing comparison. Timing includes input packing,
+all staging/copies, coherency, NPU execution, GPU reduction/bias and completion;
+compilation and correctness readback are outside the interval.
+
+Full quality qualification requires the original immutable `build/quality`
+fixture and `tests/fixtures/unquantized.json`. Run the existing ignored
+`unquantized_bf16_reference_quality_does_not_regress` test with
+`KREA2_QUALITY_FUSION_BACKEND=gpu`, then `npu`, without minting a new baseline.
+The latency requirement remains ≥5% lower completed-stage median with no worse
+p95, ≤5% full-generation slowdown, and no more than 0.1 dB regression in either
+existing latent/image quality gate. No automatic profile loader is enabled.
+
+The [historical HRX 0.7 experiment](npu-fusion-legacy.md) and its retained
+`native/npu` sources are archival and are not used by this implementation.

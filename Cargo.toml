@@ -23,8 +23,8 @@ strip = true
 
 [features]
 default = []
-# Compatibility flag; the unsuccessful legacy fusion pilot is retired.
-npu = []
+# Native Loom/XDNA text-fusion experiment; automatic selection remains GPU.
+npu = ["hrx/npu"]
 
 [dependencies]
 hrx = { package = "hrx-rs", version = "0.8.3" }
@@ -47,3 +47,7 @@ unicode-normalization = "0.1"
 [dev-dependencies]
 # An independent implementation of the same rounding, for the oracle tests only.
 half = { version = "2", features = ["bytemuck"] }
+
+[[example]]
+name = "fusion_npu"
+required-features = ["npu"]

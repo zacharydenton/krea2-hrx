@@ -1,0 +1,41 @@
+// Native BF16 outer products, without block-floating-point conversion.
+aie2p.target<array> @array_target
+aie2p.target<core> @core_target
+pipeline.def<kernel> public retain target(@array_target) @fusion() launch(%a: buffer, %b: buffer, %c: buffer) {
+  %lanes = index.constant $LANES : index
+  %base = index.constant 0 : offset
+  %workers = group.create %lanes : index -> group
+  // The input's leading repeated sequence broadcasts one eight-row block.
+  // Only the prefix has zero strides; reduction blocks remain contiguous.
+  %av = buffer.view %a[%base] : buffer -> view<$NTx$KBx4096xbf16, #encoding.layout.strided<strides=[0, 4096, 1]>>
+  %bv = buffer.view %b[%base] : buffer -> view<$LANESx$NTx$KBx4096xbf16>
+  %cv = buffer.view %c[%base] : buffer -> view<$LANESx$NTx$KBx8x8xf32>
+  %af = pipeline.read %av on %workers : view<$NTx$KBx4096xbf16, #encoding.layout.strided<strides=[0, 4096, 1]>>, group -> pipeline.flow<tile<4096xbf16>>
+  %bf = pipeline.scatter %bv across %workers : view<$LANESx$NTx$KBx4096xbf16>, group -> pipeline.flow<tile<4096xbf16>>
+  %out = pipeline.stage @dot on %workers(%af, %bf) : (group, pipeline.flow<tile<4096xbf16>>, pipeline.flow<tile<4096xbf16>>) -> (pipeline.flow<tile<8x8xf32>>)
+  pipeline.write %out to %cv : pipeline.flow<tile<8x8xf32>>, view<$LANESx$NTx$KBx8x8xf32>
+  pipeline.return
+}
+func.def target(@core_target) @dot(%a_arg: buffer, %b_arg: buffer, %c_arg: buffer) {
+  %a, %b, %c = buffer.assume.alignment %a_arg, %b_arg, %c_arg {minimum_alignment = 64} : buffer, buffer, buffer
+  %base = index.constant 0 : offset
+  %av = buffer.view %a[%base] : buffer -> view<512x8xbf16>
+  %bv = buffer.view %b[%base] : buffer -> view<512x8xbf16>
+  %cv = buffer.view %c[%base] : buffer -> view<8x8xf32>
+  %zero = index.constant 0 : index
+  %end = index.constant 512 : index
+  %one = index.constant 1 : index
+  %eight = index.constant 8 : index
+  %initial = vector.constant 0.0 : vector<64xf32>
+  %result = scf.for %k = [%zero to %end step %one](%acc = %initial : vector<64xf32>) -> (vector<64xf32>) {
+    %avalue = vector.load %av[%k, 0] : view<512x8xbf16> -> vector<8xbf16>
+    %bvalue = vector.load %bv[%k, 0] : view<512x8xbf16> -> vector<8xbf16>
+    %af = vector.fragment<lhs> %avalue shape [%eight, %one] : vector<8xbf16>
+    %bf = vector.fragment<rhs> %bvalue shape [%one, %eight] : vector<8xbf16>
+    %cf = vector.fragment<init> %acc shape [%eight, %eight] : vector<64xf32>
+    %product = vector.mma %af, %bf, %cf : vector<8xbf16>, vector<8xbf16>, vector<64xf32>
+    scf.yield %product : vector<64xf32>
+  }
+  vector.fragment.store<result> %result, %cv[0, 0] shape [%eight, %eight] : vector<64xf32>, view<8x8xf32>
+  func.return
+}

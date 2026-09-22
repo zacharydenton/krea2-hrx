@@ -17,7 +17,7 @@ use krea2::pipeline::{Files, Pipeline, Request};
     version
 )]
 struct Args {
-    /// Backend for the first text-fusion up projection; auto requires saved qualification
+    /// Backend for the first text-fusion up projection; auto uses GPU, npu is experimental
     #[arg(long, value_enum, default_value = "auto")]
     fusion_backend: krea2::fusion::FusionBackend,
     /// The prompt; read from stdin when absent

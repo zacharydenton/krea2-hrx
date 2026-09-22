@@ -9,7 +9,7 @@ pipeline runs on Linux without Python or PyTorch.
 GPU execution, memory management, and caching behind the native `krea2` CLI.
 
 - **Loom kernels, HRX execution:** specialized GPU kernels compiled and cached
-  through the shared runtime, with optional qualified XDNA2 NPU text fusion.
+  through the shared runtime, with experimental native XDNA2 NPU text fusion.
 - **Complete inference pipeline:** Qwen3-VL-4B text encoding, Krea 2 diffusion
   transformer, and Qwen-Image VAE decoding.
 - **ComfyUI checkpoint support:** load int8 ConvRot safetensors directly, with
@@ -31,7 +31,7 @@ other GPUs are unsupported. Model weights are separate downloads.
 - Linux with an accessible Radeon 8060S and the amdgpu/KFD driver. Other GPUs
   are not supported by the current kernels.
 - A Rust toolchain and the native build tools required by its dependencies.
-- The prebuilt HRX/Loom/HSA bundle managed by the shared `hrx.rs` crate.
+- The prebuilt unified HRX/Loom bundle managed by the shared `hrx.rs` crate.
 - The model files below and enough memory to keep the models and GPU workspace
   resident. The transformer checkpoint alone is about 13 GB.
 
@@ -47,7 +47,7 @@ Clone the repository and install the runtime CLI:
 git clone https://github.com/zacharydenton/krea2-hrx.git
 cd krea2-hrx
 
-cargo install --locked hrx-rs --version 0.8.2
+cargo install --locked hrx-rs --version 0.8.3
 hrx prepare
 cargo install --locked --path .
 
@@ -61,9 +61,10 @@ it takes longer than a warm run. See [Models](#models) to reuse local weights.
 The native bundle is pinned by hash. See the
 [runtime guide](docs/hrx-runtime.md) for what `hrx prepare` fetches.
 
-The [legacy XDNA2 text-fusion pilot](docs/npu-fusion.md) was retired with HRX 0.8
-because it failed latency and quality qualification. `auto` and `gpu` use GPU;
-forced `npu` selection reports an error. A native replacement needs new evidence.
+The [experimental XDNA2 text-fusion backend](docs/npu-fusion.md) now uses native
+Loom on HRX 0.8.3, without Chess or IRON. Build with `--features npu` and select
+`--fusion-backend npu` to experiment. `auto` remains GPU: the native candidate
+is not qualified for automatic selection.
 
 ## Models
 
@@ -227,8 +228,10 @@ Report bugs and feature requests through [GitHub Issues](https://github.com/zach
 
 ## License
 
-Rust and Loom code is [MIT licensed](LICENSE). The NPU generator and tile
-sources use [Apache-2.0 WITH LLVM-exception](native/npu/NOTICE.md). Chess is
-installed separately and is not redistributed. The bundled Qwen tokenizer has its
+Rust and Loom code is [MIT licensed](LICENSE). The historical, unused NPU
+generator and tile sources use
+[Apache-2.0 WITH LLVM-exception](native/npu/NOTICE.md). The current native NPU
+backend does not require Chess; no Chess binaries are redistributed.
+The bundled Qwen tokenizer has its
 [own attribution and Apache-2.0 license](assets/README.md). Model weights are
 separate downloads governed by their upstream licenses.

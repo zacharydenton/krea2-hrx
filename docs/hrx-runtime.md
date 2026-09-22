@@ -26,7 +26,9 @@ When the context has a `memory_budget`, all pipeline GPU streams use it before
 allocating, including native weights, auxiliary pools, block workspace and
 transfer staging. Residency statistics include those native allocations;
 coordinated Runtime statistics still cover only tracked tensors. Driver/compiler memory
-and native allocator rounding remain outside it.
+and native allocator rounding remain outside it. The optional native NPU fusion
+cache inherits the stream's memory budget and also enforces its own 512 MiB
+data limit. Its runtime counters are separate from `Pipeline::context()`.
 
 Transfers and dispatch use HRX `View` regions. Uploads copy into HRX-owned staging
 and queue work on the stream. Weight loading uses chunks of at most 16 MiB;
@@ -47,7 +49,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 Install the matching CLI from crates.io:
 
 ```sh
-cargo install --locked hrx-rs --version 0.8.0
+cargo install --locked hrx-rs --version 0.8.3
 hrx prepare
 cargo build --release
 ```
@@ -141,5 +143,5 @@ checks the output. Completed batches averaged 2.1–2.25 µs per tiny kernel.
 These are wall-clock costs, not GPU timestamps or whole-model latency. Image
 quality, checkpoint-scale load time and peak memory were not remeasured.
 
-The [legacy NPU text-fusion pilot](npu-fusion.md) is retired. Auto uses GPU;
-a native replacement requires fresh latency and quality qualification.
+The [native NPU text-fusion experiment](npu-fusion.md) uses Loom on HRX 0.8.3.
+Auto uses GPU; explicit NPU selection is not performance or quality qualified.
