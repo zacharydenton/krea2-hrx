@@ -27,7 +27,7 @@ default = []
 npu = ["hrx/npu"]
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.8.5" }
+hrx = { package = "hrx-rs", version = "0.8.7" }
 
 tempfile = "3"
 serde = { version = "1", features = ["derive"] }
