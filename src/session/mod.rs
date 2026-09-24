@@ -124,8 +124,9 @@ struct Buffers {
     k: Buffer,
     v: Buffer,
     v_transposed: Option<Buffer>,
-    attn: Buffer,
-    gu: Buffer,
+    // Attention is consumed by gated prepare before gate/up writes its result.
+    // Neither value has persistent zero-filled headroom rows.
+    attn_gu: Buffer,
     mods: Buffer,
     cos: Buffer,
     sin: Buffer,
@@ -371,9 +372,8 @@ impl Session {
                 2 => Some(allocate(kv_bytes)?),
                 _ => None,
             },
-            attn: allocate(capacity * HIDDEN as usize * 2)?,
-            // silu(gate) * up, fused into the GEMM epilogue
-            gu: allocate(capacity * INTER as usize * 2)?,
+            // Also holds silu(gate) * up, the wider of these two intermediates.
+            attn_gu: allocate(capacity * INTER as usize * 2)?,
             mods: allocate(layers * 6 * HIDDEN as usize * 4)?,
             cos: allocate(capacity * HEAD_DIM as usize * 4)?,
             sin: allocate(capacity * HEAD_DIM as usize * 4)?,
@@ -810,7 +810,7 @@ impl Session {
                     sage.q_scale.binding(),
                     sage.k_scale.binding(),
                     sage.correction.binding(),
-                    b.attn.binding(),
+                    b.attn_gu.binding(),
                 ];
                 let waves = self.metadata.attention_waves as usize;
                 let rows = 16 * (waves / 4);
@@ -846,7 +846,7 @@ impl Session {
                     _ => b.v.binding(),
                 };
                 let attention_scalars = Scalars::new().index(tokens);
-                let attention = [b.q.binding(), b.k.binding(), values, b.attn.binding()];
+                let attention = [b.q.binding(), b.k.binding(), values, b.attn_gu.binding()];
                 let rows = 16 * self.metadata.fp16_query_tiles as usize;
                 self.launch(
                     sink,
@@ -862,7 +862,8 @@ impl Session {
         }
 
         let gated_scalars = Scalars::new().index(tokens);
-        let gated = [b.attn.binding(), gate_half(&b.fused)?, b.a_q.binding(), b.a_s.binding()];
+        let gated =
+            [b.attn_gu.binding(), gate_half(&b.fused)?, b.a_q.binding(), b.a_s.binding()];
         self.launch(
             sink,
             &self.kernels.prepare_gated,
@@ -912,12 +913,12 @@ impl Session {
             w.view(block.gu_q),
             w.view(block.gu_s),
             2 * INTER,
-            b.gu.binding(),
+            b.attn_gu.binding(),
             None,
         )?;
 
         let swiglu_scalars = Scalars::new().index(tokens);
-        let swiglu = [b.gu.binding(), b.a_q.binding(), b.a_s.binding()];
+        let swiglu = [b.attn_gu.binding(), b.a_q.binding(), b.a_s.binding()];
         self.launch(
             sink,
             &self.kernels.prepare_swiglu,
