@@ -186,7 +186,7 @@ impl Sage {
                     ("ysize", h * tiles * 128),
                 ]),
                 scalars: Scalars::new().index(t),
-                grid: (tiles, h),
+                grid: (h, tiles),
                 threads: 128,
             },
             Plan {
@@ -202,7 +202,8 @@ impl Sage {
                     ("ssize", c * h),
                 ]),
                 scalars: Scalars::new().index(t),
-                grid: (t.div_ceil(8), h),
+                // Heads first: see the kernel.
+                grid: (h, t.div_ceil(8)),
                 threads: 256,
             },
             Plan {
@@ -219,7 +220,7 @@ impl Sage {
                 ]),
                 scalars: Scalars::new().index(t),
                 // Over the capacity, not the tokens: the padded rows are read.
-                grid: (c.div_ceil(8), kv),
+                grid: (kv, c.div_ceil(8)),
                 threads: 256,
             },
             Plan {

@@ -53,8 +53,10 @@ kernel.def target(@krea2_sage_quant_q_target) export("krea2_sage_quant_q") @krea
   %zero_offset = index.constant 0 : offset
   %count_b = index.assume %count [range(%count, 1, 1073741824)] : index
   %lane = kernel.workitem.id<x> : index
-  %group = kernel.workgroup.id<x> : index
-  %group_y = kernel.workgroup.id<y> : index
+  // Heads vary fastest across the launch, so consecutive workgroups read one
+  // token row's heads while that row is still cached.
+  %group = kernel.workgroup.id<y> : index
+  %group_y = kernel.workgroup.id<x> : index
   %tokens = config.get @krea2.sage_quant_q.tokens : index
   %heads = config.get @krea2.sage_quant_q.heads : index
   %tiles = config.get @krea2.sage_quant_q.tiles : index
