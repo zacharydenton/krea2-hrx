@@ -9,6 +9,8 @@
 // `sage_transpose` writes it, so a lane stages one channel's 16 keys with a single
 // contiguous load. Natural-layout V made each lane read 32 bytes from a different
 // token row, which fell to half speed once a sequence's K and V left the cache.
+// Each iteration prefetches the next tile's K and V into registers after its
+// staging barrier, so those global loads overlap this tile's QK, softmax and PV.
 // token_capacity >= tokens + 16 with zero headroom in every operand.
 //
 amdgpu.target<gfx11-generic> @krea2_attention_gqa_lds_f16_wmma_gfx11 {subgroup_size = 32}
@@ -177,17 +179,28 @@ kernel.def target(@krea2_attention_gqa_lds_f16_wmma_gfx11) export("krea2_attenti
   %lhs2 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel2] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
   %q_channel3 = index.add %head_base0, %c48 : index
   %lhs3 = vector.fragment.load<lhs> %q_view[%query_origin0, %q_channel3] shape [%m, %k_frag] : view<[%padded_tokens]x[%q_stride0]xf16> -> vector<16xf16>
-  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%row_max = %negative_vector : vector<8xf32>, %row_sum = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+  // the first tile's K and V; each iteration then prefetches the next
+  %st_row_first = index.assume %st_key [lt(%st_key, %padded_tokens)] : index
+  %k_first = vector.load %k_view[%st_row_first, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+  %v_first = vector.load %vt_view[%vt_row, %c0] : view<[%kv_stride0]x[%padded_tokens]xf16> -> vector<16xf16>
+  %last_origin0 = index.sub %key_tile_count, %c1 : index
+  %last_origin = index.mul %last_origin0, %c16 : index
+  %final_max, %final_sum, %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7, %k_last, %v_last = scf.for %key_tile = [%c0 to %key_tile_count step %c1](%row_max = %negative_vector : vector<8xf32>, %row_sum = %zero_vector : vector<8xf32>, %acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>, %k_chunk = %k_first : vector<16xf16>, %v_chunk = %v_first : vector<16xf16>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xf16>, vector<16xf16>) {
     %key_origin1 = index.mul %key_tile, %c16 : index
     %key_origin0 = index.assume %key_origin1 [le(%key_origin1, %tile_origin_limit), mul(%key_origin1, 16)] : index
-    // stage K and V tiles (rows past the sequence are zero headroom)
-    %st_row0 = index.add %key_origin0, %st_key : index
-    %st_row = index.assume %st_row0 [lt(%st_row0, %padded_tokens)] : index
-    %k_chunk = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
-    %v_chunk = vector.load %vt_view[%vt_row, %key_origin0] : view<[%kv_stride0]x[%padded_tokens]xf16> -> vector<16xf16>
+    // stage this tile's prefetched K and V (rows past the sequence are zero headroom)
     vector.store %k_chunk, %k_tile[%st_key, %st_chunk] : vector<16xf16>, view<16x136xf16>
     vector.store %v_chunk, %v_tile[%workitem, %c0] : vector<16xf16>, view<128x24xf16>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    // prefetch the next tile (the last iteration reloads its own)
+    %next_origin0 = index.add %key_origin0, %c16 : index
+    %has_next = index.cmp ult, %next_origin0, %last_origin : index
+    %next_origin1 = scf.select %has_next, %next_origin0, %last_origin : index
+    %next_origin = index.assume %next_origin1 [le(%next_origin1, %tile_origin_limit), mul(%next_origin1, 16)] : index
+    %st_row0 = index.add %next_origin, %st_key : index
+    %st_row = index.assume %st_row0 [lt(%st_row0, %padded_tokens)] : index
+    %k_next = vector.load %k_view[%st_row, %st_col] : view<[%padded_tokens]x[%kv_stride0]xf16> -> vector<16xf16>
+    %v_next = vector.load %vt_view[%vt_row, %next_origin] : view<[%kv_stride0]x[%padded_tokens]xf16> -> vector<16xf16>
 
     %local_key = index.add %key_origin0, %lane_column : index
     %key_valid = index.cmp ult, %local_key, %tokens0 : index
@@ -300,7 +313,7 @@ kernel.def target(@krea2_attention_gqa_lds_f16_wmma_gfx11) export("krea2_attenti
     %rescaled7 = vector.mulf<reassoc|nnan|ninf|nsz|contract> %acc7, %selected_old_scale : vector<8xf32>
     %next7 = vector.mma %probability, %v7, %rescaled7 : vector<16xf16>, vector<16xf16>, vector<8xf32>
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-    scf.yield %next_max, %next_sum, %next0, %next1, %next2, %next3, %next4, %next5, %next6, %next7 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+    scf.yield %next_max, %next_sum, %next0, %next1, %next2, %next3, %next4, %next5, %next6, %next7, %k_next, %v_next : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xf16>, vector<16xf16>
   }
   // the row sum: the per-lane partials of the 16 lanes of this half
   %fsh1, %fok1 = kernel.subgroup.shuffle<xor> %final_sum, %i32_1, %i32_32 : vector<8xf32>, i32, i32

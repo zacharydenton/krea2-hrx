@@ -45,6 +45,34 @@ the K tile instead of padding it raised occupancy but lost 4–7% below 2k
 tokens. Packing the V and Q tiles to reach the next LDS occupancy tier lost
 6–21%: the swizzles either conflicted or needed split loads and concatenation.
 
+Each iteration now prefetches the next tile's K and V into registers, so the
+global loads overlap the current tile's work. This is byte-identical and
+1.05–1.07× faster up to 4115 tokens, and neutral at 9000.
+
+Removing each phase from that kernel in turn, at 4115 tokens, shows what
+limits it:
+
+| Removed | Speedup |
+| --- | ---: |
+| QK WMMAs | 1.40× |
+| PV WMMAs | 1.31× |
+| softmax | 1.12× |
+| K/V staging (before prefetch) | 1.15× |
+| K, Q or V fragment loads | ≤ 1.04× |
+| barriers, fences, rescale | none |
+
+On RDNA3 the WMMAs execute on the same VALU as everything else. Each 16-key
+tile issues 16 WMMAs beside about 256 other VALU instructions. Of those, 72
+are back-edge copies: the compiler writes each `accumulator × scale` rescale
+into a fresh aligned register tuple and moves all 64 values back before the
+branch (`move_causes`: `branch_edge`, 171 units). The copies disappear when the
+rescale is removed. Spelling the multiply plainly or starting the accumulators
+from distinct values does not help. Carrying one `vector<64xf32>` is rejected
+because WMMA results cannot be concatenated (`concat.register_storage`), so
+the fix belongs in Loom's allocator. `unroll(2)` gains 4.7% at an even tile
+count but loses 11–16% at an odd one. Splitting the QK chain gains 1.5% at
+most.
+
 ## Quality tradeoff
 
 On the fixed 1024×1024, seed-zero, eight-step W8A8 fixture, against the bf16
