@@ -55,18 +55,6 @@ pub struct Plan {
     pub spans: BTreeMap<String, Span>,
     pub total_bytes: usize,
     pub layers: usize,
-    /// The operand width the GEMM kernels must be built for.
-    pub bits: u32,
-}
-
-/// Operand row pitch from `crate::kernels::shape`, in bytes. `row_bytes` comes
-/// from the file's header, so the arithmetic is checked rather than trusted.
-fn device_row_bytes(row_bytes: usize, bits: u32) -> Result<usize> {
-    let bits = bits as usize;
-    let too_wide = || Error(format!("a {row_bytes}-byte operand row is too wide"));
-    let k = row_bytes.checked_mul(8).ok_or_else(too_wide)? / bits;
-    let pitch = crate::kernels::shape::gemm_pitch(k, bits);
-    Ok(pitch.checked_mul(bits).ok_or_else(too_wide)? / 8)
 }
 
 fn int8_rows<'a>(file: &'a Checkpoint, name: &str) -> Result<super::Tensor<'a>> {
@@ -102,7 +90,6 @@ impl Plan {
         if layers == 0 {
             return Err(Error(format!("no transformer blocks in {}", file.path().display())));
         }
-        let bits = 8;
         let mut spans: BTreeMap<String, Span> = BTreeMap::new();
         for block in 0..layers {
             let p = format!("blocks.{block}");
@@ -116,14 +103,13 @@ impl Plan {
                     format!("{p}.attn.gate"),
                 ],
                 0,
-                bits,
             )?;
             spans.insert(format!("{p}.qkvg.q"), q);
             spans.insert(format!("{p}.qkvg.s"), s);
             for (out, part) in
                 [("wo", format!("{p}.attn.wo")), ("down", format!("{p}.mlp.down"))]
             {
-                let (q, s) = operand(file, &format!("{p}.{out}"), &[part], 0, bits)?;
+                let (q, s) = operand(file, &format!("{p}.{out}"), &[part], 0)?;
                 spans.insert(format!("{p}.{out}.q"), q);
                 spans.insert(format!("{p}.{out}.s"), s);
             }
@@ -132,7 +118,6 @@ impl Plan {
                 &format!("{p}.gu"),
                 &[format!("{p}.mlp.gate"), format!("{p}.mlp.up")],
                 16,
-                bits,
             )?;
             spans.insert(format!("{p}.gu.q"), q);
             spans.insert(format!("{p}.gu.s"), s);
@@ -151,7 +136,7 @@ impl Plan {
             span.device_offset = total;
             total += span.device_bytes.div_ceil(256) * 256;
         }
-        Ok(Plan { spans, total_bytes: total, layers, bits })
+        Ok(Plan { spans, total_bytes: total, layers })
     }
 
     pub fn span(&self, name: &str) -> Result<&Span> {
@@ -168,7 +153,6 @@ fn operand(
     out: &str,
     parts: &[String],
     group: usize,
-    bits: u32,
 ) -> Result<(Span, Span)> {
     let tensors: Vec<_> =
         parts.iter().map(|part| int8_rows(file, part)).collect::<Result<_>>()?;
@@ -177,7 +161,8 @@ fn operand(
         return Err(Error(format!("mismatched K in {out}")));
     }
     let rows: usize = tensors.iter().map(|t| t.shape[0]).sum();
-    let pitch = device_row_bytes(row_bytes, bits)?;
+    // int8 rows: a row's bytes are its K elements.
+    let pitch = crate::kernels::shape::gemm_pitch(row_bytes);
     let device_bytes = rows
         .checked_mul(pitch)
         .ok_or_else(|| Error(format!("{out} spans more than the address space")))?;
@@ -289,21 +274,11 @@ mod tests {
     }
 
     #[test]
-    fn operand_pitches_are_checked_rather_than_wrapped() {
-        assert_eq!(device_row_bytes(6144, 8), Ok(6144));
-        assert_eq!(device_row_bytes(16384, 8), Ok(16448));
-        // A row this wide wrapped negative through the old i32 arithmetic.
-        assert_eq!(device_row_bytes(1 << 28, 8), Ok((1 << 28) + 64));
-        assert!(device_row_bytes(usize::MAX / 4, 8).is_err());
-    }
-
-    #[test]
     #[ignore = "requires a local Krea checkpoint"]
     fn the_plan_lays_out_krea_twos_blocks() {
         let file = checkpoint();
         let plan = Plan::for_checkpoint(&file).expect("a plan");
         assert_eq!(plan.layers, 28);
-        assert_eq!(plan.bits, 8);
 
         // qkv|gate: 48 query heads, 12 key and value heads, and the gate, all
         // of width 128, over the 6144-wide residual stream.

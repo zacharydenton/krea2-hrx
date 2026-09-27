@@ -104,7 +104,8 @@ fn the_process_maps_no_hip_torch_or_system_crypto() {
     }
 }
 
-/// The model must populate the shared cache, without the former C++ cache layer.
+/// Auxiliary kernels compile into HRX's shared artifact cache, with no cache
+/// layer of the model's own.
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
 fn auxiliary_compilation_uses_the_shared_hrx_artifact() {

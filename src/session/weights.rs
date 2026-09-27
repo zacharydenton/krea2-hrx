@@ -102,16 +102,6 @@ impl Weights {
         Ok(Weights { plan, storage })
     }
 
-    pub fn layers(&self) -> usize {
-        self.plan.layers
-    }
-
-    pub fn bits(&self) -> u32 {
-        self.plan.bits
-    }
-
-    /// The device address of one span, checked against the size the session
-    /// expects so a mismatched checkpoint is caught before any launch.
     /// The device span of an operand located earlier. `locate` did the checking.
     pub fn view(&self, at: At) -> View<'_> {
         self.storage.slice(at.offset, at.bytes)

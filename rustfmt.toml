@@ -1,4 +1,4 @@
-# The C++ this replaces was clang-formatted at 80 columns; keep the line length
-# so the two read the same width while both exist.
+# A little wider than rustfmt's default: kernel launch argument lists and
+# shape tables read better on one line.
 max_width = 96
 use_small_heuristics = "Max"

@@ -50,7 +50,6 @@ fn contiguous_and_padded_uploads_preserve_rows_across_chunks() {
     let plan = Plan {
         total_bytes: flat_bytes + 48,
         layers: 1,
-        bits: 8,
         spans: [
             ("flat".into(), flat),
             ("padded".into(), padded),

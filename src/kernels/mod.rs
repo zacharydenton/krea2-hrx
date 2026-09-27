@@ -11,7 +11,7 @@ pub mod sources;
 
 use hrx::{Constants, Kernel};
 
-pub use blocks::{prepare, prepare_for_target, PreparedBundle, Shape};
+pub use blocks::{prepare_for_target, PreparedBundle, Shape};
 pub use cache::{compiler, PreparedKernels};
 
 /// Anything the compiler, the cache or the runtime rejects.
@@ -60,6 +60,13 @@ pub fn kernel_reports() -> bool {
         std::env::var_os("KREA2_KERNEL_REPORT").is_some_and(|v| v == "1")
     });
     *REPORTS
+}
+
+/// Whether `KREA2_NATIVE_PROFILE=1` asks for synchronized stage timings on
+/// stderr: the pipeline's per-stage times, and each block session's per-kernel
+/// breakdown. Read when asked, so a long-lived process can switch it.
+pub fn native_profile() -> bool {
+    std::env::var_os("KREA2_NATIVE_PROFILE").is_some_and(|value| value == "1")
 }
 
 /// What the compiler said about one kernel, on stderr.

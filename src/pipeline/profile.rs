@@ -13,9 +13,7 @@ impl Profile {
     /// Enabled only by `KREA2_NATIVE_PROFILE=1`, read per scope so a long-lived
     /// pipeline picks up the setting without being rebuilt.
     pub fn new(stream: &mut Stream, scope: &'static str) -> Profile {
-        let enabled =
-            std::env::var_os("KREA2_NATIVE_PROFILE").is_some_and(|value| value == "1");
-        if !enabled {
+        if !crate::kernels::native_profile() {
             return Profile { scope, last: None };
         }
         // A first mark that did not wait would bill the previous stage's tail.

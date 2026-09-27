@@ -13,6 +13,16 @@ use serde::{Deserialize, Serialize};
 pub const STORAGE_LIMIT: usize = 512 << 20;
 const TILE_K: usize = 512;
 
+/// NPU workers per projection. Multi-worker BF16 pipelines currently exhaust
+/// Loom stream routing, so the projection runs on one.
+const LANES: usize = 1;
+
+/// One of the fusion kernels embedded from `kernels/native/`.
+fn embedded(name: &str) -> Result<&'static str> {
+    crate::kernels::sources::auxiliary(name)
+        .ok_or_else(|| Error::Message(format!("no embedded kernel named {name}")))
+}
+
 /// Logical BF16 A[M,K] times transposed BF16 weights[N,K].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shape {
@@ -35,10 +45,6 @@ impl Shape {
     }
     fn kp(self) -> usize {
         self.kb() * TILE_K
-    }
-    // Multi-worker BF16 pipelines currently exhaust Loom stream routing.
-    fn lanes(self) -> usize {
-        1
     }
     /// Validate dimensions and bound all native allocations before opening hardware.
     pub fn storage_bytes(self) -> Result<usize> {
@@ -136,12 +142,8 @@ impl Projection {
         })?;
         let npu = runtime.npu(0)?;
         let text = source(
-            include_str!("../../kernels/native/fusion.xdna.loom"),
-            &[
-                ("LANES", shape.lanes()),
-                ("NT", shape.chunk_nt() / shape.lanes()),
-                ("KB", shape.kb()),
-            ],
+            embedded("fusion.xdna")?,
+            &[("LANES", LANES), ("NT", shape.chunk_nt() / LANES), ("KB", shape.kb())],
         );
         let artifact = Compiler::for_target(compiler.map(std::path::Path::new), npu.target())?
             .module(&text)
@@ -156,7 +158,7 @@ impl Projection {
         let kernel = unsafe {
             npu.load_artifact(
                 &artifact,
-                shape.lanes() as u16,
+                LANES as u16,
                 contract(&[
                     (a_bytes, Access::Read),
                     (b_bytes, Access::Read),
@@ -189,7 +191,7 @@ impl Projection {
         let gpu_compiler = Compiler::for_stream(compiler.map(std::path::Path::new), stream)?;
         let pack_count = shape.mt() * 8 * shape.kp();
         let pack_source = source(
-            include_str!("../../kernels/native/fusion_pack.loom"),
+            embedded("fusion_pack")?,
             &[
                 ("GRID", pack_count.div_ceil(256)),
                 ("M", shape.m),
@@ -204,7 +206,7 @@ impl Projection {
         // padded output elements and reads only the declared activation matrix.
         let pack = unsafe { stream.load_artifact(&pack_artifact)? };
         let reduce_source = source(
-            include_str!("../../kernels/native/fusion_reduce.loom"),
+            embedded("fusion_reduce")?,
             &[
                 ("GRID", (shape.m * shape.n).div_ceil(256)),
                 ("COUNT", shape.m * shape.n),

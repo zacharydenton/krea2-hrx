@@ -1,5 +1,5 @@
-//! Paired production-pipeline fixture capture and verification. Record with the
-//! pre-migration implementation, then compare without overwriting the fixture.
+//! Byte-exact pipeline regression check. Record outputs with a reference build,
+//! then compare a changed build against them; recording never overwrites.
 use anyhow::{ensure, Context, Result};
 use krea2::pipeline::{Files, Pipeline, PipelineOptions, Request};
 use std::{io::Write, path::Path, time::Instant};
@@ -25,11 +25,7 @@ fn main() -> Result<()> {
             if expected != bytes {
                 std::fs::write(path.with_extension("actual"), bytes)?;
             }
-            ensure!(
-                expected == bytes,
-                "{} differs from the pre-migration pipeline",
-                path.display()
-            );
+            ensure!(expected == bytes, "{} differs from the recorded pipeline", path.display());
         }
         eprintln!(
             "{} {name}: {} bytes",

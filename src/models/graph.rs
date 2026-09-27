@@ -6,16 +6,16 @@ use std::sync::Arc;
 use crate::checkpoint::Checkpoint;
 use crate::kernels::Scalars;
 use crate::numerics::{from_f32, to_f32};
-use crate::ops::{config, Binary, Config, Norm, Ops, Tensor, Unary};
+use crate::ops::{config, Binary, Config, Norm, Ops, Tensor, Unary, Weight};
 use crate::tokenizer::Tokenizer;
-use hrx::{BufferPool, PooledBuffer, Stream};
+use hrx::{BufferPool, PooledBuffer, Stream, View};
 
 use super::files::Files;
 use super::weights::Weights;
 use super::{Error, Result};
 
 /// The blocks' six modulation vectors, for all 28 of them.
-pub const MODULATION_ELEMENTS: usize = 28 * 6 * 6144;
+const MODULATION_ELEMENTS: usize = 28 * 6 * 6144;
 
 /// The text encoder's hidden width, and the transformer's.
 const TEXT_WIDTH: usize = 2560;
@@ -58,7 +58,7 @@ impl Models {
     ) -> Result<Models> {
         let pool = BufferPool::new();
         let models = Models {
-            fusion: crate::fusion::Fusion::new(checkpoint),
+            fusion: crate::fusion::Fusion::default(),
             ops: Ops::with_compiler(Arc::clone(&pool), compiler),
             tokenizer: match tokenizer {
                 Some(path) => Tokenizer::from_file(path)?,
@@ -79,11 +79,8 @@ impl Models {
 
     /// `y = x wᵀ + bias`, for a layer named by its prefix.
     fn lin(&self, stream: &Stream, x: &Tensor, w: &Weights, prefix: &str) -> Result<Tensor> {
-        let bias = match w.has(&format!("{prefix}.bias")) {
-            true => Some(w.get(&format!("{prefix}.bias"))?.values()?),
-            false => None,
-        };
-        Ok(self.ops.linear(stream, x, w.get(&format!("{prefix}.weight"))?, bias)?)
+        let (weight, bias) = linear_layer(w, prefix)?;
+        Ok(self.ops.linear(stream, x, weight, bias)?)
     }
 
     /// Qwen3-VL's 35 layers, returning the 12 layer taps the fusion consumes.
@@ -206,6 +203,8 @@ impl Models {
     }
 
     /// One prenorm/attention/postnorm/MLP block of the text fusion tower.
+    /// `offload` routes the MLP up projection through [`crate::fusion`],
+    /// which may run it on the NPU.
     fn fusion_block(
         &self,
         stream: &mut Stream,
@@ -213,6 +212,7 @@ impl Models {
         prefix: &str,
         batch: usize,
         tokens: usize,
+        offload: bool,
     ) -> Result<Tensor> {
         let w = &self.transformer;
         let normed = self.ops.norm(
@@ -272,17 +272,14 @@ impl Models {
             &self.lin(stream, &normed, w, &format!("{prefix}.mlp.gate"))?,
             Unary::Silu,
         )?;
-        let up = if prefix == "txtfusion.layerwise_blocks.0" {
-            let weight = w.get(&format!("{prefix}.mlp.up.weight"))?;
-            let bias_name = format!("{prefix}.mlp.up.bias");
-            let bias =
-                if w.has(&bias_name) { Some(w.get(&bias_name)?.values()?) } else { None };
-            match self.fusion.linear(stream, &self.ops, &normed, weight, bias)? {
-                Some(output) => output,
-                None => self.ops.linear(stream, &normed, weight, bias)?,
-            }
-        } else {
-            self.lin(stream, &normed, w, &format!("{prefix}.mlp.up"))?
+        let (weight, bias) = linear_layer(w, &format!("{prefix}.mlp.up"))?;
+        let offloaded = match offload {
+            true => self.fusion.linear(stream, &self.ops, &normed, weight, bias)?,
+            false => None,
+        };
+        let up = match offloaded {
+            Some(output) => output,
+            None => self.ops.linear(stream, &normed, weight, bias)?,
         };
         let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
         Ok(self.ops.binary(
@@ -312,6 +309,8 @@ impl Models {
                 &format!("txtfusion.layerwise_blocks.{index}"),
                 tokens,
                 12,
+                // The first block's up projection is the one the NPU serves.
+                index == 0,
             )?;
         }
         let projected = self.ops.tensor(stream, tokens, TEXT_WIDTH)?;
@@ -337,6 +336,7 @@ impl Models {
                 &format!("txtfusion.refiner_blocks.{index}"),
                 1,
                 tokens,
+                false,
             )?;
         }
         let x = self.ops.norm(
@@ -630,6 +630,13 @@ impl Models {
             .collect::<Result<Vec<_>>>()?;
         compose(tiles, output_stride, height, width)
     }
+}
+
+/// A linear layer's weight and optional bias, named by its prefix.
+fn linear_layer<'w>(w: &'w Weights, prefix: &str) -> Result<(&'w Weight, Option<View<'w>>)> {
+    let weight = w.get(&format!("{prefix}.weight"))?;
+    let bias = w.find(&format!("{prefix}.bias")).map(Weight::values).transpose()?;
+    Ok((weight, bias))
 }
 
 /// One decoded tile's RGB samples, still in bf16.

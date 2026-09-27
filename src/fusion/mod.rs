@@ -3,9 +3,8 @@
 pub mod npu;
 use crate::ops::{Ops, Tensor, Weight};
 use hrx::Stream;
-use std::path::Path;
 #[cfg(feature = "npu")]
-use std::sync::Mutex;
+use std::{path::Path, sync::Mutex};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum FusionBackend {
@@ -27,19 +26,15 @@ struct Cached {
     bias_identity: Option<(usize, usize)>,
 }
 
+/// The projection's backend policy, and under `npu` the prepared projection
+/// for the most recent weights.
+#[derive(Default)]
 pub(crate) struct Fusion {
     backend: FusionBackend,
     #[cfg(feature = "npu")]
     cached: Mutex<Option<Cached>>,
 }
 impl Fusion {
-    pub fn new(_checkpoint: &Path) -> Self {
-        Self {
-            backend: FusionBackend::Auto,
-            #[cfg(feature = "npu")]
-            cached: Mutex::new(None),
-        }
-    }
     pub fn set_backend(&mut self, backend: FusionBackend) {
         self.backend = backend;
     }
@@ -200,7 +195,7 @@ mod tests {
     use super::*;
     #[test]
     fn auto_remains_gpu_without_new_qualification() {
-        let mut fusion = Fusion::new(Path::new("unused"));
+        let mut fusion = Fusion::default();
         assert!(fusion.reason().starts_with("GPU:"));
         fusion.set_backend(FusionBackend::Gpu);
         assert_eq!(fusion.reason(), "GPU: explicitly selected");

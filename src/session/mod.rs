@@ -21,10 +21,10 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::kernels::Scalars;
+use crate::kernels::{shape, Scalars, Shape};
 use hrx::{Buffer, Stream, View};
 
-pub use bundle::{Kernels, Metadata};
+pub use bundle::Kernels;
 pub use sage::Sage;
 pub use weights::Weights;
 
@@ -123,7 +123,6 @@ struct Buffers {
     q: Buffer,
     k: Buffer,
     v: Buffer,
-    v_transposed: Option<Buffer>,
     // Attention is consumed by gated prepare before gate/up writes its result.
     // Neither value has persistent zero-filled headroom rows.
     attn_gu: Buffer,
@@ -179,7 +178,7 @@ pub struct Session {
     stream_id: usize,
     tokens: usize,
     layers: usize,
-    metadata: Metadata,
+    shape: Shape,
     kernels: Kernels,
     blocks: Vec<Block>,
     /// The native graph retains its recorded resources until its final replay
@@ -193,7 +192,9 @@ pub struct Session {
     /// What the resident RoPE tables were last filled from. Changed tables are
     /// queued before their next use on this stream.
     rope: Cell<Option<(u64, u64)>>,
-    /// Opt-in synchronized wall-clock timing per kernel, off during inference.
+    /// Synchronized wall-clock timing per kernel, from `KREA2_NATIVE_PROFILE`
+    /// when the session is built or [`Session::set_profile`] after. Profiled
+    /// forwards dispatch directly instead of replaying the recorded graph.
     profile: AtomicBool,
     stages: RefCell<Vec<(&'static str, f64)>>,
     weights: std::sync::Arc<Weights>,
@@ -306,15 +307,18 @@ impl Session {
         compiler: Option<&str>,
     ) -> Result<Session> {
         Self::validate_dimensions(tokens, layers)?;
-        let shape =
-            crate::kernels::Shape::from_environment(tokens as i32, weights.bits() as i32)?;
+        let shape = Shape::from_environment(tokens)?;
         let bundle = crate::kernels::prepare_for_target(compiler, &shape, stream.target())?;
         Self::build(stream, weights, &bundle, tokens, layers, compiler)
     }
 
     fn validate_dimensions(tokens: usize, layers: usize) -> Result<()> {
-        if !(16..=16896).contains(&tokens) || !(1..=28).contains(&layers) {
-            return Err(Error::invalid("tokens must be 16..16896 and layers must be 1..28"));
+        if !shape::TOKENS.contains(&tokens) || !(1..=28).contains(&layers) {
+            return Err(Error::invalid(format!(
+                "tokens must be {}..{} and layers must be 1..28",
+                shape::TOKENS.start(),
+                shape::TOKENS.end()
+            )));
         }
         Ok(())
     }
@@ -327,27 +331,19 @@ impl Session {
         layers: usize,
         compiler: Option<&str>,
     ) -> Result<Session> {
-        let metadata = Metadata::from(bundle.shape());
-        if weights.bits() != metadata.gemm_bits {
-            return Err(Error::invalid(format!(
-                "kernel bundle built for int{} GEMM operands but the weights are int{}",
-                metadata.gemm_bits,
-                weights.bits()
-            )));
-        }
-        let bits = metadata.gemm_bits as usize;
+        let shape = bundle.shape().clone();
         let mut blocks = Vec::with_capacity(layers);
         for index in 0..layers {
             let p = format!("blocks.{index}");
             let at = |name: &str, bytes: usize| weights.locate(&format!("{p}.{name}"), bytes);
             blocks.push(Block {
-                qkvg_q: at("qkvg.q", QKVG as usize * HIDDEN as usize * bits / 8)?,
+                qkvg_q: at("qkvg.q", QKVG as usize * HIDDEN as usize)?,
                 qkvg_s: at("qkvg.s", QKVG as usize * 4)?,
-                wo_q: at("wo.q", HIDDEN as usize * HIDDEN as usize * bits / 8)?,
+                wo_q: at("wo.q", HIDDEN as usize * HIDDEN as usize)?,
                 wo_s: at("wo.s", HIDDEN as usize * 4)?,
-                gu_q: at("gu.q", 2 * INTER as usize * HIDDEN as usize * bits / 8)?,
+                gu_q: at("gu.q", 2 * INTER as usize * HIDDEN as usize)?,
                 gu_s: at("gu.s", 2 * INTER as usize * 4)?,
-                down_q: at("down.q", HIDDEN as usize * INTER as usize * bits / 8)?,
+                down_q: at("down.q", HIDDEN as usize * INTER as usize)?,
                 down_s: at("down.s", HIDDEN as usize * 4)?,
                 prenorm: at("prenorm", HIDDEN as usize * 4)?,
                 postnorm: at("postnorm", HIDDEN as usize * 4)?,
@@ -355,23 +351,19 @@ impl Session {
                 knorm: at("knorm", HEAD_DIM as usize * 4)?,
             });
         }
-        let kernels = Kernels::load(stream, bundle, &metadata)?;
-        let capacity = metadata.capacity;
+        let kernels = Kernels::load(stream, bundle)?;
+        let capacity = shape.capacity;
         let kv_bytes = KV_HEADS as usize * HEAD_DIM as usize * capacity * 2;
         let allocate = |bytes: usize| stream.allocate(bytes).map_err(Error::from);
         let buffers = Buffers {
             x: allocate(capacity * HIDDEN as usize * 2)?,
             // the widest prepared operand: down's K = 16384 at its padded pitch
-            a_q: allocate(capacity * metadata.pitch_inter as usize * bits / 8)?,
+            a_q: allocate(capacity * shape::gemm_pitch(INTER as usize))?,
             a_s: allocate(capacity * 4)?,
             fused: allocate(capacity * QKVG as usize * 2)?,
             q: allocate(capacity * HIDDEN as usize * 2)?,
             k: allocate(kv_bytes)?,
             v: allocate(kv_bytes)?,
-            v_transposed: match metadata.fp16_query_tiles {
-                2 => Some(allocate(kv_bytes)?),
-                _ => None,
-            },
             // Also holds silu(gate) * up, the wider of these two intermediates.
             attn_gu: allocate(capacity * INTER as usize * 2)?,
             mods: allocate(layers * 6 * HIDDEN as usize * 4)?,
@@ -383,10 +375,7 @@ impl Session {
         for buffer in [&buffers.q, &buffers.k, &buffers.v, &buffers.fused, &buffers.x] {
             stream.fill(buffer.binding(), 0)?;
         }
-        if let Some(transposed) = &buffers.v_transposed {
-            stream.fill(transposed.binding(), 0)?;
-        }
-        let sage = match metadata.attention_bits {
+        let sage = match shape.attention_bits {
             16 => None,
             bits => Some(Sage::new(
                 stream,
@@ -402,14 +391,14 @@ impl Session {
             stream_id: stream.id(),
             tokens,
             layers,
-            metadata,
+            shape,
             kernels,
             blocks,
             buffers,
             sage,
             graph: RefCell::new(None),
             rope: Cell::new(None),
-            profile: AtomicBool::new(false),
+            profile: AtomicBool::new(crate::kernels::native_profile()),
             stages: RefCell::new(Vec::new()),
             weights,
         })
@@ -702,11 +691,7 @@ impl Session {
         let (a_q, a_s) = (self.buffers.a_q.binding(), self.buffers.a_s.binding());
         let all = [a_q, weights, scales, a_s, out, gate.unwrap_or(out)];
         let bindings = &all[..5 + usize::from(gate.is_some())];
-        let grid_y = crate::kernels::shape::gemm_grid_rows(
-            self.tokens as i32,
-            self.metadata.gemm_rows as i32,
-            self.metadata.m_group as i32,
-        );
+        let grid_y = shape::gemm_grid_rows(self.tokens);
         self.launch(
             sink,
             kernel,
@@ -809,7 +794,7 @@ impl Session {
                     sage.correction.binding(),
                     b.attn_gu.binding(),
                 ];
-                let waves = self.metadata.attention_waves as usize;
+                let waves = self.shape.attention_waves as usize;
                 let rows = 16 * (waves / 4);
                 self.launch(
                     sink,
@@ -822,36 +807,19 @@ impl Session {
                     &attention,
                 )?;
             }
-            // fp16 QK and PV straight from the RoPE outputs.
+            // fp16 QK and PV straight from the RoPE outputs, 16 query rows
+            // per workgroup.
             None => {
-                let values = match (&b.v_transposed, &self.kernels.attention_transpose) {
-                    (Some(transposed), Some(kernel)) => {
-                        let scalars = Scalars::new().index(tokens);
-                        let bindings = [b.v.binding(), transposed.binding()];
-                        self.launch(
-                            sink,
-                            kernel,
-                            "f16 V transpose",
-                            tokens.div_ceil(32) as u32,
-                            (KV_HEADS * HEAD_DIM / 32) as u32,
-                            256,
-                            &scalars,
-                            &bindings,
-                        )?;
-                        transposed.binding()
-                    }
-                    _ => b.v.binding(),
-                };
                 let attention_scalars = Scalars::new().index(tokens);
-                let attention = [b.q.binding(), b.k.binding(), values, b.attn_gu.binding()];
-                let rows = 16 * self.metadata.fp16_query_tiles as usize;
+                let attention =
+                    [b.q.binding(), b.k.binding(), b.v.binding(), b.attn_gu.binding()];
                 self.launch(
                     sink,
                     &self.kernels.attention,
                     "f16 attention",
-                    tokens.div_ceil(rows) as u32,
+                    tokens.div_ceil(16) as u32,
                     KV_HEADS as u32,
-                    128 * self.metadata.fp16_query_tiles,
+                    128,
                     &attention_scalars,
                     &attention,
                 )?;

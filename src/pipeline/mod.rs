@@ -156,8 +156,8 @@ impl Pipeline {
         compiler: Option<&str>,
         options: PipelineOptions,
     ) -> Result<Pipeline> {
-        // Built before the state so the models allocate on the stream that will
-        // later dispatch them; allocation only needs a shared borrow.
+        // The models allocate on the stream that will later dispatch them, which
+        // then moves into the state lock.
         let mut stream = native_stream(context)?;
         let mut models = Models::open(&mut stream, &files, compiler)?;
         models.fusion.set_backend(options.fusion_backend);

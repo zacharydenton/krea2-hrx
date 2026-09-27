@@ -170,6 +170,11 @@ impl Weights {
     pub fn has(&self, name: &str) -> bool {
         self.values.contains_key(name)
     }
+
+    /// The tensor named `name`, when the checkpoint has one.
+    pub fn find(&self, name: &str) -> Option<&Weight> {
+        self.values.get(name)
+    }
 }
 
 /// The bytes to upload when the file's are not already what the device wants:

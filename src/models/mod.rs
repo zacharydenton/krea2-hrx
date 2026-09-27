@@ -8,7 +8,7 @@ pub mod hub;
 pub mod weights;
 
 pub use files::{Files, Request};
-pub use graph::{Models, MODULATION_ELEMENTS};
+pub use graph::Models;
 pub use weights::Weights;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
