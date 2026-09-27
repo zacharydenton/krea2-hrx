@@ -1,6 +1,6 @@
 //! Owned device-copy boundaries between auxiliary native models and prepared
 //! shared-context blocks. Pipeline's state lock excludes concurrent native use.
-use super::*;
+use super::{Error, ModelContext, PATCH, Pipeline, Result, Stream, Tensor, WIDTH};
 use hrx::{
     Access, PooledBuffer,
     execution::{BufferView, GpuAccess},
@@ -8,6 +8,7 @@ use hrx::{
     tensor::{DType, DeviceTensor, Layout, TensorDesc},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub(super) fn native_stream(context: &ModelContext) -> Result<Stream> {
     let mut stream = hrx::Device::open(context.runtime().gpu()?.index())?.stream()?;

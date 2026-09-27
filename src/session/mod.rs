@@ -196,7 +196,7 @@ impl Session {
         // Record before handing the stream to workers; no compilation or graph
         // preparation is deferred to warm inference.
         if self.graph.borrow().is_none() {
-            *self.graph.borrow_mut() = Some(self.record_graph(&mut stream)?);
+            *self.graph.borrow_mut() = Some(self.record_graph(&stream)?);
         }
         stream.synchronize()?;
         let x = TensorDesc::new(DType::BF16, vec![self.tokens, HIDDEN])?
@@ -626,7 +626,7 @@ impl Session {
     }
 
     /// Every block, recorded once into a graph over the session's own buffers.
-    fn record_graph(&self, stream: &mut Stream) -> Result<hrx::GraphExec> {
+    fn record_graph(&self, stream: &Stream) -> Result<hrx::GraphExec> {
         let mut recording = Recording { graph: stream.graph()?, last: After::None };
         for index in 0..self.layers {
             self.block(&mut Sink::Record(&mut recording), index, self.buffers.mods.binding())?;

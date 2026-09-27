@@ -40,7 +40,7 @@ mod tests {
         }
         let on_disk = std::fs::read_dir(&root)
             .expect("the kernel directory exists")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .filter(|entry| entry.path().extension().is_some_and(|e| e == "loom"))
             .count();
         assert_eq!(on_disk, table.len(), "{directory} has kernels the build did not embed");

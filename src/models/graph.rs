@@ -450,7 +450,7 @@ impl Models {
     }
 
     /// The 28 blocks' modulation tables gathered into one tensor, once.
-    fn tables(&self, stream: &mut Stream) -> Result<()> {
+    fn tables(&self, stream: &Stream) -> Result<()> {
         for index in 0..28 {
             let table = self.transformer.get(&format!("blocks.{index}.mod.lin"))?;
             if table.count != 6 * WIDTH {
