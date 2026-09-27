@@ -89,9 +89,9 @@ impl Shape {
             stem,
             config: config.iter().map(|&(key, value)| (key.into(), value.into())).collect(),
         };
-        let gemm = |source, stem, k: &str, stride: &str, n: &str| {
+        let gemm = |family, stem, k: &str, stride: &str, n: &str| {
             job(
-                source,
+                shape::gemm_source(family, shape::gemm_tile(stem)),
                 stem,
                 &[("k_size", k), ("k_stride", stride), ("n_size", n), ("m_group", &group)],
             )

@@ -11,7 +11,9 @@
 //! Every source must have the plain GEMM ABI of `kernels/gemm_i8_256.loom`
 //! (`m_size`; `a`, `w`, `scale`, `a_scale`, `c`) and its `k_size`, `k_stride`,
 //! `n_size` and `m_group` configuration; `--m-group` sets the raster group
-//! (default 4, production's). Outputs must match the first source
+//! (default 4, production's).
+//! A source launching 512-thread workgroups is taken to be the 256x256 tile
+//! (`gemm_i8_resid_256x256.loom`'s shape) and gets half as many column tiles. Outputs must match the first source
 //! byte for byte unless `--no-check` is given, for diagnostic variants that
 //! deliberately skip work. Each kernel's compiled artifact path is printed for
 //! `llvm-objdump -d --mcpu=gfx1151`.
@@ -164,14 +166,21 @@ fn main() -> Result<()> {
             let (kernel, note) = compile(&stream, &compiler, source, &config)?;
             println!("  {path}: {note}");
             let constants = Constants::indices(&kernel, &[m as u32])?;
-            kernels.push((kernel, constants));
+            // The 256x256 tile launches sixteen waves over twice the columns.
+            let wide = source.contains("workgroup_size(%c512");
+            let (grid, block) = if wide {
+                ([(n / 256) as u32, m.div_ceil(256) as u32, 1], [512u32, 1, 1])
+            } else {
+                (grid, [256u32, 1, 1])
+            };
+            kernels.push((kernel, constants, grid, block));
         }
 
         let mut reference: Option<Vec<u8>> = None;
-        for ((kernel, constants), path) in kernels.iter().zip(&options.sources) {
+        for ((kernel, constants, grid, block), path) in kernels.iter().zip(&options.sources) {
             stream.fill(c.binding(), 0)?;
             // SAFETY: operands are sized from the configuration compiled above.
-            unsafe { stream.dispatch(kernel, grid, [256, 1, 1], constants, &bindings) }?;
+            unsafe { stream.dispatch(kernel, *grid, *block, constants, &bindings) }?;
             let mut out = vec![0u8; m * n * 2];
             stream.read_blocking(c.binding(), &mut out)?;
             match &reference {
@@ -184,19 +193,25 @@ fn main() -> Result<()> {
         }
 
         let mut graphs = Vec::new();
-        let arms =
-            kernels.iter().map(|(kernel, constants)| (kernel, constants, grid, &bindings[..]));
+        let arms = kernels.iter().map(|(kernel, constants, grid, block)| {
+            (kernel, constants, *grid, *block, &bindings[..])
+        });
         let peak_bindings = [peak_out.binding()];
-        let peak_arm =
-            (&peak, &peak_constants, [PEAK_WORKGROUPS as u32, 1, 1], &peak_bindings[..]);
-        for (kernel, constants, grid, bindings) in arms.chain([peak_arm]) {
+        let peak_arm = (
+            &peak,
+            &peak_constants,
+            [PEAK_WORKGROUPS as u32, 1, 1],
+            [256u32, 1, 1],
+            &peak_bindings[..],
+        );
+        for (kernel, constants, grid, block, bindings) in arms.chain([peak_arm]) {
             let mut graph = stream.graph()?;
             let mut last = None;
             for _ in 0..REPEATS {
                 let after: Vec<hrx::Node> = last.into_iter().collect();
                 // SAFETY: as the eager dispatch above.
                 last = Some(unsafe {
-                    graph.dispatch(&after, kernel, grid, [256, 1, 1], constants, bindings)
+                    graph.dispatch(&after, kernel, grid, block, constants, bindings)
                 }?);
             }
             let labels: Vec<String> = (0..REPEATS).map(|i| i.to_string()).collect();

@@ -746,13 +746,15 @@ impl Session {
         n: usize,
         out: View<'g>,
         gate: Option<View<'g>>,
+        tile: shape::GemmTile,
     ) -> Result<()> {
         let scalars = Scalars::new().index(self.tokens);
         let (a_q, a_s) = (self.buffers.a_q.binding(), self.buffers.a_s.binding());
         let all = [a_q, weights, scales, a_s, out, gate.unwrap_or(out)];
         let bindings = &all[..5 + usize::from(gate.is_some())];
         let grid_y = shape::gemm_grid_rows(self.tokens);
-        self.launch(sink, kernel, stage, n / 128, grid_y, THREADS, &scalars, bindings)
+        let columns = n / tile.columns();
+        self.launch(sink, kernel, stage, columns, grid_y, tile.threads(), &scalars, bindings)
     }
 
     fn block<'g>(
@@ -795,6 +797,7 @@ impl Session {
             QKVG,
             b.fused.binding(),
             None,
+            shape::gemm_tile("gemm_qkvg"),
         )?;
 
         let rope_scalars = Scalars::new().index(tokens);
@@ -911,6 +914,7 @@ impl Session {
             HIDDEN,
             b.x.binding(),
             Some(modulation(mods, index, 2)?),
+            shape::gemm_tile("gemm_wo"),
         )?;
 
         let post_scalars = Scalars::new().index(tokens);
@@ -942,6 +946,7 @@ impl Session {
             2 * INTER,
             b.attn_gu.binding(),
             None,
+            shape::gemm_tile("gemm_gu"),
         )?;
 
         let swiglu_scalars = Scalars::new().index(tokens);
@@ -966,6 +971,7 @@ impl Session {
             HIDDEN,
             b.x.binding(),
             Some(modulation(mods, index, 5)?),
+            shape::gemm_tile("gemm_down"),
         )?;
         Ok(())
     }

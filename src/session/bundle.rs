@@ -33,15 +33,22 @@ impl Kernels {
             // Safety: prepare compiles the embedded model sources for this shape.
             unsafe { stream.load_artifact(artifact) }.map_err(Error::from)
         };
+        let load_gemm = |stem: &str, family: &'static str| {
+            let source = crate::kernels::shape::gemm_source(
+                family,
+                crate::kernels::shape::gemm_tile(stem),
+            );
+            load(stem, &format!("krea2_{source}"))
+        };
         let attention = format!("krea2_{}", bundle.shape().attention_source());
         Ok(Kernels {
             prepare_norm: load("prepare_norm_i8", "krea2_prepare_norm_i8")?,
             prepare_gated: load("prepare_gated_i8", "krea2_prepare_gated_i8")?,
             prepare_swiglu: load("prepare_plain_i8", "krea2_prepare_plain_i8")?,
-            gemm_qkvg: load("gemm_qkvg", "krea2_gemm_i8_256")?,
-            gemm_gu: load("gemm_gu", "krea2_gemm_i8_swiglu_256")?,
-            gemm_wo: load("gemm_wo", "krea2_gemm_i8_resid_256")?,
-            gemm_down: load("gemm_down", "krea2_gemm_i8_resid_256")?,
+            gemm_qkvg: load_gemm("gemm_qkvg", "gemm_i8_256")?,
+            gemm_gu: load_gemm("gemm_gu", "gemm_i8_swiglu_256")?,
+            gemm_wo: load_gemm("gemm_wo", "gemm_i8_resid_256")?,
+            gemm_down: load_gemm("gemm_down", "gemm_i8_resid_256")?,
             rope: load("rope_qknorm", "krea2_rope_qknorm_f16")?,
             attention: load("attention", &attention)?,
         })

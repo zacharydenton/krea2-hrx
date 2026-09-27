@@ -15,10 +15,66 @@ pub const fn capacity(tokens: usize) -> usize {
     if tiles > blocks { tiles } else { blocks }
 }
 
-/// Workgroup tile rows of the int8 (W8A8) GEMMs. The family exists only on the
-/// 256x128 tile, which shortens its last raster group in-kernel, so the launch
-/// grid is simply the tiles themselves.
+/// Workgroup tile rows of the int8 (W8A8) GEMMs. The family exists on 256x128
+/// and 256x256 tiles, which shorten their last raster group in-kernel, so the
+/// launch grid is simply the tiles themselves.
 pub const GEMM_ROWS: usize = 256;
+
+/// Tile columns and workgroup threads of an int8 GEMM kernel. The 256x256 tile
+/// reads a third less operand data per product, which pays only where K is
+/// long: in the 1024x1024 pipeline it takes the down projection (K = 16384)
+/// from 825 to 538 ms per step on the GPU clock, while gate/up, qkvg and wo
+/// (K = 6144) gain nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemmTile {
+    /// 256x128, eight waves.
+    Narrow,
+    /// 256x256, sixteen waves.
+    Wide,
+}
+
+impl GemmTile {
+    /// Output columns per workgroup.
+    pub const fn columns(self) -> usize {
+        match self {
+            GemmTile::Narrow => 128,
+            GemmTile::Wide => 256,
+        }
+    }
+
+    /// Threads per workgroup: four rows of waves, one wave per 64 columns.
+    pub const fn threads(self) -> u32 {
+        match self {
+            GemmTile::Narrow => 256,
+            GemmTile::Wide => 512,
+        }
+    }
+}
+
+/// The tile each transformer GEMM runs on, by bundle stem; see [`GemmTile`].
+pub const GEMM_TILES: [(&str, GemmTile); 4] = [
+    ("gemm_qkvg", GemmTile::Narrow),
+    ("gemm_gu", GemmTile::Narrow),
+    ("gemm_wo", GemmTile::Narrow),
+    ("gemm_down", GemmTile::Wide),
+];
+
+/// The tile `stem` runs on; any GEMM not in [`GEMM_TILES`] is narrow.
+pub fn gemm_tile(stem: &str) -> GemmTile {
+    GEMM_TILES
+        .iter()
+        .find(|(name, _)| *name == stem)
+        .map_or(GemmTile::Narrow, |&(_, tile)| tile)
+}
+
+/// The kernel source of an int8 GEMM family on `tile`. Only the residual
+/// family has a 256x256 sibling; the others would gain nothing from it.
+pub fn gemm_source(family: &'static str, tile: GemmTile) -> &'static str {
+    match (family, tile) {
+        ("gemm_i8_resid_256", GemmTile::Wide) => "gemm_i8_resid_256x256",
+        _ => family,
+    }
+}
 
 /// m-tiles per raster group of the int8 GEMMs.
 pub const GEMM_M_GROUP: usize = 4;
