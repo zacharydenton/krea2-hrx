@@ -28,11 +28,12 @@ pub fn from_f32(value: f32) -> Bits {
 /// f32 → bf16, round to nearest even, **without the NaN branch**.
 ///
 /// Used for checkpoint conversion and fp8 dequantization. The rounding carry
-/// can change a NaN's exponent: `0x7FFF_FFFF` becomes negative zero (`0x8000`).
+/// can change a NaN's exponent: `0x7FFF_FFFF` becomes negative zero (`0x8000`),
+/// and a negative NaN near `0xFFFF_FFFF` wraps past the sign to positive zero.
 /// This behavior is retained for checkpoint compatibility.
 pub fn from_f32_carrying(value: f32) -> Bits {
     let u = value.to_bits();
-    ((u + 0x7fff + ((u >> 16) & 1)) >> 16) as Bits
+    (u.wrapping_add(0x7fff + ((u >> 16) & 1)) >> 16) as Bits
 }
 
 /// fp8 E4M3 (`torch.float8_e4m3fn`) → f32, as the `_scaled` text encoders store
@@ -133,6 +134,9 @@ mod tests {
         // The carry reaches the exponent: the largest NaN becomes negative zero.
         assert_eq!(from_f32_carrying(f32::from_bits(0x7fff_ffff)), 0x8000);
         assert_eq!(from_f32(f32::from_bits(0x7fff_ffff)), 0x7fff);
+        // A negative NaN's carry wraps the whole word rather than overflowing.
+        assert_eq!(from_f32_carrying(f32::from_bits(0xffff_ffff)), 0x0000);
+        assert_eq!(from_f32_carrying(f32::from_bits(0xffff_8000)), 0x0000);
     }
 
     /// Every f32, against `half`, for the conversion that has an independent

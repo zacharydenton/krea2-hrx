@@ -70,8 +70,8 @@ impl Shape {
 
     fn jobs(&self) -> Vec<Job> {
         let width = format!("i{}", self.gemm_bits);
-        let pitch_hidden = shape::gemm_pitch(6144, self.gemm_bits).to_string();
-        let pitch_inter = shape::gemm_pitch(16384, self.gemm_bits).to_string();
+        let pitch_hidden = shape::gemm_pitch(6144, self.gemm_bits as usize).to_string();
+        let pitch_inter = shape::gemm_pitch(16384, self.gemm_bits as usize).to_string();
         let group = self.m_group.to_string();
         let tile = if self.rows == 256 { "_256" } else { "" };
         let mut jobs = Vec::new();

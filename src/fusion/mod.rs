@@ -153,14 +153,18 @@ fn capture(
         return Ok(());
     };
     let result = (|| -> anyhow::Result<()> {
+        use std::io::Write;
         let shape =
             npu::Shape { m: x.rows(), k: x.cols(), n: w.shape.first().copied().unwrap_or(0) };
         shape.storage_bytes()?;
         let directory = Path::new(&root).join(format!("{}x{}x{}", shape.m, shape.k, shape.n));
-        if directory.join("case.json").exists() {
+        if directory.exists() {
             return Ok(());
         }
-        std::fs::create_dir_all(&directory)?;
+        // Written beside the destination and renamed into place, so a capture
+        // that dies partway leaves no half-written case to trip the next run.
+        std::fs::create_dir_all(&root)?;
+        let partial = tempfile::Builder::new().prefix(".capture-").tempdir_in(&root)?;
         let input = x.download(stream)?;
         let mut weights = vec![0u16; w.count];
         stream.read_blocking(w.values()?, bytemuck::cast_slice_mut(&mut weights))?;
@@ -172,27 +176,21 @@ fn capture(
         for (name, values) in
             [("input.bf16", input), ("weights.bf16", weights), ("bias.bf16", biases)]
         {
-            use std::io::Write;
             let bytes = bytemuck::cast_slice::<u16, u8>(&values);
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(directory.join(name))?
-                .write_all(bytes)?;
+            std::fs::File::create(partial.path().join(name))?.write_all(bytes)?;
             hashes.insert(name.into(), hrx::bundle::digest(bytes).into());
         }
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(directory.join("case.json"))?
-            .write_all(
-                serde_json::to_string_pretty(
-                    &serde_json::json!({"shape":shape,"digests":hashes} ),
-                )?
-                .as_bytes(),
-            )?;
-        Ok(())
+        let case = serde_json::json!({ "shape": shape, "digests": hashes });
+        std::fs::write(partial.path().join("case.json"), serde_json::to_string_pretty(&case)?)?;
+        match std::fs::rename(partial.path(), &directory) {
+            // Another capture of the same shape finished first; its case stands.
+            Err(_) if directory.exists() => Ok(()),
+            result => {
+                // Renamed away: nothing is left for the guard to delete.
+                let _ = partial.keep();
+                Ok(result?)
+            }
+        }
     })();
     result.map_err(|e| Error(format!("fusion input capture: {e:#}")))
 }

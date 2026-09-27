@@ -25,13 +25,8 @@ impl Harness {
         data: &[Vec<u8>],
     ) -> Vec<Vec<u8>> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let path = root.join("kernels").join(format!("{stem}.loom"));
-        let path = if path.is_file() {
-            path
-        } else {
-            root.join("../experiments").join(format!("{stem}.loom"))
-        };
-        let source = std::fs::read_to_string(path).unwrap();
+        let source =
+            std::fs::read_to_string(root.join("kernels").join(format!("{stem}.loom"))).unwrap();
         let symbol = format!("krea2_{stem}");
         let mut request = hrx::loom::Specialization::new(&symbol);
         request.replace_config(

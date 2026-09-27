@@ -19,8 +19,8 @@ pub const fn fp16_query_tiles(_tokens: i32) -> i32 {
 /// alias in the cache; one extra k step of padding took the down projection
 /// from 61 to 77 TOPS. Rows of 3072 bytes (K = 6144) showed no such effect, so
 /// they stay dense.
-pub const fn gemm_pitch(k: i32, bits: i32) -> i32 {
-    if (k * bits / 8) % 8192 == 0 {
+pub const fn gemm_pitch(k: usize, bits: usize) -> usize {
+    if (k * bits / 8).is_multiple_of(8192) {
         k + 512 / bits
     } else {
         k

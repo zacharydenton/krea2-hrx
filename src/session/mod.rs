@@ -81,7 +81,7 @@ impl From<crate::checkpoint::Error> for Error {
     fn from(error: crate::checkpoint::Error) -> Self {
         // The checkpoint reader's rejections are all about the file the caller
         // named, so they read as invalid arguments.
-        Error::failed(error.to_string())
+        Error::invalid(error.to_string())
     }
 }
 

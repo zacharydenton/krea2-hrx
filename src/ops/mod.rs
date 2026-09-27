@@ -200,6 +200,7 @@ impl Ops {
         if n < 1 || x.rows() < 1 || x.cols() < 1 || w.count != n * k {
             return Err(Error("linear dimensions".into()));
         }
+        check_bias(bias, n)?;
         let y = self.tensor(stream, x.rows(), n)?;
         let name = if bias.is_some() { "gemm_bf16_bf16_nt_bias" } else { "gemm_bf16_bf16_nt" };
         self.matmul(
@@ -642,6 +643,7 @@ impl Ops {
         if w.count != n * k {
             return Err(Error("convolution dimensions".into()));
         }
+        check_bias(bias, n)?;
         let y = self.tensor(stream, m, n)?;
         let name =
             if bias.is_some() { "conv3x3_bf16_bf16_nt_bias" } else { "conv3x3_bf16_bf16_nt" };
@@ -818,6 +820,19 @@ impl Ops {
                 256,
             )
         }
+    }
+}
+
+/// A bias is one bf16 per output column. The kernels read `n` of them with no
+/// bounds check of their own, so a shorter view would be read past its end.
+fn check_bias(bias: Option<View<'_>>, n: usize) -> Result<()> {
+    match bias {
+        Some(bias) if bias.len() != n * 2 => Err(Error(format!(
+            "bias spans {} bytes, expected {} for {n} bf16 columns",
+            bias.len(),
+            n * 2
+        ))),
+        _ => Ok(()),
     }
 }
 

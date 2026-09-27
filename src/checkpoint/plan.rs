@@ -59,11 +59,14 @@ pub struct Plan {
     pub bits: u32,
 }
 
-/// Operand row pitch in k elements, from `crate::kernels::shape`, in bytes for int8.
-fn device_row_bytes(row_bytes: usize, bits: u32) -> usize {
-    crate::kernels::shape::gemm_pitch(row_bytes as i32 * 8 / bits as i32, bits as i32) as usize
-        * bits as usize
-        / 8
+/// Operand row pitch from `crate::kernels::shape`, in bytes. `row_bytes` comes
+/// from the file's header, so the arithmetic is checked rather than trusted.
+fn device_row_bytes(row_bytes: usize, bits: u32) -> Result<usize> {
+    let bits = bits as usize;
+    let too_wide = || Error(format!("a {row_bytes}-byte operand row is too wide"));
+    let k = row_bytes.checked_mul(8).ok_or_else(too_wide)? / bits;
+    let pitch = crate::kernels::shape::gemm_pitch(k, bits);
+    Ok(pitch.checked_mul(bits).ok_or_else(too_wide)? / 8)
 }
 
 fn int8_rows<'a>(file: &'a Checkpoint, name: &str) -> Result<super::Tensor<'a>> {
@@ -174,12 +177,16 @@ fn operand(
         return Err(Error(format!("mismatched K in {out}")));
     }
     let rows: usize = tensors.iter().map(|t| t.shape[0]).sum();
+    let pitch = device_row_bytes(row_bytes, bits)?;
+    let device_bytes = rows
+        .checked_mul(pitch)
+        .ok_or_else(|| Error(format!("{out} spans more than the address space")))?;
     let mut weights = Span {
         device_offset: 0,
-        device_bytes: rows * device_row_bytes(row_bytes, bits),
+        device_bytes,
         rows,
         row_bytes,
-        device_row_bytes: device_row_bytes(row_bytes, bits),
+        device_row_bytes: pitch,
         segments: Vec::new(),
         host: Vec::new(),
     };
@@ -279,6 +286,15 @@ mod tests {
                 .expect("cache the Turbo checkpoint or set KREA2_MODEL")
             });
         Checkpoint::open(&path).expect("set KREA2_MODEL to a local checkpoint")
+    }
+
+    #[test]
+    fn operand_pitches_are_checked_rather_than_wrapped() {
+        assert_eq!(device_row_bytes(6144, 8), Ok(6144));
+        assert_eq!(device_row_bytes(16384, 8), Ok(16448));
+        // A row this wide wrapped negative through the old i32 arithmetic.
+        assert_eq!(device_row_bytes(1 << 28, 8), Ok((1 << 28) + 64));
+        assert!(device_row_bytes(usize::MAX / 4, 8).is_err());
     }
 
     #[test]
