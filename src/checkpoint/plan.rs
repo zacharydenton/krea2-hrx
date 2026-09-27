@@ -56,14 +56,14 @@ pub struct Plan {
 fn int8_rows<'a>(file: &'a Checkpoint, name: &str) -> Result<super::Tensor<'a>> {
     let tensor = file.get(&format!("{name}.weight"))?;
     if tensor.dtype != "I8" || tensor.shape.len() != 2 {
-        return Err(Error(format!(
+        return Err(Error::invalid(format!(
             "{name}.weight is {}, not int8 ConvRot rows ({})",
             tensor.dtype,
             file.path().display()
         )));
     }
     if tensor.shape[0] == 0 || tensor.shape[1] == 0 || tensor.row_bytes()? != tensor.shape[1] {
-        return Err(Error(format!("invalid weight shape or size in {name}")));
+        return Err(Error::invalid(format!("invalid weight shape or size in {name}")));
     }
     Ok(tensor)
 }
@@ -71,10 +71,10 @@ fn int8_rows<'a>(file: &'a Checkpoint, name: &str) -> Result<super::Tensor<'a>> 
 fn scales<'a>(file: &'a Checkpoint, name: &str, rows: usize) -> Result<super::Tensor<'a>> {
     let tensor = file.get(&format!("{name}.weight_scale"))?;
     if tensor.dtype != "F32" {
-        return Err(Error(format!("{name}.weight_scale is not float32")));
+        return Err(Error::invalid(format!("{name}.weight_scale is not float32")));
     }
     if tensor.bytes.len() != rows * 4 {
-        return Err(Error(format!("scale count in {name}")));
+        return Err(Error::invalid(format!("scale count in {name}")));
     }
     Ok(tensor)
 }
@@ -84,7 +84,10 @@ impl Plan {
     pub fn for_checkpoint(file: &Checkpoint) -> Result<Plan> {
         let layers = file.block_count();
         if layers == 0 {
-            return Err(Error(format!("no transformer blocks in {}", file.path().display())));
+            return Err(Error::invalid(format!(
+                "no transformer blocks in {}",
+                file.path().display()
+            )));
         }
         let mut spans: BTreeMap<String, Span> = BTreeMap::new();
         for block in 0..layers {
@@ -136,7 +139,7 @@ impl Plan {
     }
 
     pub fn span(&self, name: &str) -> Result<&Span> {
-        self.spans.get(name).ok_or_else(|| Error(format!("no span named {name}")))
+        self.spans.get(name).ok_or_else(|| Error::invalid(format!("no span named {name}")))
     }
 }
 
@@ -154,14 +157,14 @@ fn operand(
         parts.iter().map(|part| int8_rows(file, part)).collect::<Result<_>>()?;
     let row_bytes = tensors[0].row_bytes()?;
     if tensors.iter().any(|t| t.shape[1] != tensors[0].shape[1]) {
-        return Err(Error(format!("mismatched K in {out}")));
+        return Err(Error::invalid(format!("mismatched K in {out}")));
     }
     let rows: usize = tensors.iter().map(|t| t.shape[0]).sum();
     // int8 rows: a row's bytes are its K elements.
     let pitch = crate::kernels::shape::gemm_pitch(row_bytes);
     let device_bytes = rows
         .checked_mul(pitch)
-        .ok_or_else(|| Error(format!("{out} spans more than the address space")))?;
+        .ok_or_else(|| Error::invalid(format!("{out} spans more than the address space")))?;
     let mut weights = Span {
         device_offset: 0,
         device_bytes,
@@ -186,7 +189,7 @@ fn operand(
             || tensors[0].shape[0] != tensors[1].shape[0]
             || tensors[0].shape[0] % group != 0
         {
-            return Err(Error(format!("interleave shape in {out}")));
+            return Err(Error::invalid(format!("interleave shape in {out}")));
         }
         let sources: Vec<_> = parts
             .iter()
@@ -239,7 +242,7 @@ fn vector(file: &Checkpoint, name: &str) -> Result<Span> {
         });
     }
     if tensor.dtype != "F32" {
-        return Err(Error(format!("{name} is {}, not float32", tensor.dtype)));
+        return Err(Error::invalid(format!("{name} is {}, not float32", tensor.dtype)));
     }
     Ok(Span {
         device_offset: 0,

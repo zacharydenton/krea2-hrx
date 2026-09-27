@@ -118,7 +118,7 @@ impl PreparedKernels {
 /// without a device: naming a kernel takes a stream, resolving it does not.
 fn auxiliary_source(name: &str) -> Result<(&'static str, &'static str)> {
     sources::auxiliary_entry(name)
-        .ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))
+        .ok_or_else(|| Error::internal(format!("no auxiliary kernel named {name}")))
 }
 
 /// The export and configuration one auxiliary kernel compiles from.
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn an_unknown_kernel_is_named_in_the_error() {
         let error = auxiliary_source("no_such_kernel").unwrap_err();
-        assert_eq!(error.0, "no auxiliary kernel named no_such_kernel");
+        assert_eq!(error.to_string(), "no auxiliary kernel named no_such_kernel");
     }
 
     #[test]

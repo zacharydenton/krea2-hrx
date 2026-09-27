@@ -115,9 +115,9 @@ impl Weights {
             .plan
             .spans
             .get(name)
-            .ok_or_else(|| Error::failed(format!("missing tensor {name}")))?;
+            .ok_or_else(|| Error::internal(format!("missing tensor {name}")))?;
         if span.file_bytes() != bytes {
-            return Err(Error::failed(format!(
+            return Err(Error::internal(format!(
                 "tensor {name} has {} bytes, expected {bytes}",
                 span.file_bytes()
             )));

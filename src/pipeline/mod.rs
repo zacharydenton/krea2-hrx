@@ -22,41 +22,11 @@ use self::profile::Profile;
 
 pub use crate::kernels::Attention;
 pub use crate::models::{Files, hub};
+pub use crate::{Error, Result};
 
 /// The transformer's residual width, and the patch size in pixels.
 const WIDTH: usize = 6144;
 const PATCH: usize = 16;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(pub String);
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Error {}
-
-macro_rules! from_error {
-    ($($type:path),*) => {$(
-        impl From<$type> for Error {
-            fn from(error: $type) -> Self {
-                Error(error.to_string())
-            }
-        }
-    )*};
-}
-
-from_error!(
-    hrx::Error,
-    crate::kernels::Error,
-    crate::models::Error,
-    crate::ops::Error,
-    crate::session::Error
-);
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Called after each sampling step with the seconds spent so far. Returning
 /// false abandons the image.
@@ -207,25 +177,22 @@ impl Pipeline {
 
     /// The prompt's token ids, with no chat template.
     pub fn tokenize(&self, text: &str) -> Result<Vec<i32>> {
-        Ok(self.models.tokenizer.encode(text).map_err(crate::models::Error::from)?)
+        self.models.tokenizer.encode(text)
     }
 
     /// The conditioning tokens a prompt encodes to, without running the
     /// encoder: the template's 34-token prefix is not part of them.
     pub fn prompt_tokens(&self, prompt: &str) -> Result<usize> {
-        let ids = self.models.tokenizer.prompt(prompt).map_err(crate::models::Error::from)?;
+        let ids = self.models.tokenizer.prompt(prompt)?;
         Ok(ids.len() - 34)
     }
 
     /// A prompt encoded through Krea's template: float32 `[tokens][12][2560]`.
     pub fn encode(&self, prompt: &str) -> Result<(usize, Vec<f32>)> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
+        let mut state = self.state.lock().map_err(|_| Error::Poisoned("pipeline"))?;
         let State { stream, .. } = &mut *state;
         self.bridge.check()?;
-        let ids = self.models.tokenizer.prompt(prompt).map_err(crate::models::Error::from)?;
+        let ids = self.models.tokenizer.prompt(prompt)?;
         let taps = self.models.encode(stream, &ids)?;
         stream.synchronize()?;
         Ok((ids.len() - 34, downloaded(stream, &taps)?))
@@ -234,10 +201,7 @@ impl Pipeline {
     /// Latents to RGB8 HWC.
     pub fn decode(&self, latents: &[f32], width: usize, height: usize) -> Result<Vec<u8>> {
         dimensions(width, height)?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
+        let mut state = self.state.lock().map_err(|_| Error::Poisoned("pipeline"))?;
         let State { stream, .. } = &mut *state;
         self.bridge.check()?;
         let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
@@ -259,12 +223,9 @@ impl Pipeline {
     ) -> Result<Vec<f32>> {
         dimensions(width, height)?;
         if !(1..=512).contains(&text_tokens) || !(0.0..=1.0).contains(&timestep) {
-            return Err(Error("invalid transformer arguments".into()));
+            return Err(Error::invalid("invalid transformer arguments"));
         }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
+        let mut state = self.state.lock().map_err(|_| Error::Poisoned("pipeline"))?;
         let State { stream, weights, blocks } = &mut *state;
         self.bridge.check()?;
         let taps = self.upload(stream, text, text_tokens * 12, 2560)?;
@@ -291,13 +252,10 @@ impl Pipeline {
             || !guidance.is_finite()
             || !(0.0..=100.0).contains(&guidance)
         {
-            return Err(Error("invalid generation arguments".into()));
+            return Err(Error::invalid("invalid generation arguments"));
         }
         let image_tokens = width / PATCH * (height / PATCH);
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| Error("pipeline is poisoned; create a new pipeline".into()))?;
+        let mut state = self.state.lock().map_err(|_| Error::Poisoned("pipeline"))?;
         let State { stream, weights, blocks } = &mut *state;
         self.bridge.check()?;
         let began = std::time::Instant::now();
@@ -338,7 +296,7 @@ impl Pipeline {
             if let Some(progress) = progress.as_deref_mut() {
                 stream.synchronize()?;
                 if !progress(step + 1, steps, began.elapsed().as_secs_f64()) {
-                    return Err(Error("cancelled".into()));
+                    return Err(Error::Cancelled);
                 }
             }
         }
@@ -351,9 +309,9 @@ impl Pipeline {
 
     /// A prompt through the tokenizer, the encoder and the fusion tower.
     fn conditioning(&self, stream: &mut Stream, prompt: &str) -> Result<Tensor> {
-        let ids = self.models.tokenizer.prompt(prompt).map_err(crate::models::Error::from)?;
+        let ids = self.models.tokenizer.prompt(prompt)?;
         let taps = self.models.encode(stream, &ids)?;
-        Ok(self.models.text_fusion(stream, &taps)?)
+        self.models.text_fusion(stream, &taps)
     }
 
     /// What one step's forwards share: the timestep embedding, the image
@@ -432,9 +390,7 @@ impl Pipeline {
             let plan = session.into_prepared(&self.context, private, cos, sin)?;
             Blocks::new(&self.context, plan, shape.tokens())
         };
-        Ok(cache.get_or_prepare(shape, || {
-            build().map_err(|e| hrx::Error::Message(e.to_string()))
-        })?)
+        Ok(cache.get_or_prepare(shape, || build().map_err(hrx::Error::from))?)
     }
 
     /// Float32 in, bf16 on the device, refusing what bf16 cannot hold.
@@ -446,20 +402,20 @@ impl Pipeline {
         cols: usize,
     ) -> Result<Tensor> {
         if values.len() != rows * cols {
-            return Err(Error("wrong input buffer size".into()));
+            return Err(Error::invalid("wrong input buffer size"));
         }
         let mut bits = Vec::with_capacity(values.len());
         for &value in values {
             if !value.is_finite() {
-                return Err(Error("nonfinite input".into()));
+                return Err(Error::invalid("nonfinite input"));
             }
             let rounded = from_f32(value);
             if !to_f32(rounded).is_finite() {
-                return Err(Error("input exceeds bf16 range".into()));
+                return Err(Error::invalid("input exceeds bf16 range"));
             }
             bits.push(rounded);
         }
-        Ok(Tensor::from_slice(self.models.ops.pool(), stream, &bits, rows, cols)?)
+        Tensor::from_slice(self.models.ops.pool(), stream, &bits, rows, cols)
     }
 }
 
@@ -511,7 +467,7 @@ fn dimensions(width: usize, height: usize) -> Result<()> {
         || !width.is_multiple_of(PATCH)
         || !height.is_multiple_of(PATCH)
     {
-        return Err(Error("dimensions must be multiples of 16 in 64..2048".into()));
+        return Err(Error::invalid("dimensions must be multiples of 16 in 64..2048"));
     }
     Ok(())
 }
@@ -576,7 +532,7 @@ mod tests {
         assert!(dimensions(1024, 1024).is_ok());
         for (width, height) in [(1020, 1024), (1024, 2064), (32, 64), (64, 63)] {
             let error = dimensions(width, height).unwrap_err();
-            assert!(error.0.contains("multiples of 16"), "{width}x{height}: {error}");
+            assert!(error.to_string().contains("multiples of 16"), "{width}x{height}: {error}");
         }
     }
 }

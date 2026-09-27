@@ -11,32 +11,8 @@ use hrx::{Buffer, BufferPool, Stream, View};
 
 pub use crate::kernels::Config;
 
+pub use crate::{Error, Result};
 pub use tensor::Tensor;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(pub String);
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<hrx::Error> for Error {
-    fn from(error: hrx::Error) -> Self {
-        Error(error.to_string())
-    }
-}
-
-impl From<crate::kernels::Error> for Error {
-    fn from(error: crate::kernels::Error) -> Self {
-        Error(error.to_string())
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Which pointwise function [`Ops::unary`] applies.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -126,7 +102,7 @@ impl Weight {
 
     /// The bf16 values, as a kernel binding.
     pub fn values(&self) -> Result<View<'_>> {
-        self.storage.try_slice(self.offset, self.count * 2).map_err(|e| Error(e.to_string()))
+        self.storage.try_slice(self.offset, self.count * 2).map_err(Error::from)
     }
 
     /// The same, for values written in `layout`.
@@ -148,7 +124,7 @@ impl Weight {
     /// The scales as float32, upcast once if the file did not keep them so.
     pub fn f32_values(&self, stream: &mut Stream) -> Result<View<'_>> {
         if let Some((buffer, offset)) = &self.given {
-            return buffer.try_slice(*offset, self.count * 4).map_err(|e| Error(e.to_string()));
+            return buffer.try_slice(*offset, self.count * 4).map_err(Error::from);
         }
         if let Some(buffer) = self.upcast.get() {
             return Ok(buffer.binding());
@@ -205,10 +181,10 @@ impl Ops {
         w: &Weight,
         bias: Option<View<'_>>,
     ) -> Result<Tensor> {
-        let n = *w.shape.first().ok_or_else(|| Error("linear dimensions".into()))?;
+        let n = *w.shape.first().ok_or_else(|| Error::invalid("linear dimensions"))?;
         let k = x.cols();
         if n < 1 || x.rows() < 1 || x.cols() < 1 || w.count != n * k {
-            return Err(Error("linear dimensions".into()));
+            return Err(Error::invalid("linear dimensions"));
         }
         check_bias(bias, n)?;
         let y = self.tensor(stream, x.rows(), n)?;
@@ -239,7 +215,7 @@ impl Ops {
         eps: f32,
     ) -> Result<Tensor> {
         if w.count != x.cols() {
-            return Err(Error("norm dimensions".into()));
+            return Err(Error::invalid("norm dimensions"));
         }
         let scales = w.f32_values(stream)?;
         let y = self.tensor(stream, x.rows(), x.cols())?;
@@ -267,7 +243,7 @@ impl Ops {
     /// VAE L2 normalization and SiLU in one pass, preserving its bf16 boundaries.
     pub fn norm_silu(&self, stream: &mut Stream, x: &Tensor, w: &Weight) -> Result<Tensor> {
         if w.count != x.cols() {
-            return Err(Error("normalization dimensions".into()));
+            return Err(Error::invalid("normalization dimensions"));
         }
         if x.cols() > 1024 {
             let normed = self.norm(stream, x, w, Norm::Group, 1e-5)?;
@@ -325,7 +301,7 @@ impl Ops {
         op: Binary,
     ) -> Result<Tensor> {
         if y.size() == 0 || !x.size().is_multiple_of(y.size()) {
-            return Err(Error("binary broadcast".into()));
+            return Err(Error::invalid("binary broadcast"));
         }
         let z = self.tensor(stream, x.rows(), x.cols())?;
         let scalars = Scalars::new().index(x.size());
@@ -365,7 +341,7 @@ impl Ops {
             || !theta.is_finite()
             || theta <= 0.0
         {
-            return Err(Error("split-half rotary dimensions".into()));
+            return Err(Error::invalid("split-half rotary dimensions"));
         }
         let y = self.tensor(stream, x.rows(), x.cols())?;
         let scalars = Scalars::new().index(x.size()).float(theta);
@@ -395,7 +371,7 @@ impl Ops {
         delta: f32,
     ) -> Result<()> {
         if sample.rows() != velocity.rows() || sample.cols() != velocity.cols() {
-            return Err(Error("scheduler tensor dimensions".into()));
+            return Err(Error::invalid("scheduler tensor dimensions"));
         }
         let scalars = Scalars::new().index(sample.size()).float(delta);
         let bindings = [sample.binding()?, velocity.binding()?];
@@ -423,7 +399,7 @@ impl Ops {
         scale: f32,
     ) -> Result<()> {
         if cond.rows() != uncond.rows() || cond.cols() != uncond.cols() {
-            return Err(Error("guidance tensor dimensions".into()));
+            return Err(Error::invalid("guidance tensor dimensions"));
         }
         let scalars = Scalars::new().index(cond.size()).float(scale);
         let bindings = [cond.binding()?, uncond.binding()?];
@@ -470,7 +446,7 @@ impl Ops {
             || k.size() != batch * tokens * kv * dim
             || v.size() != k.size()
         {
-            return Err(Error("attention dimensions".into()));
+            return Err(Error::invalid("attention dimensions"));
         }
         let rows = batch * heads * tokens;
         let packed = [q, k, v]
@@ -597,7 +573,7 @@ impl Ops {
             || width == 0
             || x.rows() != height * width
         {
-            return Err(Error("convolution dimensions".into()));
+            return Err(Error::invalid("convolution dimensions"));
         }
         let kernel = w.shape[2];
         if kernel == 1 {
@@ -606,7 +582,7 @@ impl Ops {
         // The values decide the path, because only they know their order.
         if w.layout() == Layout::ChannelsLast {
             if kernel != 3 {
-                return Err(Error("only a 3x3 is packed channels-last".into()));
+                return Err(Error::invalid("only a 3x3 is packed channels-last"));
             }
             return self.conv3x3(stream, x, height, width, w, bias);
         }
@@ -650,7 +626,7 @@ impl Ops {
     ) -> Result<Tensor> {
         let (m, n, k) = (height * width, w.shape[0], x.cols() * 9);
         if w.count != n * k {
-            return Err(Error("convolution dimensions".into()));
+            return Err(Error::invalid("convolution dimensions"));
         }
         check_bias(bias, n)?;
         let y = self.tensor(stream, m, n)?;
@@ -698,7 +674,7 @@ impl Ops {
         width: usize,
     ) -> Result<Tensor> {
         if height == 0 || width == 0 || height * width != x.rows() {
-            return Err(Error("upsampling dimensions".into()));
+            return Err(Error::invalid("upsampling dimensions"));
         }
         let y = self.tensor(stream, height * width * 4, x.cols())?;
         let scalars = Scalars::new().index(y.size());
@@ -742,7 +718,7 @@ impl Ops {
         // is a host bug, so say so here rather than launch a different shape.
         let compiled = kernel.info().workgroup_size;
         if compiled != [threads, 1, 1] {
-            return Err(Error(format!(
+            return Err(Error::internal(format!(
                 "{name}: compiled for workgroup {compiled:?} but the host asked for {threads}"
             )));
         }
@@ -754,8 +730,7 @@ impl Ops {
                 &constants,
                 bindings,
             )
-        }
-        .map_err(|e| Error(e.to_string()))?;
+        }?;
         Ok(())
     }
 
@@ -849,7 +824,7 @@ fn tile(base: &'static str, m: usize, n: usize, k: usize) -> Tile {
 /// bounds check of their own, so a shorter view would be read past its end.
 fn check_bias(bias: Option<View<'_>>, n: usize) -> Result<()> {
     match bias {
-        Some(bias) if bias.len() != n * 2 => Err(Error(format!(
+        Some(bias) if bias.len() != n * 2 => Err(Error::invalid(format!(
             "bias spans {} bytes, expected {} for {n} bf16 columns",
             bias.len(),
             n * 2

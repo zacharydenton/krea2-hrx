@@ -65,7 +65,7 @@ impl Tensor {
     ) -> Result<Tensor> {
         let wanted = bytes(rows, cols)?;
         if base.checked_add(wanted).is_none_or(|end| end > buffer.bytes()) {
-            return Err(Error("a view outside its allocation".into()));
+            return Err(Error::invalid("a view outside its allocation"));
         }
         Ok(Tensor {
             rows,
@@ -91,7 +91,7 @@ impl Tensor {
         cols: usize,
     ) -> Result<Tensor> {
         if values.len() != rows * cols {
-            return Err(Error("upload size".into()));
+            return Err(Error::invalid("upload size"));
         }
         let tensor = Tensor::new(pool, stream, rows, cols)?;
         tensor.upload(stream, values)?;
@@ -102,7 +102,7 @@ impl Tensor {
     /// any later dispatch on the same stream without draining it.
     pub fn upload(&self, stream: &mut Stream, values: &[u16]) -> Result<()> {
         if values.len() != self.size() {
-            return Err(Error("upload size".into()));
+            return Err(Error::invalid("upload size"));
         }
         stream.upload(self.binding()?, bytemuck::cast_slice(values))?;
         Ok(())
@@ -120,10 +120,7 @@ impl Tensor {
 
     /// This tensor's span, as a kernel binding.
     pub fn binding(&self) -> Result<View<'_>> {
-        self.storage
-            .buffer()
-            .try_slice(self.at(), self.size() * 2)
-            .map_err(|e| Error(e.to_string()))
+        self.storage.buffer().try_slice(self.at(), self.size() * 2).map_err(Error::from)
     }
 
     /// A window of `rows * cols` elements, `skip` elements into this tensor.
@@ -132,9 +129,9 @@ impl Tensor {
         let offset = skip
             .checked_mul(2)
             .and_then(|skipped| self.offset.checked_add(skipped))
-            .ok_or_else(|| Error("tensor view".into()))?;
+            .ok_or_else(|| Error::invalid("tensor view"))?;
         if skip.checked_add(wanted).is_none_or(|end| end > self.size()) {
-            return Err(Error("tensor view".into()));
+            return Err(Error::invalid("tensor view"));
         }
         Ok(Tensor { rows, cols, storage: self.storage.clone(), offset })
     }
@@ -154,14 +151,14 @@ impl Tensor {
 /// A shape's element count, refusing an empty or unrepresentable one.
 fn elements(rows: usize, cols: usize) -> Result<usize> {
     match rows.checked_mul(cols) {
-        Some(0) | None => Err(Error("tensor shape".into())),
+        Some(0) | None => Err(Error::invalid("tensor shape")),
         Some(count) => Ok(count),
     }
 }
 
 /// Checked byte count, including the two bytes per bf16 element.
 fn bytes(rows: usize, cols: usize) -> Result<usize> {
-    elements(rows, cols)?.checked_mul(2).ok_or_else(|| Error("tensor shape".into()))
+    elements(rows, cols)?.checked_mul(2).ok_or_else(|| Error::invalid("tensor shape"))
 }
 
 #[cfg(test)]
@@ -245,7 +242,7 @@ mod tests {
         let Err(error) = Tensor::new(&pool, &second, 16, 16) else {
             panic!("a second stream must not be handed the recycled block");
         };
-        assert!(error.0.contains("serves one stream"), "{}", error.0);
+        assert!(error.to_string().contains("serves one stream"), "{}", error.to_string());
         // The stream it does serve is unaffected.
         assert!(Tensor::new(&pool, &first, 16, 16).is_ok());
     }

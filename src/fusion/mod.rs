@@ -58,7 +58,7 @@ impl Fusion {
         x: &Tensor,
         w: &Weight,
         bias: Option<hrx::View<'_>>,
-    ) -> crate::ops::Result<Option<Tensor>> {
+    ) -> crate::Result<Option<Tensor>> {
         #[cfg(feature = "npu")]
         capture(stream, x, w, bias)?;
         if self.backend != FusionBackend::Npu {
@@ -67,11 +67,11 @@ impl Fusion {
         #[cfg(not(feature = "npu"))]
         {
             let _ = (stream, ops, x, w, bias);
-            Err(crate::ops::Error(self.reason()))
+            Err(crate::Error::invalid(self.reason()))
         }
         #[cfg(feature = "npu")]
         {
-            use crate::ops::{Error, Layout};
+            use crate::{Error, ops::Layout};
             let shape = npu::Shape {
                 m: x.rows(),
                 k: x.cols(),
@@ -83,12 +83,14 @@ impl Fusion {
                 || w.count != shape.n * shape.k
                 || bias.is_some_and(|b| b.len() != shape.n * 2)
             {
-                return Err(Error("native fusion requires row-major BF16 [M,K], [N,K] weights and optional [N] bias".into()));
+                return Err(Error::invalid(
+                    "native fusion requires row-major BF16 [M,K], [N,K] weights and optional [N] bias",
+                ));
             }
             // Model weights and bias are immutable for the lifetime of this Fusion.
             // Hold the lock across execution to prevent concurrent activation writes.
             let mut cached =
-                self.cached.lock().map_err(|_| Error("native fusion cache poisoned".into()))?;
+                self.cached.lock().map_err(|_| Error::Poisoned("native fusion cache"))?;
             let weight_identity = identity(w.values()?);
             let bias_identity = bias.map(identity);
             let reusable = cached.as_ref().is_some_and(|c| {
@@ -142,8 +144,8 @@ fn capture(
     x: &Tensor,
     w: &Weight,
     bias: Option<hrx::View<'_>>,
-) -> crate::ops::Result<()> {
-    use crate::ops::Error;
+) -> crate::Result<()> {
+    use crate::Error;
     let Some(root) = std::env::var_os("KREA2_FUSION_CAPTURE") else {
         return Ok(());
     };
@@ -187,7 +189,7 @@ fn capture(
             }
         }
     })();
-    result.map_err(|e| Error(format!("fusion input capture: {e:#}")))
+    result.map_err(|e| Error::internal(format!("fusion input capture: {e:#}")))
 }
 
 #[cfg(test)]

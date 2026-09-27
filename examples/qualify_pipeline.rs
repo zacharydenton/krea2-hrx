@@ -92,7 +92,10 @@ fn main() -> Result<()> {
         "warm native graphs or copy streams grew"
     );
     let cancelled = pipeline.generate(&request, Some(&mut |_, _, _| false));
-    ensure!(cancelled.is_err_and(|e| e.0 == "cancelled"), "cancellation not observed");
+    ensure!(
+        cancelled.is_err_and(|e| matches!(e, krea2::Error::Cancelled)),
+        "cancellation not observed"
+    );
     ensure!(pipeline.generate(&request, None)? == rgb, "retry after cancellation changed");
     eprintln!(
         "warm tracked bytes: {}; allocations: {}; cancellation/retry matched",

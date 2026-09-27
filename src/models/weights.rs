@@ -68,7 +68,9 @@ impl Weights {
                 "F8_E4M3" => {
                     let scale = file.get(&format!("{key}_scale"))?;
                     if scale.dtype != "F32" || scale.bytes.len() != 4 {
-                        return Err(Error(format!("unsupported float8 scale for {key}")));
+                        return Err(Error::invalid(format!(
+                            "unsupported float8 scale for {key}"
+                        )));
                     }
                     (
                         count * 2,
@@ -76,7 +78,7 @@ impl Weights {
                     )
                 }
                 other => {
-                    return Err(Error(format!(
+                    return Err(Error::invalid(format!(
                         "unsupported tensor dtype {other} for {key} in {}",
                         file.path().display()
                     )));
@@ -89,7 +91,7 @@ impl Weights {
             };
             let elements: usize = file_shape.iter().product();
             if tensor.bytes.len() != elements * element_bytes {
-                return Err(Error(format!("tensor size mismatch for {key}")));
+                return Err(Error::invalid(format!("tensor size mismatch for {key}")));
             }
             items.push(Item {
                 name,
@@ -106,7 +108,7 @@ impl Weights {
             total += bytes.div_ceil(256) * 256;
         }
         if items.is_empty() {
-            return Err(Error("the checkpoint has none of the tensors this needs".into()));
+            return Err(Error::invalid("the checkpoint has none of the tensors this needs"));
         }
 
         let storage = Arc::new(stream.allocate(total)?);
@@ -164,7 +166,7 @@ impl Weights {
     }
 
     pub fn get(&self, name: &str) -> Result<&Weight> {
-        self.values.get(name).ok_or_else(|| Error(format!("missing tensor {name}")))
+        self.values.get(name).ok_or_else(|| Error::invalid(format!("missing tensor {name}")))
     }
 
     pub fn has(&self, name: &str) -> bool {

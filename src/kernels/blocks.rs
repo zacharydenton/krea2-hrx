@@ -41,7 +41,7 @@ impl Attention {
             Err(_) | Ok("" | "16") => Ok(Attention::F16),
             Ok("8") => Ok(Attention::I8),
             Ok("4") => Ok(Attention::I4),
-            Ok(_) => Err(Error("KREA2_ATTN_QK must be 4, 8 or 16".into())),
+            Ok(_) => Err(Error::invalid("KREA2_ATTN_QK must be 4, 8 or 16")),
         }
     }
 }
@@ -60,7 +60,7 @@ pub struct Shape {
 impl Shape {
     pub fn new(tokens: usize, attention: Attention) -> Result<Shape> {
         if !shape::TOKENS.contains(&tokens) {
-            return Err(Error(format!(
+            return Err(Error::invalid(format!(
                 "tokens must be {}..{}",
                 shape::TOKENS.start(),
                 shape::TOKENS.end()
@@ -205,7 +205,7 @@ pub fn prepare_for_target(
 /// One kernel's embedded source and the specialization that selects it.
 fn specialization(job: &Job) -> Result<(&'static str, hrx::loom::Specialization)> {
     let source = sources::block(job.source)
-        .ok_or_else(|| Error(format!("no embedded kernel source: {}", job.source)))?;
+        .ok_or_else(|| Error::internal(format!("no embedded kernel source: {}", job.source)))?;
     let mut request = hrx::loom::Specialization::new(format!("krea2_{}", job.source));
     request.replace_config(
         job.config
@@ -256,7 +256,10 @@ mod tests {
     #[test]
     fn a_sequence_the_kernels_cannot_serve_is_named() {
         assert!(
-            Shape::new(15, Attention::F16).unwrap_err().0.contains("tokens must be 16..16896")
+            Shape::new(15, Attention::F16)
+                .unwrap_err()
+                .to_string()
+                .contains("tokens must be 16..16896")
         );
         assert!(Shape::new(16897, Attention::F16).is_err());
     }

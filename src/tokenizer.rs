@@ -3,6 +3,8 @@
 //! this module adds templating, truncation and an input-byte limit.
 use tokenizers::Tokenizer as Inner;
 
+pub use crate::{Error, Result};
+
 /// Embedded Qwen tokenizer configuration; see `assets/README.md` for attribution.
 pub const EMBEDDED: &[u8] = include_bytes!("../assets/tokenizer.json");
 
@@ -20,19 +22,6 @@ const SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n";
 /// assistant turn is appended.
 const MAX_TEMPLATED: usize = 541;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(pub String);
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
 pub struct Tokenizer(Inner);
 
 impl Tokenizer {
@@ -44,12 +33,13 @@ impl Tokenizer {
     pub fn from_bytes(json: &[u8]) -> Result<Tokenizer> {
         Inner::from_bytes(json)
             .map(Tokenizer)
-            .map_err(|e| Error(format!("cannot read the tokenizer: {e}")))
+            .map_err(|e| Error::invalid(format!("cannot read the tokenizer: {e}")))
     }
 
     pub fn from_file(path: &std::path::Path) -> Result<Tokenizer> {
-        let json = std::fs::read(path)
-            .map_err(|e| Error(format!("cannot read tokenizer: {}: {e}", path.display())))?;
+        let json = std::fs::read(path).map_err(|e| {
+            Error::invalid(format!("cannot read tokenizer: {}: {e}", path.display()))
+        })?;
         Self::from_bytes(&json)
     }
 
@@ -57,10 +47,12 @@ impl Tokenizer {
     /// special tokens written out in the text itself are still recognized.
     pub fn encode(&self, text: &str) -> Result<Vec<i32>> {
         if text.len() > MAX_BYTES {
-            return Err(Error(format!("prompt exceeds {MAX_BYTES} UTF-8 bytes")));
+            return Err(Error::invalid(format!("prompt exceeds {MAX_BYTES} UTF-8 bytes")));
         }
-        let encoding =
-            self.0.encode(text, false).map_err(|e| Error(format!("cannot tokenize: {e}")))?;
+        let encoding = self
+            .0
+            .encode(text, false)
+            .map_err(|e| Error::invalid(format!("cannot tokenize: {e}")))?;
         Ok(encoding.get_ids().iter().map(|&id| id as i32).collect())
     }
 
@@ -68,7 +60,7 @@ impl Tokenizer {
     /// the model was given.
     pub fn decode(&self, ids: &[i32]) -> Result<String> {
         let ids: Vec<u32> = ids.iter().map(|&id| id as u32).collect();
-        self.0.decode(&ids, false).map_err(|e| Error(format!("cannot decode: {e}")))
+        self.0.decode(&ids, false).map_err(|e| Error::invalid(format!("cannot decode: {e}")))
     }
 
     /// The prompt under Krea's chat template, truncated as the model expects.
@@ -134,7 +126,7 @@ mod tests {
     #[test]
     fn text_beyond_the_byte_limit_is_refused() {
         let error = tokenizer().encode(&"x".repeat(MAX_BYTES + 1)).unwrap_err();
-        assert_eq!(error.0, "prompt exceeds 65536 UTF-8 bytes");
+        assert_eq!(error.to_string(), "prompt exceeds 65536 UTF-8 bytes");
     }
 
     #[test]

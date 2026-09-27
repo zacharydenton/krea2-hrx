@@ -58,17 +58,17 @@ fn an_incomplete_checkpoint_and_invalid_dimensions_are_refused_before_the_gpu() 
     );
     for _ in 0..3 {
         let error = refused(Session::validate(&path, 16, 1), "an incomplete checkpoint");
-        assert!(error.message.contains("missing tensor"), "{error}");
+        assert!(error.to_string().contains("missing tensor"), "{error}");
     }
 
     for (tokens, layers) in [(0, 1), (15, 1), (16897, 1), (16, 0), (16, 29), (usize::MAX, 1)] {
         let error = refused(Session::validate(&path, tokens, layers), "invalid dimensions");
-        assert!(error.invalid_argument, "{tokens}/{layers}: {error}");
+        assert!(error.is_invalid_argument(), "{tokens}/{layers}: {error}");
     }
 
     // A path that is not a checkpoint at all.
     let error = refused(Session::validate(&root, 16, 1), "a directory");
-    assert!(error.message.contains(".safetensors"), "{error}");
+    assert!(error.to_string().contains(".safetensors"), "{error}");
 
     assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");
     std::fs::remove_dir_all(root).ok();
@@ -111,7 +111,7 @@ fn the_interleaved_gate_and_up_rows_are_validated_before_any_allocation() {
         let error = refused(Session::validate(&path, 16, 1), "a malformed operand");
         let wanted =
             if zero_rows { "invalid weight shape" } else { "scale count in blocks.0.mlp.up" };
-        assert!(error.message.contains(wanted), "{zero_rows}: {error}");
+        assert!(error.to_string().contains(wanted), "{zero_rows}: {error}");
     }
 
     assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");

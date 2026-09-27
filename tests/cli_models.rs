@@ -110,14 +110,17 @@ fn model_resolution_is_pinned_and_independent_of_cached_precision() {
         assert!(files.tokenizer.is_none(), "use the embedded tokenizer");
         std::fs::remove_file(&encoder).unwrap();
         let error = request.clone().resolve().unwrap_err();
-        assert!(error.0.contains("text_encoders/qwen3vl_4b_bf16.safetensors"), "{error}");
+        assert!(
+            error.to_string().contains("text_encoders/qwen3vl_4b_bf16.safetensors"),
+            "{error}"
+        );
         let explicit = request.clone().text_encoder(Some(&fp8)).resolve().unwrap();
         assert_eq!(explicit.text_encoder, fp8);
         std::fs::write(encoder, b"").unwrap();
         std::fs::remove_file(vae).unwrap();
         let error = request.resolve().unwrap_err();
-        assert!(error.0.contains("vae/qwen_image_vae.safetensors"), "{error}");
-        assert!(error.0.contains("is not in the Hugging Face cache"), "{error}");
+        assert!(error.to_string().contains("vae/qwen_image_vae.safetensors"), "{error}");
+        assert!(error.to_string().contains("is not in the Hugging Face cache"), "{error}");
         return;
     }
     // A subprocess isolates HF's cached client and environment from other tests.

@@ -97,7 +97,7 @@ impl Pipeline {
             || image.cols() != WIDTH
             || blocks.residual.desc().bytes() != text_bytes + image_bytes
         {
-            return Err(Error("block input dimensions".into()));
+            return Err(Error::internal("block input dimensions"));
         }
         let output = self.models.ops.tensor(stream, image.rows(), WIDTH)?;
         // Native producers use their private stream. Drain before handing those
@@ -165,7 +165,7 @@ fn binding(tensor: &DeviceTensor) -> BufferView {
 
 /// A native tensor's view, with its error in the runtime's terms.
 fn native(tensor: &Tensor) -> hrx::Result<hrx::View<'_>> {
-    tensor.binding().map_err(|e| hrx::Error::Message(e.to_string()))
+    tensor.binding().map_err(hrx::Error::from)
 }
 
 #[cfg(test)]

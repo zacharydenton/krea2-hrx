@@ -80,7 +80,7 @@ impl Models {
     /// `y = x wᵀ + bias`, for a layer named by its prefix.
     fn lin(&self, stream: &Stream, x: &Tensor, w: &Weights, prefix: &str) -> Result<Tensor> {
         let (weight, bias) = linear_layer(w, prefix)?;
-        Ok(self.ops.linear(stream, x, weight, bias)?)
+        self.ops.linear(stream, x, weight, bias)
     }
 
     /// Qwen3-VL's 35 layers, returning the 12 layer taps the fusion consumes.
@@ -89,14 +89,14 @@ impl Models {
     /// the conditioning, so the taps start after it.
     pub fn encode(&self, stream: &mut Stream, ids: &[i32]) -> Result<Tensor> {
         if !(35..=546).contains(&ids.len()) {
-            return Err(Error("text token count must be 35..546".into()));
+            return Err(Error::invalid("text token count must be 35..546"));
         }
         let embedding = self.text.get("embed_tokens.weight")?;
         if embedding.shape.len() != 2 || embedding.shape[1] != TEXT_WIDTH {
-            return Err(Error("embedding dimensions".into()));
+            return Err(Error::invalid("embedding dimensions"));
         }
         if ids.iter().any(|&id| id < 0 || id as usize >= embedding.shape[0]) {
-            return Err(Error("token id out of range".into()));
+            return Err(Error::invalid("token id out of range"));
         }
         let (count, tokens) = (ids.len(), ids.len() - 34);
         let mut x = self.ops.tensor(stream, count, TEXT_WIDTH)?;
@@ -282,12 +282,12 @@ impl Models {
             None => self.ops.linear(stream, &normed, weight, bias)?,
         };
         let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
-        Ok(self.ops.binary(
+        self.ops.binary(
             stream,
             &y,
             &self.lin(stream, &mixed, w, &format!("{prefix}.mlp.down"))?,
             Binary::Add,
-        )?)
+        )
     }
 
     /// The 12 layer taps into one conditioning sequence.
@@ -298,7 +298,7 @@ impl Models {
         let projector = self.transformer.get("txtfusion.projector.weight")?;
         if !taps.rows().is_multiple_of(12) || taps.cols() != TEXT_WIDTH || projector.count != 12
         {
-            return Err(Error("text fusion dimensions".into()));
+            return Err(Error::invalid("text fusion dimensions"));
         }
         let tokens = taps.rows() / 12;
         let mut x = taps.clone();
@@ -391,7 +391,7 @@ impl Models {
     /// float32 buffer the block session reads.
     pub fn modulation(&self, stream: &Stream, vector: &Tensor) -> Result<PooledBuffer> {
         if vector.size() != 6 * WIDTH {
-            return Err(Error("modulation dimensions".into()));
+            return Err(Error::invalid("modulation dimensions"));
         }
         let out = self.ops.pool().acquire(stream, MODULATION_ELEMENTS * 4)?;
         let args_scalars = Scalars::new().index(MODULATION_ELEMENTS);
@@ -414,7 +414,7 @@ impl Models {
     /// The final norm, its modulation, and the projection back to latents.
     pub fn last(&self, stream: &mut Stream, x: &Tensor, embedding: &Tensor) -> Result<Tensor> {
         if embedding.size() != WIDTH || x.cols() != WIDTH {
-            return Err(Error("final layer dimensions".into()));
+            return Err(Error::invalid("final layer dimensions"));
         }
         let table = self.transformer.get("last.modulation.lin")?.tensor(2, WIDTH)?;
         // The scale and the shift share one embedding, so it goes in twice.
@@ -457,7 +457,7 @@ impl Models {
         for index in 0..28 {
             let table = self.transformer.get(&format!("blocks.{index}.mod.lin"))?;
             if table.count != 6 * WIDTH {
-                return Err(Error("block modulation dimensions".into()));
+                return Err(Error::invalid("block modulation dimensions"));
             }
             let bytes = table.count * 2;
             let destination =
@@ -486,7 +486,7 @@ impl Models {
         let y =
             self.ops.norm_silu(stream, &y, self.vae.get(&format!("{prefix}.norm2.gamma"))?)?;
         let y = self.conv(stream, &y, height, width, &format!("{prefix}.conv2"))?;
-        Ok(self.ops.binary(stream, &y, &skip, Binary::Add)?)
+        self.ops.binary(stream, &y, &skip, Binary::Add)
     }
 
     fn conv(
@@ -499,7 +499,7 @@ impl Models {
     ) -> Result<Tensor> {
         let bias = self.vae.get(&format!("{prefix}.bias"))?.values()?;
         let weight = self.vae.get(&format!("{prefix}.weight"))?;
-        Ok(self.ops.conv(stream, x, height, width, weight, Some(bias))?)
+        self.ops.conv(stream, x, height, width, weight, Some(bias))
     }
 
     /// One tile of latents to RGB, at eight times the resolution.
@@ -663,7 +663,7 @@ fn unpack(packed: &[u16], h: usize, w: usize) -> Result<Vec<u16>> {
         || !w.is_multiple_of(2)
         || packed.len() != h * w * 16
     {
-        return Err(Error("latent dimensions".into()));
+        return Err(Error::invalid("latent dimensions"));
     }
     // The reference divides by a reciprocal it has already rounded, so the
     // rounding happens there and not on the scale itself.
@@ -734,7 +734,7 @@ fn compose(
                     for channel in 0..3 {
                         let sample = to_f32(tile.data[(y * tile.width + x) * 3 + channel]);
                         if !sample.is_finite() {
-                            return Err(Error("the VAE produced a nonfinite sample".into()));
+                            return Err(Error::internal("the VAE produced a nonfinite sample"));
                         }
                         let value = (sample * 0.5 + 0.5).clamp(0.0, 1.0);
                         let index =

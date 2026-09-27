@@ -16,7 +16,7 @@ pub fn file(name: &str, offline: bool) -> Result<PathBuf> {
     Resolver::new(Repository::new(REPO.0, REPO.1).at(REVISION))
         .offline(offline)
         .resolve(&HubFile::new(name))
-        .map_err(|error| Error(error.to_string()))
+        .map_err(Error::from)
 }
 
 #[cfg(test)]
@@ -26,6 +26,6 @@ mod tests {
     #[test]
     fn a_cache_miss_offline_is_an_error_and_not_a_download() {
         let error = file("diffusion_models/not-a-real-file.safetensors", true).unwrap_err();
-        assert!(error.0.contains("downloading is off"), "{error}");
+        assert!(error.to_string().contains("downloading is off"), "{error}");
     }
 }

@@ -26,9 +26,9 @@ impl Kernels {
         let load = |stem: &str, symbol: &str| {
             let artifact = bundle
                 .artifact(stem)
-                .ok_or_else(|| Error::invalid(format!("missing prepared kernel: {stem}")))?;
+                .ok_or_else(|| Error::internal(format!("missing prepared kernel: {stem}")))?;
             if artifact.symbol() != symbol {
-                return Err(Error::invalid(format!("unexpected export for {stem}")));
+                return Err(Error::internal(format!("unexpected export for {stem}")));
             }
             // Safety: prepare compiles the embedded model sources for this shape.
             unsafe { stream.load_artifact(artifact) }.map_err(Error::from)

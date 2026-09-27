@@ -9,6 +9,7 @@
 //! the VAE; [`pipeline`] turns a prompt into pixels.
 
 pub mod checkpoint;
+mod error;
 pub mod fusion;
 pub mod kernels;
 pub mod models;
@@ -17,3 +18,5 @@ pub mod ops;
 pub mod pipeline;
 pub mod session;
 pub mod tokenizer;
+
+pub use error::{Error, Result};

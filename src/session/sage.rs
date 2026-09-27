@@ -355,7 +355,7 @@ impl Sage {
     fn check(&self, plan: &Plan, kernel: &hrx::Kernel) -> Result<()> {
         let compiled = kernel.info().workgroup_size;
         if compiled != [plan.threads, 1, 1] {
-            return Err(Error::failed(format!(
+            return Err(Error::internal(format!(
                 "{}: compiled for workgroup {compiled:?} but the host asked for {}",
                 plan.name, plan.threads
             )));
@@ -470,7 +470,7 @@ mod tests {
             let Err(error) = dimensions(tokens, capacity, heads, kv, bits) else {
                 panic!("{why} was accepted");
             };
-            assert!(error.message.contains("unsupported Sage dimensions"), "{why}");
+            assert!(error.to_string().contains("unsupported Sage dimensions"), "{why}");
         }
         assert!(dimensions(4115, 4160, 48, 12, 4).is_ok(), "the session's own shape");
     }

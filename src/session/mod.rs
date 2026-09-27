@@ -27,6 +27,8 @@ pub use bundle::Kernels;
 pub use sage::Sage;
 pub use weights::Weights;
 
+pub use crate::{Error, Result};
+
 /// The model's shape, fixed by the checkpoint.
 pub const HIDDEN: i32 = 6144;
 pub const KV_HEADS: i32 = 12;
@@ -37,54 +39,6 @@ pub const QKVG: i32 = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN;
 /// Where the attention gate's rows start inside that operand.
 pub const GATE_OFFSET: i32 = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 const THREADS: u32 = 256;
-
-/// A failure, and whether the caller could have prevented it. Callers use the
-/// flag to separate their own mistakes from a genuine runtime failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error {
-    pub message: String,
-    pub invalid_argument: bool,
-}
-
-impl Error {
-    pub fn invalid(message: impl Into<String>) -> Error {
-        Error { message: message.into(), invalid_argument: true }
-    }
-
-    pub fn failed(message: impl Into<String>) -> Error {
-        Error { message: message.into(), invalid_argument: false }
-    }
-}
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<hrx::Error> for Error {
-    fn from(error: hrx::Error) -> Self {
-        Error::failed(error.to_string())
-    }
-}
-
-impl From<crate::kernels::Error> for Error {
-    fn from(error: crate::kernels::Error) -> Self {
-        Error::failed(error.to_string())
-    }
-}
-
-impl From<crate::checkpoint::Error> for Error {
-    fn from(error: crate::checkpoint::Error) -> Self {
-        // The checkpoint reader's rejections are all about the file the caller
-        // named, so they read as invalid arguments.
-        Error::invalid(error.to_string())
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// FNV-1a fingerprint of all RoPE table bytes for upload caching.
 fn fingerprint(values: &[f32]) -> u64 {
@@ -263,7 +217,7 @@ impl Session {
                     stream.copy(views[2], views[0])?;
                     session
                         .run_device(&mut stream, views[2], views[1], &cos, &sin)
-                        .map_err(|error| hrx::Error::Message(error.to_string()))?;
+                        .map_err(hrx::Error::from)?;
                     stream.synchronize()
                 })?;
             }
@@ -451,7 +405,7 @@ impl Session {
         let constants = scalars.pack(stage, kernel)?;
         let compiled = kernel.info().workgroup_size;
         if compiled != [threads, 1, 1] {
-            return Err(Error::failed(format!(
+            return Err(Error::internal(format!(
                 "{stage}: compiled for workgroup {compiled:?} but the host asked for {threads}"
             )));
         }
@@ -1014,7 +968,7 @@ mod tests {
             let error = session
                 .run_device(&mut other, x.binding(), table.binding(), &cos, &sin)
                 .expect_err("stream affinity");
-            assert!(error.invalid_argument);
+            assert!(error.is_invalid_argument());
             other.synchronize().unwrap();
             let mut actual = vec![0u16; start.len()];
             stream

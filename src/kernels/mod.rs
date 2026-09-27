@@ -11,34 +11,9 @@ pub mod sources;
 
 use hrx::{Constants, Kernel};
 
+pub use crate::{Error, Result};
 pub use blocks::{Attention, PreparedBundle, Shape, prepare_for_target};
 pub use cache::{PreparedKernels, compiler};
-
-/// Anything the compiler, the cache or the runtime rejects.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Error(pub String);
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for Error {}
-
-impl From<hrx::Error> for Error {
-    fn from(error: hrx::Error) -> Self {
-        Error(error.to_string())
-    }
-}
-
-impl From<String> for Error {
-    fn from(message: String) -> Self {
-        Error(message)
-    }
-}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Named kernel configuration values, sorted for stable cache serialization.
 /// The names are the kernels' own `config` spellings, so they are literals.
@@ -135,19 +110,22 @@ impl Scalars {
             Some(rest) if self.index_count > 0 && rest % self.index_count == 0 => {
                 rest / self.index_count
             }
-            _ => return Err(Error(format!("{name}: cannot fit scalars in {declared} bytes"))),
+            _ => {
+                return Err(Error::internal(format!(
+                    "{name}: cannot fit scalars in {declared} bytes"
+                )));
+            }
         };
         let mut constants = Constants::new();
         for index in &self.indices[..self.index_count] {
             match width {
                 4 => constants.push(*index as u32),
                 8 => constants.push(*index),
-                _ => return Err(Error(format!("{name}: odd index width {width}"))),
-            }
-            .map_err(|e| Error(e.to_string()))?;
+                _ => return Err(Error::internal(format!("{name}: odd index width {width}"))),
+            }?;
         }
         for value in &self.floats[..self.float_count] {
-            constants.push(*value).map_err(|e| Error(e.to_string()))?;
+            constants.push(*value)?;
         }
         Ok(constants)
     }

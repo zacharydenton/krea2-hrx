@@ -70,9 +70,9 @@ impl<'a> Request<'a> {
                 Ok(true)
             }
             Some("krea2_raw_int8_convrot" | "krea2_raw_int8_convrot.safetensors") => Ok(false),
-            _ => {
-                Err(Error("custom checkpoints require an explicit Turbo or Raw sampler".into()))
-            }
+            _ => Err(Error::invalid(
+                "custom checkpoints require an explicit Turbo or Raw sampler",
+            )),
         }
     }
 
@@ -98,12 +98,11 @@ impl<'a> Request<'a> {
     /// The checkpoint as a path in the repository: a bare name is a diffusion
     /// model, and a name given without one gets the extension.
     fn repository_name(&self) -> Result<String> {
-        let name = self
-            .checkpoint
-            .to_str()
-            .ok_or_else(|| Error(format!("{} is not a name", self.checkpoint.display())))?;
+        let name = self.checkpoint.to_str().ok_or_else(|| {
+            Error::invalid(format!("{} is not a name", self.checkpoint.display()))
+        })?;
         if name.is_empty() || name.contains('/') || name.contains("..") {
-            return Err(Error(format!("cannot read {name}")));
+            return Err(Error::invalid(format!("cannot read {name}")));
         }
         let name = match name.ends_with(".safetensors") {
             true => name.to_string(),
@@ -163,7 +162,7 @@ mod tests {
         for path in [absolute.as_path(), Path::new("./missing.safetensors")] {
             let error =
                 Files::of(path).distilled(Some(true)).offline(true).resolve().unwrap_err();
-            assert!(error.0.contains("cannot read"), "{error}");
+            assert!(error.to_string().contains("cannot read"), "{error}");
         }
     }
 }

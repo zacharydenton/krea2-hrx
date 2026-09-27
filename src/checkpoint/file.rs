@@ -18,14 +18,14 @@ pub struct Tensor<'a> {
 
 impl Tensor<'_> {
     pub fn rows(&self) -> Result<usize> {
-        self.shape.first().copied().ok_or_else(|| Error("a tensor with no shape".into()))
+        self.shape.first().copied().ok_or_else(|| Error::invalid("a tensor with no shape"))
     }
 
     /// Bytes per row, for the two-dimensional weight tensors.
     pub fn row_bytes(&self) -> Result<usize> {
         let rows = self.rows()?;
         if rows == 0 || !self.bytes.len().is_multiple_of(rows) {
-            return Err(Error("tensor size is not a whole number of rows".into()));
+            return Err(Error::invalid("tensor size is not a whole number of rows"));
         }
         Ok(self.bytes.len() / rows)
     }
@@ -95,7 +95,7 @@ impl Checkpoint {
     /// Maps a `.safetensors` file and indexes it.
     pub fn open(path: &Path) -> Result<Checkpoint> {
         if path.extension().is_none_or(|e| e != "safetensors") {
-            return Err(Error(format!(
+            return Err(Error::invalid(format!(
                 "{} is not a ComfyUI checkpoint (.safetensors)",
                 path.display()
             )));
@@ -103,8 +103,9 @@ impl Checkpoint {
         // Safety: model checkpoints are opened read-only and must remain immutable
         // and untruncated while the session retains their mapping.
         #[allow(unsafe_code)]
-        let file = unsafe { FileView::map(path) }
-            .map_err(|error| Error(format!("cannot read {}: {error}", path.display())))?;
+        let file = unsafe { FileView::map(path) }.map_err(|error| {
+            Error::invalid(format!("cannot read {}: {error}", path.display()))
+        })?;
         let entries = file
             .entries()
             .iter()
@@ -133,16 +134,12 @@ impl Checkpoint {
 
     pub fn get(&self, name: &str) -> Result<Tensor<'_>> {
         let entry = self.entries.get(name).ok_or_else(|| {
-            Error(format!("missing tensor {name} in {}", self.path.display()))
+            Error::invalid(format!("missing tensor {name} in {}", self.path.display()))
         })?;
         Ok(Tensor {
             dtype: entry.dtype,
             shape: &entry.shape,
-            bytes: self
-                .file
-                .get(&entry.original)
-                .map_err(|error| Error(error.to_string()))?
-                .bytes,
+            bytes: self.file.get(&entry.original)?.bytes,
         })
     }
 
@@ -174,7 +171,10 @@ mod tests {
     #[test]
     fn a_file_that_is_not_safetensors_is_refused_by_name() {
         let error = Checkpoint::open(Path::new("/models/krea2.bin")).unwrap_err();
-        assert!(error.0.contains("not a ComfyUI checkpoint (.safetensors)"), "{error}");
+        assert!(
+            error.to_string().contains("not a ComfyUI checkpoint (.safetensors)"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
         bytes[..8].copy_from_slice(&u64::MAX.to_le_bytes());
         std::fs::write(&path, bytes).expect("rewriting the fixture");
         let error = Checkpoint::open(&path).unwrap_err();
-        assert!(error.0.starts_with("cannot read "), "{error}");
+        assert!(error.to_string().starts_with("cannot read "), "{error}");
         std::fs::remove_file(path).ok();
     }
 
@@ -193,7 +193,7 @@ mod tests {
         let header = r#"{"w":{"dtype":"I8","shape":[2,2],"data_offsets":[0,64]}}"#;
         let path = write("span.safetensors", header, &[0u8; 4]);
         let error = Checkpoint::open(&path).unwrap_err();
-        assert!(error.0.starts_with("cannot read "), "{error}");
+        assert!(error.to_string().starts_with("cannot read "), "{error}");
         std::fs::remove_file(path).ok();
     }
 
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(file.get("s").expect("s").dtype, "F32");
         assert!(!file.has("__metadata__"), "metadata is not a tensor");
         let error = file.get("missing").unwrap_err();
-        assert!(error.0.starts_with("missing tensor missing in "), "{error}");
+        assert!(error.to_string().starts_with("missing tensor missing in "), "{error}");
         std::fs::remove_file(path).ok();
     }
 
