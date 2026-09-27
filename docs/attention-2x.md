@@ -27,6 +27,11 @@ accumulator repack (`AMDGPU/041`); `tests/quantized.rs` records that
 rejection. The kernel stays in `experiments/` for investigation, and the host
 support is recoverable from Git.
 
+The V transpose has since returned for the query16 kernel on its own. It is
+worth 1.31× at 4115 tokens (see [native attention](native-attention.md)), so
+much of the speedup measured here came from the layout, not the second query
+tile.
+
 ## Requirements for reconsideration
 
 A candidate must pass synthetic and real-input attention checks, repeated

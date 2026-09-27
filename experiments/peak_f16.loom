@@ -1,0 +1,64 @@
+// Register-only fp16 WMMA throughput (f32 accumulation): the practical ceiling a GEMM is measured
+// against. Every wave keeps eight independent 16x16 accumulators and issues
+// eight WMMAs per iteration on constant operands; the loop touches no memory.
+amdgpu.target<gfx11-generic> @krea2_peak_f16_gfx11 {subgroup_size = 32}
+
+config.decl @krea2.peak_f16.iterations : %value: index where [range(%value, 1, 1073741824)]
+
+kernel.def target(@krea2_peak_f16_gfx11) export("krea2_peak_f16") @krea2_peak_f16(%workgroups: index) {
+  %c1 = index.constant 1 : index
+  %c256 = index.constant 256 : index
+  kernel.launch.config workgroups(%workgroups, %c1, %c1) workgroup_size(%c256, %c1, %c1) : index
+} launch(%workgroups: index, %out: buffer) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c0_offset = index.constant 0 : offset
+  %m = index.constant 16 : index
+  %n = index.constant 16 : index
+  %k = index.constant 16 : index
+  %iterations = config.get @krea2.peak_f16.iterations : index
+  %zero = vector.constant 0.0 : vector<8xf32>
+  %ones = vector.constant 1.0 : vector<16xf16>
+  %lhs = vector.fragment<lhs> %ones shape [%m, %k] : vector<16xf16>
+  %rhs = vector.fragment<rhs> %ones shape [%k, %n] : vector<16xf16>
+  %init = vector.fragment<init> %zero shape [%m, %n] : vector<8xf32>
+  %a0, %a1, %a2, %a3, %a4, %a5, %a6, %a7 = scf.for %i = [%c0 to %iterations step %c1](%r0 = %init : vector<8xf32>, %r1 = %init : vector<8xf32>, %r2 = %init : vector<8xf32>, %r3 = %init : vector<8xf32>, %r4 = %init : vector<8xf32>, %r5 = %init : vector<8xf32>, %r6 = %init : vector<8xf32>, %r7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+    %o0 = vector.mma %lhs, %rhs, %r0 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o1 = vector.mma %lhs, %rhs, %r1 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o2 = vector.mma %lhs, %rhs, %r2 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o3 = vector.mma %lhs, %rhs, %r3 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o4 = vector.mma %lhs, %rhs, %r4 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o5 = vector.mma %lhs, %rhs, %r5 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o6 = vector.mma %lhs, %rhs, %r6 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    %o7 = vector.mma %lhs, %rhs, %r7 : vector<16xf16>, vector<16xf16>, vector<8xf32>
+    scf.yield %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+  }
+  // The first wave of workgroup 0 publishes all eight accumulators, so none
+  // of the loop's chains is dead code.
+  %group = kernel.workgroup.id<x> : index
+  %subgroup = kernel.subgroup.id : index
+  %first_wave = index.cmp eq, %subgroup, %c0 : index
+  %first_group = index.cmp eq, %group, %c0 : index
+  %publish = scalar.andi %first_wave, %first_group : i1
+  scf.if %publish {
+    %out_global = buffer.assume.memory_space<global> %out : buffer
+    %out_view = buffer.view %out_global[%c0_offset] : buffer -> view<128x16xf32>
+    %row0 = index.constant 0 : index
+    vector.fragment.store<result> %a0, %out_view[%row0, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row1 = index.constant 16 : index
+    vector.fragment.store<result> %a1, %out_view[%row1, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row2 = index.constant 32 : index
+    vector.fragment.store<result> %a2, %out_view[%row2, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row3 = index.constant 48 : index
+    vector.fragment.store<result> %a3, %out_view[%row3, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row4 = index.constant 64 : index
+    vector.fragment.store<result> %a4, %out_view[%row4, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row5 = index.constant 80 : index
+    vector.fragment.store<result> %a5, %out_view[%row5, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row6 = index.constant 96 : index
+    vector.fragment.store<result> %a6, %out_view[%row6, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+    %row7 = index.constant 112 : index
+    vector.fragment.store<result> %a7, %out_view[%row7, %c0] shape [%m, %n] : vector<8xf32>, view<128x16xf32>
+  }
+  kernel.return
+}

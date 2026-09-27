@@ -26,6 +26,7 @@ use hrx::{Buffer, Stream, View};
 
 pub use bundle::Kernels;
 pub use sage::Sage;
+use sage::VTranspose;
 pub use weights::Weights;
 
 pub use crate::{Error, Result};
@@ -162,6 +163,9 @@ pub struct Session {
     /// The smoothed attention kernels' preparation pass, when the bundle was
     /// built with one (`KREA2_ATTN_QK` of 4 or 8).
     sage: Option<Sage>,
+    /// V transposed for the fp16 attention kernel; `None` beside `sage`,
+    /// which transposes V itself.
+    v_transposed: Option<VTranspose>,
     /// What the resident RoPE tables were last filled from. Changed tables are
     /// queued before their next use on this stream.
     rope: Cell<Option<(u64, u64)>>,
@@ -356,6 +360,12 @@ impl Session {
         for buffer in [&buffers.q, &buffers.k, &buffers.v, &buffers.fused, &buffers.x] {
             stream.fill(buffer.binding(), 0)?;
         }
+        let v_transposed = match shape.attention {
+            Attention::F16 => {
+                Some(VTranspose::new(stream, tokens, capacity, KV_HEADS, compiler)?)
+            }
+            _ => None,
+        };
         let sage = match shape.attention {
             Attention::F16 => None,
             smoothed => Some(Sage::new(
@@ -377,6 +387,7 @@ impl Session {
             blocks,
             buffers,
             sage,
+            v_transposed,
             graph: RefCell::new(None),
             rope: Cell::new(None),
             profile: AtomicBool::new(crate::kernels::native_profile()),
@@ -846,12 +857,24 @@ impl Session {
                     &attention,
                 )?;
             }
-            // fp16 QK and PV straight from the RoPE outputs, 16 query rows
-            // per workgroup.
+            // fp16 QK and PV from the RoPE outputs and V transposed, 16 query
+            // rows per workgroup.
             None => {
+                let transposed = self
+                    .v_transposed
+                    .as_ref()
+                    .ok_or_else(|| Error::internal("an fp16 session has no V transpose"))?;
+                let (kernel, (x, y)) = transposed.launch();
+                let scalars = Scalars::new().index(tokens);
+                let operands = [b.v.binding(), transposed.output.binding()];
+                self.launch(sink, kernel, "V transpose", x, y, 256, &scalars, &operands)?;
                 let attention_scalars = Scalars::new().index(tokens);
-                let attention =
-                    [b.q.binding(), b.k.binding(), b.v.binding(), b.attn_gu.binding()];
+                let attention = [
+                    b.q.binding(),
+                    b.k.binding(),
+                    transposed.output.binding(),
+                    b.attn_gu.binding(),
+                ];
                 self.launch(
                     sink,
                     &self.kernels.attention,

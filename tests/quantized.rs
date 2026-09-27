@@ -320,13 +320,16 @@ fn production_attention_tiles_match_grouped_cpu_softmax() {
             ("out_stride", heads * d),
         ]);
         config.push(("scale", (1. / (d as f64).sqrt()).to_string()));
+        // V goes in transposed, [kv * d][capacity], as `sage_transpose` writes it.
+        let v_transposed: Vec<f16> =
+            (0..kv * d * capacity).map(|i| v[(i % capacity) * kv * d + i / capacity]).collect();
         let out = h.run(
             stem,
             &config,
             [tokens.div_ceil(16) as u32, kv as u32, 1],
             128,
             &[tokens as u64, 0],
-            &[bytes(&q), bytes(&k), bytes(&v), vec![0; tokens * heads * d * 2]],
+            &[bytes(&q), bytes(&k), bytes(&v_transposed), vec![0; tokens * heads * d * 2]],
         );
         close(&halves(&out[3], false), &want, 2e-2, 2e-2);
     }

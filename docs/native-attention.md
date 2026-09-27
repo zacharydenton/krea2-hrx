@@ -24,6 +24,27 @@ The default kernel consumes V fragments in pairs to avoid VGPR spills. See the
 [register-pressure investigation](attention-spills.md) for disassembly findings,
 the Rust comparison tool, and measured kernel latency.
 
+Every mode reads V transposed, `[kv_heads × 128][capacity]`, written by
+`sage_transpose` after RoPE. The fp16 kernel stages each 16-key V tile with one
+32-byte load per lane from a V^T row. Reading natural `[tokens][kv_heads × 128]` V
+made each lane fetch 32 bytes from a different token row. That kernel held 43%
+of the register-only fp16 WMMA peak at 1–2k tokens, but fell to 37% at 4115
+and 19–22% past 6k, once a sequence's K and V left the cache. Byte-identical
+output, same-run device-clock medians on a shared GPU (`examples/attention.rs`):
+
+| Tokens | Natural V | V^T | Speedup incl. transpose |
+| ---: | ---: | ---: | ---: |
+| 1040 | 1.113 ms | 1.121 ms | 0.97× |
+| 1555 | 2.575 ms | 2.568 ms | 0.99× |
+| 4115 | 22.57 ms | 17.08 ms | 1.31× |
+| 6163 | 77.68 ms | 40.07 ms | 1.92× |
+| 9000 | 199.8 ms | 100.3 ms | 1.98× |
+
+The transpose takes 0.02 ms at 1040 tokens and 0.13 ms at 4115. XOR-swizzling
+the K tile instead of padding it raised occupancy but lost 4–7% below 2k
+tokens. Packing the V and Q tiles to reach the next LDS occupancy tier lost
+6–21%: the swizzles either conflicted or needed split loads and concatenation.
+
 ## Quality tradeoff
 
 On the fixed 1024×1024, seed-zero, eight-step W8A8 fixture, against the bf16

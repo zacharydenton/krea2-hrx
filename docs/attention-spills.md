@@ -48,9 +48,12 @@ Reproduce a comparison with an original source file and the current kernel:
 ```sh
 git show f5c7c82:kernels/attention_gqa_lds_f16_wmma.loom > before.loom
 cargo run --release --example attention -- \
-  4115 /tmp/attention-report before.loom \
+  4115 /tmp/attention-report natural:before.loom \
   kernels/attention_gqa_lds_f16_wmma.loom
 ```
+
+Kernels before the V^T layout (see [native attention](native-attention.md))
+take natural V and need the `natural:` prefix.
 
 The Rust example verifies exact output equality and writes each HSACO, compiler
 manifest, and diagnostic list. Inspect resources with `llvm-readelf --notes` and
