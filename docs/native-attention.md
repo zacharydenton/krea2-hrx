@@ -69,7 +69,10 @@ branch (`move_causes`: `branch_edge`, 171 units). The copies disappear when the
 rescale is removed. Spelling the multiply plainly or starting the accumulators
 from distinct values does not help. Carrying one `vector<64xf32>` is rejected
 because WMMA results cannot be concatenated (`concat.register_storage`), so
-the fix belongs in Loom's allocator. `unroll(2)` gains 4.7% at an even tile
+the fix belongs in Loom's allocator. hrx-rs compiler patch 0011 makes it:
+the back edge keeps 21 moves, and the kernel runs 1.007-1.073x faster from
+1040 to 9000 tokens (1.049x at 4115), byte-identical, once a native bundle
+ships the patch. `unroll(2)` gains 4.7% at an even tile
 count but loses 11–16% at an odd one. Splitting the QK chain gains 1.5% at
 most.
 
