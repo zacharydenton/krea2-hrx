@@ -138,7 +138,7 @@ kernel.def target(@krea2_norm_2_target) export("krea2_norm_2") @krea2_norm_2(%co
   %v69 = index.cast %cols : index to i32
   %v70 = scalar.sitofp %v69 : i32 to f32
   %v72 = scalar.sqrtf %v67 : f32
-  %v74 = scalar.maxnumf %v72, %v73 : f32
+  %v74 = scalar.maxnumf<nnan|nsz> %v72, %v73 : f32
   %v75 = scalar.divf %v71, %v74 : f32
   scf.for %v76 = [%lane to %cols step %v1] {
     %v77 = index.add %v4, %v76 : index

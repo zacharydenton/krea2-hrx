@@ -316,13 +316,13 @@ kernel.def target(@krea2_prepare_norm_i8_gfx11) export("krea2_prepare_norm_i8") 
     %a_i = index.assume %a_i0 [le(%a_i0, %width_last), mul(%a_i0, 8)] : index
     %a_x = vector.load %x_view[%a_i] : view<[%width]xf32> -> vector<8xf32>
     %a_abs = vector.absf %a_x : vector<8xf32>
-    %a_next = vector.maxnumf %a_acc, %a_abs : vector<8xf32>
+    %a_next = vector.maxnumf<nnan|nsz> %a_acc, %a_abs : vector<8xf32>
     scf.yield %a_next : vector<8xf32>
   }
   %amax = vector.reduce<maxnumf> %amax_v, %zero : vector<8xf32>, f32
   %row_max0 = kernel.workgroup.reduce<maxnumf> %amax : f32
   %row_max = scalar.mulf %row_max0, %rotation_scale : f32
-  %row_max_safe = scalar.maxnumf %row_max, %tiny : f32
+  %row_max_safe = scalar.maxnumf<nnan|nsz> %row_max, %tiny : f32
   %s = scalar.divf %row_max_safe, %seven : f32
   %inv_s = scalar.divf %rotation_scale, %s : f32
   %inv_s8 = vector.splat %inv_s : vector<8xf32>
@@ -335,8 +335,8 @@ kernel.def target(@krea2_prepare_norm_i8_gfx11) export("krea2_prepare_norm_i8") 
     %q_x = vector.load %x_view[%q_i] : view<[%width]xf32> -> vector<8xf32>
     %q_r = vector.mulf %q_x, %inv_s8 : vector<8xf32>
     %q_f = vector.roundevenf %q_r : vector<8xf32>
-    %q_c = vector.maxnumf %q_f, %neg_seven8 : vector<8xf32>
-    %q_d = vector.minnumf %q_c, %seven8 : vector<8xf32>
+    %q_c = vector.maxnumf<nnan|nsz> %q_f, %neg_seven8 : vector<8xf32>
+    %q_d = vector.minnumf<nnan|nsz> %q_c, %seven8 : vector<8xf32>
     %q_q = vector.fptosi %q_d : vector<8xf32> to vector<8xi32>
     %q_n = vector.andi %q_q, %fifteen8 : vector<8xi32>
     %q_e0 = vector.extract %q_n[0] : vector<8xi32> -> i32

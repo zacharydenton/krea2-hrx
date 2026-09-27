@@ -47,7 +47,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v12 = index.add %v4, %v9 : index
     %v13 = index.assume %v12 [range(%v12, 0, 1073741824), lt(%v12, %xsize)] : index
     %v14 = view.load %x_view[%v13] : view<[%xsize]xf32> -> f32
-    %v15 = scalar.maxnumf %v10, %v14 : f32
+    %v15 = scalar.maxnumf<nnan|nsz> %v10, %v14 : f32
     scf.yield %v15 : f32
   }
   %lds_bytes = index.constant 2048 : offset
@@ -62,7 +62,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v18 = index.add %lane, %v16 : index
     %v19 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v20 = view.load %max_buf[%v18] : view<256xf32> -> f32
-    %v21 = scalar.maxnumf %v19, %v20 : f32
+    %v21 = scalar.maxnumf<nnan|nsz> %v19, %v20 : f32
     view.store %v21, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -71,7 +71,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v24 = index.add %lane, %v22 : index
     %v25 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v26 = view.load %max_buf[%v24] : view<256xf32> -> f32
-    %v27 = scalar.maxnumf %v25, %v26 : f32
+    %v27 = scalar.maxnumf<nnan|nsz> %v25, %v26 : f32
     view.store %v27, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -80,7 +80,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v30 = index.add %lane, %v28 : index
     %v31 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v32 = view.load %max_buf[%v30] : view<256xf32> -> f32
-    %v33 = scalar.maxnumf %v31, %v32 : f32
+    %v33 = scalar.maxnumf<nnan|nsz> %v31, %v32 : f32
     view.store %v33, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -89,7 +89,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v36 = index.add %lane, %v34 : index
     %v37 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v38 = view.load %max_buf[%v36] : view<256xf32> -> f32
-    %v39 = scalar.maxnumf %v37, %v38 : f32
+    %v39 = scalar.maxnumf<nnan|nsz> %v37, %v38 : f32
     view.store %v39, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -98,7 +98,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v42 = index.add %lane, %v40 : index
     %v43 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v44 = view.load %max_buf[%v42] : view<256xf32> -> f32
-    %v45 = scalar.maxnumf %v43, %v44 : f32
+    %v45 = scalar.maxnumf<nnan|nsz> %v43, %v44 : f32
     view.store %v45, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -107,7 +107,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v48 = index.add %lane, %v46 : index
     %v49 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v50 = view.load %max_buf[%v48] : view<256xf32> -> f32
-    %v51 = scalar.maxnumf %v49, %v50 : f32
+    %v51 = scalar.maxnumf<nnan|nsz> %v49, %v50 : f32
     view.store %v51, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -116,7 +116,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v54 = index.add %lane, %v52 : index
     %v55 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v56 = view.load %max_buf[%v54] : view<256xf32> -> f32
-    %v57 = scalar.maxnumf %v55, %v56 : f32
+    %v57 = scalar.maxnumf<nnan|nsz> %v55, %v56 : f32
     view.store %v57, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -125,7 +125,7 @@ kernel.def target(@krea2_softmax_causal_target) export("krea2_softmax_causal") @
     %v59 = index.add %lane, %v6 : index
     %v60 = view.load %max_buf[%lane] : view<256xf32> -> f32
     %v61 = view.load %max_buf[%v59] : view<256xf32> -> f32
-    %v62 = scalar.maxnumf %v60, %v61 : f32
+    %v62 = scalar.maxnumf<nnan|nsz> %v60, %v61 : f32
     view.store %v62, %max_buf[%lane] : f32, view<256xf32>
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)

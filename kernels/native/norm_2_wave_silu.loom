@@ -188,7 +188,7 @@ kernel.def target(@krea2_norm_2_wave_silu_target) export("krea2_norm_2_wave_silu
     %v159 = scalar.addf %v155, %v156 : f32
     %v160, %v161 = kernel.subgroup.shuffle<index> %v159, %v162, %v142 : f32, i32, i32
     %v164 = scalar.sqrtf %v160 : f32
-    %v166 = scalar.maxnumf %v164, %v165 : f32
+    %v166 = scalar.maxnumf<nnan|nsz> %v164, %v165 : f32
     %v167 = scalar.divf %v163, %v166 : f32
     %v168 = index.cast %cols : index to i32
     %v169 = scalar.sitofp %v168 : i32 to f32

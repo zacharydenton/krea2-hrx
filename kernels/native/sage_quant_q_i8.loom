@@ -105,7 +105,7 @@ kernel.def target(@krea2_sage_quant_q_i8_target) export("krea2_sage_quant_q_i8")
       scf.yield %v11 : f32
     }
     %v35 = scalar.absf %v17 : f32
-    %v36 = scalar.maxnumf %v11, %v35 : f32
+    %v36 = scalar.maxnumf<nnan|nsz> %v11, %v35 : f32
     %v37 = index.mul %v5, %v12 : index
     %v39 = index.add %v37, %v38 : index
     %v40 = index.cmp ult, %v9, %tokens : index
@@ -130,7 +130,7 @@ kernel.def target(@krea2_sage_quant_q_i8_target) export("krea2_sage_quant_q_i8")
       scf.yield %v11 : f32
     }
     %v57 = scalar.absf %v41 : f32
-    %v58 = scalar.maxnumf %v36, %v57 : f32
+    %v58 = scalar.maxnumf<nnan|nsz> %v36, %v57 : f32
     %v59 = index.mul %v5, %v12 : index
     %v61 = index.add %v59, %v60 : index
     %v62 = index.cmp ult, %v9, %tokens : index
@@ -155,7 +155,7 @@ kernel.def target(@krea2_sage_quant_q_i8_target) export("krea2_sage_quant_q_i8")
       scf.yield %v11 : f32
     }
     %v79 = scalar.absf %v63 : f32
-    %v80 = scalar.maxnumf %v58, %v79 : f32
+    %v80 = scalar.maxnumf<nnan|nsz> %v58, %v79 : f32
     %v81 = index.mul %v5, %v12 : index
     %v83 = index.add %v81, %v82 : index
     %v84 = index.cmp ult, %v9, %tokens : index
@@ -180,18 +180,18 @@ kernel.def target(@krea2_sage_quant_q_i8_target) export("krea2_sage_quant_q_i8")
       scf.yield %v11 : f32
     }
     %v101 = scalar.absf %v85 : f32
-    %v102 = scalar.maxnumf %v80, %v101 : f32
+    %v102 = scalar.maxnumf<nnan|nsz> %v80, %v101 : f32
     %v103, %v104 = kernel.subgroup.shuffle<xor> %v102, %v105, %v106 : f32, i32, i32
-    %v107 = scalar.maxnumf %v102, %v103 : f32
+    %v107 = scalar.maxnumf<nnan|nsz> %v102, %v103 : f32
     %v108, %v109 = kernel.subgroup.shuffle<xor> %v107, %v110, %v106 : f32, i32, i32
-    %v111 = scalar.maxnumf %v107, %v108 : f32
+    %v111 = scalar.maxnumf<nnan|nsz> %v107, %v108 : f32
     %v112, %v113 = kernel.subgroup.shuffle<xor> %v111, %v114, %v106 : f32, i32, i32
-    %v115 = scalar.maxnumf %v111, %v112 : f32
+    %v115 = scalar.maxnumf<nnan|nsz> %v111, %v112 : f32
     %v116, %v117 = kernel.subgroup.shuffle<xor> %v115, %v118, %v106 : f32, i32, i32
-    %v119 = scalar.maxnumf %v115, %v116 : f32
+    %v119 = scalar.maxnumf<nnan|nsz> %v115, %v116 : f32
     %v120, %v121 = kernel.subgroup.shuffle<xor> %v119, %v122, %v106 : f32, i32, i32
-    %v123 = scalar.maxnumf %v119, %v120 : f32
-    %v125 = scalar.maxnumf %v123, %v124 : f32
+    %v123 = scalar.maxnumf<nnan|nsz> %v119, %v120 : f32
+    %v125 = scalar.maxnumf<nnan|nsz> %v123, %v124 : f32
     %v127 = scalar.divf %v125, %v126 : f32
     %v128 = index.cmp eq, %v5, %v14 : index
     scf.if %v128 {
@@ -202,32 +202,32 @@ kernel.def target(@krea2_sage_quant_q_i8_target) export("krea2_sage_quant_q_i8")
     }
     %v133 = scalar.divf %v17, %v127 : f32
     %v134 = scalar.roundevenf %v133 : f32
-    %v136 = scalar.maxnumf %v134, %v135 : f32
-    %v137 = scalar.minnumf %v136, %v126 : f32
+    %v136 = scalar.maxnumf<nnan|nsz> %v134, %v135 : f32
+    %v137 = scalar.minnumf<nnan|nsz> %v136, %v126 : f32
     %v138 = scalar.fptosi %v137 : f32 to i32
     %v140 = scalar.andi %v138, %v139 : i32
     %v141 = scalar.shli %v140, %v132 : i32
     %v142 = scalar.ori %v132, %v141 : i32
     %v143 = scalar.divf %v41, %v127 : f32
     %v144 = scalar.roundevenf %v143 : f32
-    %v145 = scalar.maxnumf %v144, %v135 : f32
-    %v146 = scalar.minnumf %v145, %v126 : f32
+    %v145 = scalar.maxnumf<nnan|nsz> %v144, %v135 : f32
+    %v146 = scalar.minnumf<nnan|nsz> %v145, %v126 : f32
     %v147 = scalar.fptosi %v146 : f32 to i32
     %v148 = scalar.andi %v147, %v139 : i32
     %v149 = scalar.shli %v148, %v110 : i32
     %v150 = scalar.ori %v142, %v149 : i32
     %v151 = scalar.divf %v63, %v127 : f32
     %v152 = scalar.roundevenf %v151 : f32
-    %v153 = scalar.maxnumf %v152, %v135 : f32
-    %v154 = scalar.minnumf %v153, %v126 : f32
+    %v153 = scalar.maxnumf<nnan|nsz> %v152, %v135 : f32
+    %v154 = scalar.minnumf<nnan|nsz> %v153, %v126 : f32
     %v155 = scalar.fptosi %v154 : f32 to i32
     %v156 = scalar.andi %v155, %v139 : i32
     %v157 = scalar.shli %v156, %v105 : i32
     %v158 = scalar.ori %v150, %v157 : i32
     %v159 = scalar.divf %v85, %v127 : f32
     %v160 = scalar.roundevenf %v159 : f32
-    %v161 = scalar.maxnumf %v160, %v135 : f32
-    %v162 = scalar.minnumf %v161, %v126 : f32
+    %v161 = scalar.maxnumf<nnan|nsz> %v160, %v135 : f32
+    %v162 = scalar.minnumf<nnan|nsz> %v161, %v126 : f32
     %v163 = scalar.fptosi %v162 : f32 to i32
     %v164 = scalar.andi %v163, %v139 : i32
     %v166 = scalar.shli %v164, %v165 : i32
