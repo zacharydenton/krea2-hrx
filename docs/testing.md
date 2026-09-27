@@ -245,6 +245,33 @@ eager torch, about two minutes per forward — and it needs the ComfyUI-format f
 rather than the diffusers repository, because `w8a8` reads the packed rows and
 `weight_scale` tensors that the diffusers export does not carry.
 
+### Int4 in the same harness
+
+`scripts/integer_scheme_study.py` asks whether any int4 (W4A4) scheme could replace
+W8A8, since the part's int4 WMMA runs at twice the int8 rate. It measures one
+forward the same way, from the bf16 checkpoint, with fake quantization: dequantized
+codes through a float matmul, which equals the integer GEMM up to f32 rounding.
+
+| All 28 blocks' linears | rel RMS |
+| --- | ---: |
+| W8A8, per-row scales (the scheme above, rebuilt from bf16) | 0.0135 |
+| W4A4, per-row scales | 0.1749 |
+| W4A4 plus a rank-32 bf16 low-rank branch (SVDQuant-style) | 0.1454 |
+| W4A4, group-64 scales along K | 0.0941 |
+| W4A4, group-64 scales plus the rank-32 branch | 0.0949 |
+
+| W4A4 group-64 on one layer kind, W8A8 elsewhere | share of a step | rel RMS |
+| --- | ---: | ---: |
+| qkvg | 16% | 0.0411 |
+| down | 25% | 0.0483 |
+| gate/up | 35% | 0.0646 |
+| wo | 7% | 0.0800 |
+
+The best full int4 scheme has seven times the error of W8A8, and moving even one
+layer kind to int4 triples it or worse. That matches the 18.9 dB image PSNR W4A4
+measured when the transformer last ran it, against 33.7 dB for W8A8. Int4 is not
+a route to speed at this quality bar.
+
 ## Reference-loader checks
 
 `python3 -m unittest discover -s tests -p 'test_*.py'` checks the reference
