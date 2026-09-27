@@ -109,10 +109,18 @@ impl After {
     }
 }
 
-/// A recording in progress and the dependencies of its next launch.
+/// A recording in progress, the dependencies of its next launch, and a label
+/// for every launch so far: a profiled graph reports one interval per launch.
 pub(crate) struct Recording<'g> {
     graph: hrx::Graph<'g>,
     last: After,
+    labels: Vec<&'static str>,
+}
+
+impl<'g> Recording<'g> {
+    fn new(stream: &'g Stream) -> Result<Recording<'g>> {
+        Ok(Recording { graph: stream.graph()?, last: After::None, labels: Vec::new() })
+    }
 }
 
 /// Where a block's launches go: straight to the stream, or into a recording.
@@ -157,11 +165,18 @@ pub struct Session {
     /// What the resident RoPE tables were last filled from. Changed tables are
     /// queued before their next use on this stream.
     rope: Cell<Option<(u64, u64)>>,
-    /// Synchronized wall-clock timing per kernel, from `KREA2_NATIVE_PROFILE`
-    /// when the session is built or [`Session::set_profile`] after. Profiled
-    /// forwards dispatch directly instead of replaying the recorded graph.
+    /// Per-kernel timing, from `KREA2_NATIVE_PROFILE` when the session is
+    /// built or [`Session::set_profile`] after. Profiled forwards replay a
+    /// graph with GPU-clock markers, or dispatch directly between host
+    /// synchronizations where the runtime has no device clock.
     profile: AtomicBool,
     stages: RefCell<Vec<(&'static str, f64)>>,
+    /// The block loop recorded with device-clock markers, and the stage of
+    /// each interval it reports. Built on the first profiled forward.
+    profiled: RefCell<Option<(hrx::GraphExec, Vec<&'static str>)>>,
+    /// Why device-clock profiling is unavailable, once it has been refused;
+    /// profiling then times each kernel between host synchronizations.
+    device_clock_refused: RefCell<Option<String>>,
     weights: Arc<Weights>,
 }
 
@@ -366,6 +381,8 @@ impl Session {
             rope: Cell::new(None),
             profile: AtomicBool::new(crate::kernels::native_profile()),
             stages: RefCell::new(Vec::new()),
+            profiled: RefCell::new(None),
+            device_clock_refused: RefCell::new(None),
             weights,
         })
     }
@@ -421,6 +438,7 @@ impl Session {
                         .graph
                         .dispatch(after, kernel, grid, compiled, &constants, bindings)
                 }?;
+                recording.labels.push(stage);
                 recording.last = After::One(node);
                 return Ok(());
             }
@@ -481,6 +499,30 @@ impl Session {
         Ok(())
     }
 
+    /// Appends `profile` as one JSON line to `KREA2_PROFILE_JSON`, when set:
+    /// the raw device intervals, for comparing kernel changes stage by stage.
+    fn export(&self, profile: &hrx::fabric::DeviceProfile) -> Result<()> {
+        use std::io::Write;
+        let Some(path) = std::env::var_os("KREA2_PROFILE_JSON") else {
+            return Ok(());
+        };
+        let record = serde_json::json!({
+            "tokens": self.tokens,
+            "layers": self.layers,
+            "attention": format!("{:?}", self.shape.attention),
+            "profile": profile,
+        });
+        let failed = |e: &dyn std::fmt::Display| {
+            Error::invalid(format!("KREA2_PROFILE_JSON {}: {e}", Path::new(&path).display()))
+        };
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| failed(&e))?;
+        writeln!(file, "{record}").map_err(|e| failed(&e))
+    }
+
     fn accumulate(&self, stage: &'static str, micros: f64) {
         let mut stages = self.stages.borrow_mut();
         match stages.iter_mut().find(|(name, _)| *name == stage) {
@@ -497,7 +539,11 @@ impl Session {
         let mut stages = self.stages.borrow_mut();
         let total: f64 = stages.iter().map(|(_, micros)| micros).sum();
         stages.sort_by(|a, b| b.1.total_cmp(&a.1));
-        eprintln!("stage profile over {blocks} block(s), {} tokens:", self.tokens);
+        let clock = match *self.device_clock_refused.borrow() {
+            None => "GPU clock, kernels serialized",
+            Some(_) => "host clock, synchronized per kernel",
+        };
+        eprintln!("stage profile over {blocks} block(s), {} tokens ({clock}):", self.tokens);
         for (stage, micros) in stages.iter() {
             eprintln!(
                 "  {stage:<24} {:9.3} ms  {:5.1}%",
@@ -607,10 +653,23 @@ impl Session {
     ///
     /// The loop is identical every forward -- same kernels, same buffers, same
     /// constants, same grids -- so it is recorded once per session and replayed
-    /// after. Profiling still dispatches directly: it synchronizes between
-    /// stages, which a replay cannot stop to do.
+    /// after. Profiling replays a second recording with device-clock markers
+    /// around each kernel. Where the runtime cannot provide those, it
+    /// dispatches directly and synchronizes around every kernel instead.
     fn blocks_through(&self, stream: &mut Stream) -> Result<()> {
         if self.profile.load(Ordering::Relaxed) {
+            if self.device_clock_refused.borrow().is_none() {
+                match self.profile_on_device(stream) {
+                    Err(Error::Runtime(hrx::Error::Unsupported(reason))) => {
+                        eprintln!(
+                            "stage profile: no device clock ({reason}); \
+                             timing each kernel between host synchronizations"
+                        );
+                        *self.device_clock_refused.borrow_mut() = Some(reason);
+                    }
+                    result => return result,
+                }
+            }
             for index in 0..self.layers {
                 self.block(&mut Sink::Stream(stream), index, self.buffers.mods.binding())?;
             }
@@ -627,12 +686,42 @@ impl Session {
 
     /// Every block, recorded once into a graph over the session's own buffers.
     fn record_graph(&self, stream: &Stream) -> Result<hrx::GraphExec> {
-        let mut recording = Recording { graph: stream.graph()?, last: After::None };
+        let recording = self.record_blocks(stream)?;
+        // `finish` ends the graph's borrow of this session and the stream.
+        Ok(recording.graph.finish()?)
+    }
+
+    fn record_blocks<'g>(&'g self, stream: &'g Stream) -> Result<Recording<'g>> {
+        let mut recording = Recording::new(stream)?;
         for index in 0..self.layers {
             self.block(&mut Sink::Record(&mut recording), index, self.buffers.mods.binding())?;
         }
-        // `finish` ends the graph's borrow of this session and the stream.
-        Ok(recording.graph.finish()?)
+        Ok(recording)
+    }
+
+    /// One replay of the block loop with a device-clock interval around every
+    /// kernel, added to the stage profile. The markers serialize the kernels,
+    /// so the times are per-kernel costs, not the unprofiled forward's latency.
+    fn profile_on_device(&self, stream: &mut Stream) -> Result<()> {
+        let mut profiled = self.profiled.borrow_mut();
+        let (graph, stages) = match &mut *profiled {
+            Some(recorded) => recorded,
+            None => {
+                let recording = self.record_blocks(stream)?;
+                let labels: Vec<String> = recording.labels.iter().map(|&s| s.into()).collect();
+                let stages = recording.labels.clone();
+                profiled.insert((recording.graph.finish_profiled(&labels)?, stages))
+            }
+        };
+        let profile = stream.launch_profiled(graph)?;
+        self.export(&profile)?;
+        let micros_per_tick = 1e6 / profile.frequency_hz as f64;
+        for (interval, &stage) in profile.intervals.iter().zip(stages.iter()) {
+            let ticks = interval.end_tick - interval.start_tick;
+            self.accumulate(stage, ticks as f64 * micros_per_tick);
+        }
+        self.accumulate("(idle between kernels)", profile.gaps_ms * 1e3);
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1024,7 +1113,7 @@ mod tests {
             expected.push(result);
         }
         let record = |independent| {
-            let mut recording = Recording { graph: stream.graph().unwrap(), last: After::None };
+            let mut recording = Recording::new(&stream).unwrap();
             for (index, session) in [&first, &second].into_iter().enumerate() {
                 if independent && index == 1 {
                     recording.last = After::None;

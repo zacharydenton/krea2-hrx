@@ -133,8 +133,9 @@ paths require `--checkpoint turbo` or `--checkpoint raw`; the two built-in model
 identifiers select their corresponding sampler. Filenames are never guessed.
 `krea2 --help` lists all options. Invalid arguments exit with code 2; model,
 runtime, and file I/O failures exit with code 1. `KREA2_NATIVE_PROFILE=1` prints
-synchronized stage timings and a per-kernel breakdown of the transformer blocks;
-the synchronization makes profiled runs slower, so do not time them.
+synchronized stage timings and a per-kernel breakdown of the transformer blocks,
+measured on the GPU clock where the runtime supports it; profiled runs are
+slower, so do not time them.
 
 ## Gallery
 

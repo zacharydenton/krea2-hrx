@@ -3,8 +3,23 @@
 Each session records its transformer blocks once and replays them through HRX.
 The session uses its creating stream and owns every recorded workspace buffer.
 External residual and modulation inputs are copied into those fixed buffers;
-RoPE contents are updated when their fingerprint changes. Profiling dispatches
-directly, including after a recording has been cached.
+RoPE contents are updated when their fingerprint changes.
+
+Profiling (`KREA2_NATIVE_PROFILE=1`) replays a second recording built with
+`Graph::finish_profiled`: HRX writes a GPU-clock timestamp before and after each
+kernel, and the session sums the intervals per stage over all 28 blocks, with
+the idle time between kernels as its own line. The markers add completion
+barriers, so kernels run one at a time: the numbers are per-kernel costs, not
+the latency of an unprofiled forward. Device timestamps need a native bridge
+that exports HRX's optional profiling ABI; without one the session says so once
+and falls back to synchronizing the host around each directly dispatched
+kernel, which also counts launch overhead.
+
+`KREA2_PROFILE_JSON=FILE` also appends each profiled forward to `FILE` as one
+JSON line: the sequence length, layer count, attention mode and HRX's raw
+`DeviceProfile` (labelled intervals in device ticks, the counter frequency,
+and the interval union, span and gaps). Compare two builds by their per-label
+sums rather than by the printed table, which is rounded.
 
 Replay has not demonstrated a consistent end-to-end speedup on gfx1151. It
 reduces host recording work, but native barriers, partitioning and GPU resource

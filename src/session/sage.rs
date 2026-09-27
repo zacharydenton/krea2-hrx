@@ -343,6 +343,7 @@ impl Sage {
                     operands,
                 )
             }?;
+            recording.labels.push(plan.name);
             nodes.push(node);
         }
         // Correction already depends on K quantization. These three nodes
@@ -401,8 +402,7 @@ mod tests {
         // Isolate 28 preparation passes. A real forward has other kernels
         // between them, which may lead to different native scheduling.
         let record = |table: &[&'static [usize]; 7]| {
-            let mut recording =
-                Recording { graph: stream.graph().expect("graph"), last: After::None };
+            let mut recording = Recording::new(&stream).expect("graph");
             for _ in 0..28 {
                 sage.run_after(
                     &mut Sink::Record(&mut recording),
