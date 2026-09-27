@@ -1,7 +1,9 @@
 [package]
 name = "krea2-hrx"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+# hrx-rs 0.8 requires 1.91.
+rust-version = "1.91"
 description = "Krea 2 image generation on AMD Strix Halo, powered by Loom kernels and HRX"
 readme = "README.md"
 repository = "https://github.com/zacharydenton/krea2-hrx"
@@ -17,6 +19,9 @@ name = "krea2"
 [[bin]]
 name = "krea2"
 path = "src/main.rs"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
 
 [profile.release]
 strip = true

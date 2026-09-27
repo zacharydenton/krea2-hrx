@@ -335,7 +335,7 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let pipeline = Pipeline::with_options(
         Files::of(&checkpoint).distilled(Some(true)).offline(true).resolve().unwrap(),
         None,
-        krea2::pipeline::PipelineOptions { fusion_backend: backend },
+        krea2::pipeline::PipelineOptions { fusion_backend: backend, ..Default::default() },
     )
     .unwrap();
     let evidence_path = std::env::var_os("KREA2_QUALITY_RESULT").map(PathBuf::from);
@@ -372,7 +372,9 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let accepted_rms = metrics(&accepted, &truth).1;
     let loss_db = 20.0 * (rms / accepted_rms).log10();
     let accepted_psnr = image_psnr(&accepted_rgb, &truth_rgb);
-    eprintln!("accepted: relative RMS {accepted_rms:.6}, PSNR {accepted_psnr:.6} dB, loss {loss_db:.6} dB");
+    eprintln!(
+        "accepted: relative RMS {accepted_rms:.6}, PSNR {accepted_psnr:.6} dB, loss {loss_db:.6} dB"
+    );
     if let Some(path) = evidence_path {
         assert!(!minting, "qualification cannot replace the accepted baseline");
         let request = krea2::pipeline::Request {

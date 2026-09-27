@@ -11,7 +11,6 @@
 //! replayed. Measurements have not established an end-to-end speedup. See
 //! [graph recording](https://github.com/zacharydenton/krea2-hrx/blob/master/docs/graph-recording.md)
 //! for the benchmark scope and replay constraints.
-#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod bundle;
 pub mod sage;
@@ -21,7 +20,7 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::kernels::{shape, Scalars, Shape};
+use crate::kernels::{Attention, Scalars, Shape, shape};
 use hrx::{Buffer, Stream, View};
 
 pub use bundle::Kernels;
@@ -213,10 +212,10 @@ impl Session {
         sin: Vec<f32>,
     ) -> Result<hrx::inference::PreparedModel> {
         use hrx::{
+            Access,
             execution::GpuAccess,
             inference::{InferenceGraph, PreparedModel},
             tensor::{DType, Layout, TensorDesc},
-            Access,
         };
         self.check_stream(&stream)?;
         if stream.device_id()
@@ -272,7 +271,8 @@ impl Session {
         })?)
     }
 
-    /// Load a checkpoint and prepare its kernel specializations through HRX.
+    /// Load a checkpoint and prepare its kernel specializations through HRX,
+    /// with the attention kernels [`Attention::from_environment`] selects.
     pub fn open(
         stream: &mut Stream,
         checkpoint: &Path,
@@ -281,7 +281,14 @@ impl Session {
     ) -> Result<Session> {
         let (file, plan) = Self::validate(checkpoint, tokens, layers)?;
         let weights = std::sync::Arc::new(Weights::upload(stream, &file, plan)?);
-        Self::with_weights(stream, weights, tokens, layers, None)
+        Self::with_weights(
+            stream,
+            weights,
+            tokens,
+            layers,
+            Attention::from_environment()?,
+            None,
+        )
     }
 
     /// Everything [`Session::open`] checks before it touches the device: the
@@ -304,10 +311,11 @@ impl Session {
         weights: std::sync::Arc<Weights>,
         tokens: usize,
         layers: usize,
+        attention: Attention,
         compiler: Option<&str>,
     ) -> Result<Session> {
         Self::validate_dimensions(tokens, layers)?;
-        let shape = Shape::from_environment(tokens)?;
+        let shape = Shape::new(tokens, attention)?;
         let bundle = crate::kernels::prepare_for_target(compiler, &shape, stream.target())?;
         Self::build(stream, weights, &bundle, tokens, layers, compiler)
     }
@@ -375,15 +383,15 @@ impl Session {
         for buffer in [&buffers.q, &buffers.k, &buffers.v, &buffers.fused, &buffers.x] {
             stream.fill(buffer.binding(), 0)?;
         }
-        let sage = match shape.attention_bits {
-            16 => None,
-            bits => Some(Sage::new(
+        let sage = match shape.attention {
+            Attention::F16 => None,
+            smoothed => Some(Sage::new(
                 stream,
                 tokens,
                 capacity,
                 (KV_HEADS * 4) as usize,
                 KV_HEADS as usize,
-                bits,
+                smoothed.bits(),
                 compiler,
             )?),
         };
@@ -1058,8 +1066,10 @@ mod tests {
         let (file, plan) = Session::validate(&checkpoint, tokens, 2).unwrap();
         let weights = std::sync::Arc::new(Weights::upload(&mut stream, &file, plan).unwrap());
         let first =
-            Session::with_weights(&mut stream, weights.clone(), tokens, 2, None).unwrap();
-        let second = Session::with_weights(&mut stream, weights, tokens, 2, None).unwrap();
+            Session::with_weights(&mut stream, weights.clone(), tokens, 2, attention(), None)
+                .unwrap();
+        let second =
+            Session::with_weights(&mut stream, weights, tokens, 2, attention(), None).unwrap();
         let mut starts = Vec::new();
         let mut expected = Vec::new();
         for (phase, session) in [&first, &second].into_iter().enumerate() {
@@ -1128,6 +1138,12 @@ mod tests {
             "{tokens} tokens, two sessions with two blocks each: serial {:.3} ms, independent {:.3} ms",
             samples[0][4], samples[1][4]
         );
+    }
+
+    /// The attention width under test: `KREA2_ATTN_QK`, so one run of these
+    /// tests covers each kernel family in turn.
+    fn attention() -> Attention {
+        Attention::from_environment().expect("KREA2_ATTN_QK must be 4, 8 or 16")
     }
 
     fn fixture() -> (std::path::PathBuf, usize) {

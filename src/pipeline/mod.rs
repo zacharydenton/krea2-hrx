@@ -1,7 +1,6 @@
 //! Krea 2 generation from prompts to RGB.
 //! Models remain resident across calls. Two recent block shapes are retained so
 //! guided generation can alternate conditioning lengths without rebuilding.
-#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod noise;
 pub mod profile;
@@ -15,13 +14,14 @@ use crate::models::Models;
 use crate::numerics::{from_f32, to_f32};
 use crate::ops::Tensor;
 use crate::session::{Session, Weights};
-use hrx::inference::ModelContext;
 use hrx::Stream;
-use shared::{native_stream, BlockCache, BlockShape, Blocks, Bridge};
+use hrx::inference::ModelContext;
+use shared::{BlockCache, BlockShape, Blocks, Bridge, native_stream};
 
 use self::profile::Profile;
 
-pub use crate::models::{hub, Files};
+pub use crate::kernels::Attention;
+pub use crate::models::{Files, hub};
 
 /// The transformer's residual width, and the patch size in pixels.
 const WIDTH: usize = 6144;
@@ -112,6 +112,7 @@ pub struct Pipeline {
     bridge: Arc<Bridge>,
     files: Files,
     compiler: Option<String>,
+    attention: Attention,
     models: Models,
     /// Calls are serialized: they share the models' buffer pool.
     state: Mutex<State>,
@@ -126,10 +127,14 @@ struct State {
     blocks: BlockCache,
 }
 
-/// Optional execution policy. Auto uses only saved, passing NPU qualifications.
+/// Optional execution policy.
 #[derive(Clone, Debug, Default)]
 pub struct PipelineOptions {
+    /// Backend for the first text-fusion up projection. `Auto` is the GPU.
     pub fusion_backend: crate::fusion::FusionBackend,
+    /// Attention kernels for every block session. `None` takes
+    /// [`Attention::from_environment`] when the pipeline opens.
+    pub attention: Option<Attention>,
 }
 
 impl Pipeline {
@@ -158,6 +163,10 @@ impl Pipeline {
     ) -> Result<Pipeline> {
         // The models allocate on the stream that will later dispatch them, which
         // then moves into the state lock.
+        let attention = match options.attention {
+            Some(attention) => attention,
+            None => Attention::from_environment()?,
+        };
         let mut stream = native_stream(context)?;
         let mut models = Models::open(&mut stream, &files, compiler)?;
         models.fusion.set_backend(options.fusion_backend);
@@ -167,6 +176,7 @@ impl Pipeline {
             models,
             files,
             compiler: compiler.map(str::to_string),
+            attention,
             state: Mutex::new(State {
                 stream,
                 weights: None,
@@ -415,6 +425,7 @@ impl Pipeline {
                 resident,
                 shape.tokens(),
                 28,
+                self.attention,
                 self.compiler.as_deref(),
             )?;
             let (cos, sin) = rope(shape);

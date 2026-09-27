@@ -7,7 +7,6 @@
 //! device tensors and the auxiliary operations; [`session`] runs the 28
 //! transformer blocks; [`models`] adds the text encoder, the outer graph and
 //! the VAE; [`pipeline`] turns a prompt into pixels.
-#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod checkpoint;
 pub mod fusion;

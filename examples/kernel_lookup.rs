@@ -1,7 +1,7 @@
 //! Warm source-based HRX lookups versus Krea's caller-key index into HRX.
 //! cargo run --release --example kernel_lookup
 use hrx::loom::{Kernels, Specialization};
-use krea2::kernels::{cache::compiler_for_target, config, sources, PreparedKernels};
+use krea2::kernels::{PreparedKernels, cache::compiler_for_target, config, sources};
 use std::hint::black_box;
 use std::time::Instant;
 

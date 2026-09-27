@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::checkpoint::Checkpoint;
 use crate::kernels::Scalars;
 use crate::numerics::{from_f32, to_f32};
-use crate::ops::{config, Binary, Config, Norm, Ops, Tensor, Unary, Weight};
+use crate::ops::{Binary, Config, Norm, Ops, Tensor, Unary, Weight, config};
 use crate::tokenizer::Tokenizer;
 use hrx::{BufferPool, PooledBuffer, Stream, View};
 

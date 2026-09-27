@@ -64,11 +64,7 @@ fn halves(v: &[u8], bf: bool) -> Vec<f64> {
         .iter()
         .map(|b| {
             let n = u16::from_le_bytes(*b);
-            if bf {
-                bf16::from_bits(n).to_f64()
-            } else {
-                f16::from_bits(n).to_f64()
-            }
+            if bf { bf16::from_bits(n).to_f64() } else { f16::from_bits(n).to_f64() }
         })
         .collect()
 }
@@ -256,7 +252,7 @@ fn production_attention_has_no_scratch_spills() {
     let stem = "attention_gqa_lds_f16_wmma";
     let source = krea2::kernels::sources::block(stem).unwrap();
     for tokens in [1043usize, 4115, 9235, 16403] {
-        let shape = krea2::kernels::Shape::new(tokens, 16).unwrap();
+        let shape = krea2::kernels::Shape::new(tokens, krea2::kernels::Attention::F16).unwrap();
         let mut request = hrx::loom::Specialization::new(format!("krea2_{stem}"));
         for (key, value) in [
             ("q_stride", 6144),
@@ -456,9 +452,11 @@ fn quantized_preparation_matches_the_kronecker_hadamard_and_preserves_padding() 
                 assert!((code - want).abs() <= 1, "{kind}: {code} vs {want}");
                 mismatches += usize::from(code != want);
             }
-            assert!(out[qindex][t * row_bytes + width..(t + 1) * row_bytes]
-                .iter()
-                .all(|&v| v == 0xa5));
+            assert!(
+                out[qindex][t * row_bytes + width..(t + 1) * row_bytes]
+                    .iter()
+                    .all(|&v| v == 0xa5)
+            );
         }
         assert!(
             mismatches as f64 / ((tokens * width) as f64) < 0.02,

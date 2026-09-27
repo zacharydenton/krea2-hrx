@@ -12,11 +12,7 @@ pub const TOKENS: std::ops::RangeInclusive<usize> = 16..=16896;
 pub const fn capacity(tokens: usize) -> usize {
     let tiles = (tokens + 16).div_ceil(32) * 32;
     let blocks = tokens.div_ceil(64) * 64;
-    if tiles > blocks {
-        tiles
-    } else {
-        blocks
-    }
+    if tiles > blocks { tiles } else { blocks }
 }
 
 /// Workgroup tile rows of the int8 (W8A8) GEMMs. The family exists only on the
@@ -34,11 +30,7 @@ pub const GEMM_M_GROUP: usize = 4;
 /// 16384) from 61 to 77 TOPS. Rows of 6144 bytes showed no such effect, so they
 /// stay dense.
 pub const fn gemm_pitch(k: usize) -> usize {
-    if k.is_multiple_of(8192) {
-        k + 64
-    } else {
-        k
-    }
+    if k.is_multiple_of(8192) { k + 64 } else { k }
 }
 
 /// Launch grid rows for `tokens` rows of activations.

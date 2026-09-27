@@ -79,7 +79,7 @@ impl Weights {
                     return Err(Error(format!(
                         "unsupported tensor dtype {other} for {key} in {}",
                         file.path().display()
-                    )))
+                    )));
                 }
             };
             let element_bytes = match tensor.dtype {

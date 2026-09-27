@@ -1,11 +1,11 @@
 //! Native Loom BF16 projection with FP32 accumulation and GPU handoffs.
 use hrx::{
+    Constants, Error, Kernel, Result, Stream, View,
     execution::{
         Access, BindingContract, Buffer, ExecutableGraph, GpuAccess, KernelContract,
         MemoryPlacement, Runtime, RuntimeOptions, Statistics,
     },
     loom::{Compiler, Specialization},
-    Constants, Error, Kernel, Result, Stream, View,
 };
 use serde::{Deserialize, Serialize};
 

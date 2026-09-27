@@ -3,9 +3,27 @@ use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser};
-use krea2::pipeline::{Files, Pipeline, Request};
+use krea2::pipeline::{Attention, Files, Pipeline, PipelineOptions, Request};
+
+/// Which sampler a checkpoint wants.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Checkpoint {
+    /// Distilled: eight unguided steps with a fixed timestep shift.
+    Turbo,
+    /// Undistilled: 52 guided steps with a resolution-dependent shift.
+    Raw,
+}
+
+impl Checkpoint {
+    fn name(self) -> &'static str {
+        match self {
+            Checkpoint::Turbo => "turbo",
+            Checkpoint::Raw => "raw",
+        }
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -45,11 +63,11 @@ struct Args {
     #[arg(long)]
     guidance: Option<f32>,
     /// Turbo or Raw sampler; required with a custom --model file (default model: Turbo)
-    #[arg(long, value_parser = ["turbo", "raw"])]
-    checkpoint: Option<String>,
-    /// Attention kernels, chosen when a sequence length is first compiled
-    #[arg(long, value_parser = ["f16", "i8", "i4"])]
-    attn: Option<String>,
+    #[arg(long, value_enum)]
+    checkpoint: Option<Checkpoint>,
+    /// Attention QK kernels (default: KREA2_ATTN_QK, else f16)
+    #[arg(long, value_enum)]
+    attn: Option<Attention>,
     /// The int8 ConvRot checkpoint: an explicit file or a name in Comfy-Org/Krea-2
     #[arg(long)]
     model: Option<PathBuf>,
@@ -166,30 +184,17 @@ fn run(args: Args) -> Result<()> {
     if args.seed.checked_add(u64::from(args.images - 1)).is_none() {
         return Err(usage("--seed plus --images exceeds the maximum seed"));
     }
-    let named = args.checkpoint.as_deref().unwrap_or("turbo");
+    let named = args.checkpoint.unwrap_or(Checkpoint::Turbo).name();
     let model = args
         .model
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!("krea2_{named}_int8_convrot")));
-    let directory = args.out.parent().filter(|p| !p.as_os_str().is_empty());
-    if let Some(directory) = directory {
-        if !directory.is_dir() {
-            bail!(
-                "cannot write {}: {} is not a directory",
-                args.out.display(),
-                directory.display()
-            );
-        }
-    }
-    if let Some(width) = &args.attn {
-        // Read by the kernel builder when a sequence length is first compiled.
-        std::env::set_var(
-            "KREA2_ATTN_QK",
-            match width.as_str() {
-                "f16" => "16",
-                "i8" => "8",
-                _ => "4",
-            },
+    let parent = args.out.parent().filter(|p| !p.as_os_str().is_empty());
+    if let Some(directory) = parent.filter(|directory| !directory.is_dir()) {
+        bail!(
+            "cannot write {}: {} is not a directory",
+            args.out.display(),
+            directory.display()
         );
     }
 
@@ -197,7 +202,7 @@ fn run(args: Args) -> Result<()> {
     let request = Files::of(&model)
         .text_encoder(args.text_encoder.as_deref())
         .vae(args.vae.as_deref())
-        .distilled(args.checkpoint.as_deref().map(|choice| choice == "turbo"));
+        .distilled(args.checkpoint.map(|choice| choice == Checkpoint::Turbo));
     request
         .is_distilled()
         .map_err(|error| usage(format!("{error}; pass --checkpoint turbo or raw")))?;
@@ -207,7 +212,7 @@ fn run(args: Args) -> Result<()> {
     let pipeline = Pipeline::with_options(
         files,
         compiler.as_deref(),
-        krea2::pipeline::PipelineOptions { fusion_backend: args.fusion_backend },
+        PipelineOptions { fusion_backend: args.fusion_backend, attention: args.attn },
     )?;
     let load = loading.elapsed().as_secs_f64();
     let steps = args.steps.unwrap_or(if pipeline.distilled() { 8 } else { 52 });

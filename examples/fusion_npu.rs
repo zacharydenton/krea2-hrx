@@ -1,5 +1,5 @@
 //! Native BF16 qualification, including tails, split reductions and changed inputs.
-use anyhow::{ensure, Result};
+use anyhow::{Result, ensure};
 use half::bf16;
 use hrx::Stream;
 use krea2::fusion::npu::{Projection, Shape};
@@ -182,7 +182,10 @@ fn bench(directory: &std::path::Path) -> Result<()> {
             // BF16 rounding plus conservative FP32 accumulation error bound.
             let gamma = shape.k as f64 * f32::EPSILON as f64;
             let tolerance = expected.abs() / 256. + gamma / (1. - gamma) * magnitude + 1e-7;
-            ensure!(error<=tolerance,"f64 oracle replay {replay} index {index}: {got} != {expected}, tolerance {tolerance}");
+            ensure!(
+                error <= tolerance,
+                "f64 oracle replay {replay} index {index}: {got} != {expected}, tolerance {tolerance}"
+            );
         }
     }
     // Time the original captured activation, not the changed-input probe.
@@ -208,11 +211,7 @@ fn bench(directory: &std::path::Path) -> Result<()> {
             let elapsed = start.elapsed().as_secs_f64() * 1000.;
             drop(output);
             if iteration >= 10 {
-                if backend {
-                    npu_samples.push(elapsed)
-                } else {
-                    gpu_samples.push(elapsed)
-                }
+                if backend { npu_samples.push(elapsed) } else { gpu_samples.push(elapsed) }
             }
         }
     }

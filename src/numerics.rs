@@ -69,11 +69,7 @@ const fn decode_fp8_e4m3(byte: u8) -> f32 {
     } else {
         (1.0 + mantissa / 8.0) * power_of_two(exponent as i32 - 7)
     };
-    if byte >> 7 == 1 {
-        -value
-    } else {
-        value
-    }
+    if byte >> 7 == 1 { -value } else { value }
 }
 
 #[cfg(test)]

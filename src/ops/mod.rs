@@ -1,13 +1,12 @@
 //! Auxiliary Loom operations for encoding, decoding and sampling.
 //! Kernels specialize on tensor shape and launch geometry and are cached on first use.
-#![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod tensor;
 
 use std::sync::{Arc, OnceLock};
 
-use crate::kernels::cache::PreparedKernels;
 pub use crate::kernels::Scalars;
+use crate::kernels::cache::PreparedKernels;
 use hrx::{Buffer, BufferPool, Stream, View};
 
 pub use crate::kernels::Config;

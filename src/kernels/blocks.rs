@@ -1,7 +1,7 @@
 //! Typed transformer artifacts. HRX owns compilation, caching and integrity.
 use std::collections::BTreeMap;
 
-use super::{shape, sources, Error, Result, Settings};
+use super::{Error, Result, Settings, shape, sources};
 
 /// One kernel to compile: a source, and the name it takes in the bundle.
 struct Job {
@@ -10,12 +10,47 @@ struct Job {
     config: Settings,
 }
 
+/// The attention kernel family: how Q and K are multiplied. P·V is fp16 in all
+/// three, with an fp32 online softmax.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, clap::ValueEnum)]
+pub enum Attention {
+    /// fp16 QK straight from the RoPE outputs; the best trajectory agreement.
+    #[default]
+    F16,
+    /// Smoothed per-token int8 QK (SageAttention-style) with a mean correction.
+    I8,
+    /// Smoothed per-token int4 QK with a mean correction.
+    I4,
+}
+
+impl Attention {
+    /// The QK operand width in bits.
+    pub fn bits(self) -> u32 {
+        match self {
+            Attention::F16 => 16,
+            Attention::I8 => 8,
+            Attention::I4 => 4,
+        }
+    }
+
+    /// `KREA2_ATTN_QK` (`16`, `8` or `4`), or fp16 when it is unset or empty.
+    /// For library callers that configure through the environment; the CLI
+    /// passes its `--attn` choice explicitly.
+    pub fn from_environment() -> Result<Attention> {
+        match std::env::var("KREA2_ATTN_QK").as_deref() {
+            Err(_) | Ok("" | "16") => Ok(Attention::F16),
+            Ok("8") => Ok(Attention::I8),
+            Ok("4") => Ok(Attention::I4),
+            Ok(_) => Err(Error("KREA2_ATTN_QK must be 4, 8 or 16".into())),
+        }
+    }
+}
+
 /// Transformer dimensions and launch rules for one sequence length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
     pub tokens: usize,
-    /// 16 for fp16 QK and PV, or 4 / 8 for the smoothed Sage kernels.
-    pub attention_bits: u32,
+    pub attention: Attention,
     /// Waves per attention workgroup.
     pub attention_waves: u32,
     /// Rows of every sequence-sized buffer, from [`shape::capacity`].
@@ -23,9 +58,7 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// `attention_bits` is 16 (fp16 QK and PV, ComfyUI's SDPA class) or 4 / 8
-    /// (the smoothed SageAttention-style kernels).
-    pub fn new(tokens: usize, attention_bits: u32) -> Result<Shape> {
+    pub fn new(tokens: usize, attention: Attention) -> Result<Shape> {
         if !shape::TOKENS.contains(&tokens) {
             return Err(Error(format!(
                 "tokens must be {}..{}",
@@ -33,27 +66,13 @@ impl Shape {
                 shape::TOKENS.end()
             )));
         }
-        if ![4, 8, 16].contains(&attention_bits) {
-            return Err(Error("attention QK width must be 4, 8 or 16".into()));
-        }
         Ok(Shape {
             tokens,
-            attention_bits,
+            attention,
             // Long sequences leave less room per wave for the score tile.
             attention_waves: if tokens < 8192 { 8 } else { 4 },
             capacity: shape::capacity(tokens),
         })
-    }
-
-    /// `KREA2_ATTN_QK` from the environment, 16 when it is unset or empty.
-    pub fn from_environment(tokens: usize) -> Result<Shape> {
-        let bits = match std::env::var("KREA2_ATTN_QK") {
-            Ok(value) if !value.is_empty() => {
-                value.parse().map_err(|_| Error("KREA2_ATTN_QK must be 4, 8 or 16".into()))?
-            }
-            _ => 16,
-        };
-        Shape::new(tokens, bits)
     }
 
     fn jobs(&self) -> Vec<Job> {
@@ -123,12 +142,12 @@ impl Shape {
     /// The attention kernel for this width. Eight waves have the registers to
     /// hold the next key tile; four do not, and prefetch instead.
     pub fn attention_source(&self) -> &'static str {
-        match (self.attention_bits, self.attention_waves) {
-            (16, _) => "attention_gqa_lds_f16_wmma",
-            (4, 8) => "attention_sage_i4_fast",
-            (4, _) => "attention_sage_i4_fast_prefetch",
-            (_, 8) => "attention_sage_i8_fast",
-            (_, _) => "attention_sage_i8_fast_prefetch",
+        match (self.attention, self.attention_waves) {
+            (Attention::F16, _) => "attention_gqa_lds_f16_wmma",
+            (Attention::I4, 8) => "attention_sage_i4_fast",
+            (Attention::I4, _) => "attention_sage_i4_fast_prefetch",
+            (Attention::I8, 8) => "attention_sage_i8_fast",
+            (Attention::I8, _) => "attention_sage_i8_fast_prefetch",
         }
     }
 }
@@ -208,12 +227,12 @@ mod tests {
 
     #[test]
     fn the_smoothed_kernels_take_the_prefetch_variant_only_past_eight_thousand() {
-        let short = Shape::new(4115, 4).expect("a shape");
+        let short = Shape::new(4115, Attention::I4).expect("a shape");
         assert_eq!(short.attention_source(), "attention_sage_i4_fast");
-        let long = Shape::new(9000, 8).expect("a shape");
+        let long = Shape::new(9000, Attention::I8).expect("a shape");
         assert_eq!(long.attention_source(), "attention_sage_i8_fast_prefetch");
         assert_eq!(
-            Shape::new(4115, 16).expect("a shape").attention_source(),
+            Shape::new(4115, Attention::F16).expect("a shape").attention_source(),
             "attention_gqa_lds_f16_wmma"
         );
     }
@@ -221,12 +240,12 @@ mod tests {
     #[test]
     fn every_kernel_a_bundle_names_has_an_embedded_source() {
         for tokens in [16, 4115, 9000, 16896] {
-            for attention_bits in [4, 8, 16] {
-                let shape = Shape::new(tokens, attention_bits).expect("a shape");
+            for attention in [Attention::F16, Attention::I8, Attention::I4] {
+                let shape = Shape::new(tokens, attention).expect("a shape");
                 for job in shape.jobs() {
                     assert!(
                         sources::block(job.source).is_some(),
-                        "no source for {} ({tokens}, qk{attention_bits})",
+                        "no source for {} ({tokens}, {attention:?})",
                         job.source
                     );
                 }
@@ -235,8 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn the_shapes_that_cannot_be_built_are_named() {
-        assert!(Shape::new(15, 16).unwrap_err().0.contains("tokens must be 16..16896"));
-        assert!(Shape::new(4115, 12).unwrap_err().0.contains("QK width"));
+    fn a_sequence_the_kernels_cannot_serve_is_named() {
+        assert!(
+            Shape::new(15, Attention::F16).unwrap_err().0.contains("tokens must be 16..16896")
+        );
+        assert!(Shape::new(16897, Attention::F16).is_err());
     }
 }

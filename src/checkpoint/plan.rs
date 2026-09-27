@@ -41,11 +41,7 @@ pub struct Span {
 impl Span {
     /// Bytes as the checkpoint stores them, before any padding.
     pub fn file_bytes(&self) -> usize {
-        if self.host.is_empty() {
-            self.rows * self.row_bytes
-        } else {
-            self.host.len()
-        }
+        if self.host.is_empty() { self.rows * self.row_bytes } else { self.host.len() }
     }
 }
 

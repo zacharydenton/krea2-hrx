@@ -2,10 +2,10 @@
 //! shared-context blocks. Pipeline's state lock excludes concurrent native use.
 use super::*;
 use hrx::{
+    Access, PooledBuffer,
     execution::{BufferView, GpuAccess},
     inference::PreparedModel,
     tensor::{DType, DeviceTensor, Layout, TensorDesc},
-    Access, PooledBuffer,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -193,12 +193,14 @@ mod tests {
             }
             assert!(bridge.check().is_err());
             let mut ran = false;
-            assert!(bridge
-                .run(|_| {
-                    ran = true;
-                    Ok(())
-                })
-                .is_err());
+            assert!(
+                bridge
+                    .run(|_| {
+                        ran = true;
+                        Ok(())
+                    })
+                    .is_err()
+            );
             assert!(!ran);
         }
     }

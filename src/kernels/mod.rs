@@ -11,8 +11,8 @@ pub mod sources;
 
 use hrx::{Constants, Kernel};
 
-pub use blocks::{prepare_for_target, PreparedBundle, Shape};
-pub use cache::{compiler, PreparedKernels};
+pub use blocks::{Attention, PreparedBundle, Shape, prepare_for_target};
+pub use cache::{PreparedKernels, compiler};
 
 /// Anything the compiler, the cache or the runtime rejects.
 #[derive(Debug, Clone, PartialEq, Eq)]

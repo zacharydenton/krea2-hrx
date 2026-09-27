@@ -17,7 +17,7 @@
 //! one contiguous block. The correction is
 //! `[query heads][ceil(tokens / 64)][capacity]` in float32.
 use crate::kernels::Scalars;
-use crate::kernels::{cache::PreparedKernels, Config};
+use crate::kernels::{Config, cache::PreparedKernels};
 use hrx::{Buffer, Stream, View};
 
 use super::{After, Error, Result, Sink};

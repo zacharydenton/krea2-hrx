@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 
 use hrx::{Kernel, Stream};
 
-use super::{sources, Config, Error, Result};
+use super::{Config, Error, Result, sources};
 
 /// Reuse each selected compiler's pinned identity across model configurations.
 /// Failed resolution is retryable and retains HRX's provisioning diagnostic.

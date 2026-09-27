@@ -3,7 +3,7 @@
 //! no reference implementation to disagree with.
 use hrx::BufferPool;
 use krea2::numerics::from_f32;
-use krea2::ops::{config, Ops, Scalars};
+use krea2::ops::{Ops, Scalars, config};
 
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]

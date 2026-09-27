@@ -1,7 +1,7 @@
 //! GPU dispatch, allocation-span and runtime-dependency checks.
 //! Requires HRX, a gfx1151 GPU and a compiler; run with --ignored.
 use hrx::Stream;
-use krea2::kernels::{config, PreparedKernels, Scalars};
+use krea2::kernels::{PreparedKernels, Scalars, config};
 
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]

@@ -22,8 +22,12 @@ fn main() -> anyhow::Result<()> {
         memory_budget: Some(residency.budget()),
         ..Default::default()
     })?;
-    let pipeline =
-        Pipeline::open_in(files, &context, None, PipelineOptions { fusion_backend: backend })?;
+    let pipeline = Pipeline::open_in(
+        files,
+        &context,
+        None,
+        PipelineOptions { fusion_backend: backend, ..Default::default() },
+    )?;
     let mut request = Request::new("a red ceramic cup on a wooden table");
     request.width = size;
     request.height = size;
