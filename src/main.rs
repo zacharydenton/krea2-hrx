@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::builder::RangedU64ValueParser;
 use clap::{CommandFactory, Parser};
-use krea2::pipeline::{Attention, Files, Pipeline, PipelineOptions, Request};
+use krea2::pipeline::{Files, Pipeline, PipelineOptions, Request};
 
 /// Which sampler a checkpoint wants.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -68,9 +68,6 @@ struct Args {
     /// Turbo or Raw sampler; required with a custom --model file (default model: Turbo)
     #[arg(long, value_enum)]
     checkpoint: Option<Checkpoint>,
-    /// Attention QK kernels (default: KREA2_ATTN_QK, else f16)
-    #[arg(long, value_enum)]
-    attn: Option<Attention>,
     /// The int8 ConvRot checkpoint: an explicit file or a name in Comfy-Org/Krea-2
     #[arg(long)]
     model: Option<PathBuf>,
@@ -213,7 +210,7 @@ fn run(args: Args) -> Result<()> {
     let pipeline = Pipeline::with_options(
         files,
         compiler.as_deref(),
-        PipelineOptions { fusion_backend: args.fusion_backend, attention: args.attn },
+        PipelineOptions { fusion_backend: args.fusion_backend },
     )?;
     let load = loading.elapsed().as_secs_f64();
     let steps = args.steps.unwrap_or(if pipeline.distilled() { 8 } else { 52 });

@@ -190,8 +190,7 @@ Pin a `rev` for reproducible downstream builds. The Rust import remains `krea2`:
 pipeline components; `krea2::session` provides resident transformer block sessions.
 For custom checkpoint paths, library callers select the sampler with
 `Files::of(path).distilled(Some(true))` for Turbo or `Some(false)` for Raw.
-`PipelineOptions` chooses the attention kernels (`--attn`) and the text-fusion
-backend. Every call returns `krea2::Error`: `is_invalid_argument()` separates
+`PipelineOptions` chooses the text-fusion backend. Every call returns `krea2::Error`: `is_invalid_argument()` separates
 the caller's mistakes from runtime failures, which keep their `hrx::Error`, and
 `Error::Cancelled` reports a progress callback that stopped generation.
 
@@ -215,10 +214,9 @@ precision and initial noise differ between backends; speed measurements do not
 establish image equivalence. See [the comparison](docs/comfyui-performance.md)
 and [VAE measurements](docs/vae-performance.md) for methodology and limitations.
 
-The default fp16 attention has the best measured trajectory agreement among
-the supported modes. Int4/int8 QK attention is opt-in with `--attn i4` or
-`--attn i8`. [Attention documentation](docs/native-attention.md) covers the
-quality tradeoff. Native seeds are repeatable within this backend; use identical
+Attention is fp16, which had the best measured trajectory agreement; the
+int4/int8 QK modes it replaced gave at most 3% for 2–3 dB, see the
+[attention documentation](docs/native-attention.md). Native seeds are repeatable within this backend; use identical
 initial latents for comparisons with Torch.
 
 ## Development

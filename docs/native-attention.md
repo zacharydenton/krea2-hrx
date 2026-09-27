@@ -1,19 +1,8 @@
 # Attention on gfx1151
 
-## Supported modes
+## The kernel
 
-| Mode | Selection | Arithmetic |
-| --- | --- | --- |
-| fp16 (default) | `--attn f16`, `Attention::F16` | fp16 QK/PV, fp32 online softmax |
-| Smoothed int8 QK | `--attn i8`, `Attention::I8` | Per-token int8 QK, fp16 PV, fp32 softmax and correction |
-| Smoothed int4 QK | `--attn i4`, `Attention::I4` | Per-token int4 QK, fp16 PV, fp32 softmax and correction |
-
-Library callers set `PipelineOptions::attention`. Left as `None`, the pipeline
-reads `KREA2_ATTN_QK` (`16`, `8` or `4`) once when it opens, and defaults to
-fp16; `Session::open` reads it the same way. The choice is part of each
-sequence length's kernel `Shape`, so a bundle is compiled for exactly one mode.
-
-The default kernel is `kernels/attention_gqa_lds_f16_wmma.loom`. Experimental
+Attention is fp16 QK and PV with an fp32 online softmax. The kernel is `kernels/attention_gqa_lds_f16_wmma.loom`. Experimental
 query32 attention lives in `experiments/` and is not embedded; see
 [its evaluation](attention-2x.md). The pinned HRX 0.8 compiler rejects its
 accumulator-to-RHS repack with `AMDGPU/041` / `layout_strategy`. Production
@@ -84,42 +73,38 @@ transformer using identical noise, conditioning, scheduler and VAE:
 | Attention | Latent PSNR | Image PSNR |
 | --- | ---: | ---: |
 | fp16 | 24.57 dB | 33.67 dB |
-| Smoothed int8 QK | 22.6 dB | 31.8 dB |
-| Smoothed int4 QK | 21.62 dB | 31.57 dB |
+| Smoothed int8 QK (retired) | 22.6 dB | 31.8 dB |
+| Smoothed int4 QK (retired) | 21.62 dB | 31.57 dB |
 
-These are fixture results, not a quality sweep. The fp16 default preserves the
-best measured trajectory agreement. `scripts/parity.sh` checks
-an accepted reference trajectory; see [CONTRIBUTING.md](../CONTRIBUTING.md).
+These are fixture results, not a quality sweep. `scripts/parity.sh` checks an
+accepted reference trajectory; see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-## Smoothed attention
+## Retired: smoothed int8/int4 QK
 
-The int4/int8 paths adapt Q/K smoothing from
-[SageAttention2](https://arxiv.org/abs/2411.10958) to gfx11 WMMA. They use
-per-token scales and fp16 PV, so they are not an exact implementation of the
-upstream arithmetic.
+Until 2026-09-28, `--attn i8` and `--attn i4` (or `KREA2_ATTN_QK`) selected
+SageAttention2-style smoothed QK: per-token int8 or int4 Q and K centered on
+their means, a mean-correction GEMM, fp16 PV. On gfx1151 they stopped paying
+once fp16 attention reached 48% of its peak. At 1024x1024, one step on the GPU
+clock:
 
-`src/session/sage.rs` prepares each block:
+| Attention | Attention kernels | Preparation | Step |
+| --- | ---: | ---: | ---: |
+| fp16 (with V transpose) | 438 ms | — | 3.00 s |
+| Smoothed int8 QK | 429 ms | ~40 ms | ≈ fp16 |
+| Smoothed int4 QK | 324 ms | 40 ms | 2.92 s |
 
-1. Compute K's mean over the sequence, per head/channel.
-2. Center Q in 64-token groups, excluding padding from the means.
-3. Quantize centered Q and K with symmetric absmax scales: codes −7…7 for
-   int4, or −127…127 for int8.
-4. Compute the query-mean × centered-key correction with fp16 inputs and fp32
-   output. Four query heads share each KV head.
-
-The attention kernel dequantizes QK, adds the correction, scales by
-`1/sqrt(128)`, and performs online softmax and PV. The omitted K-mean term is
-constant across each score row and cancels in softmax. Correction input rounding
-and quantization remain approximations.
-
-Codes and scales are head-major. V is transposed before attention. Below 8192
-tokens, eight waves process two query tiles across four Q heads with alternating
-LDS slots. At longer sequences, four waves use explicit prefetch. The threshold
-is an empirical choice on gfx1151.
+Int8 WMMA runs at the fp16 rate on this part (57 against 54 TOPS), so int8 QK
+bought nothing. Int4 WMMA is twice as fast, but smoothing quantizes only QK,
+half the attention's products: the ideal is 1.33x, and the int4 kernel reached
+1.32x. Its preparation (key and query means, quantization, the correction GEMM)
+returned 40% of that, leaving a step 3% faster for 2–3 dB less latent PSNR.
+Attention is 14% of a step, the GEMMs about 80%. The kernels and their
+preparation are kept in `experiments/sage/`; the host side is recoverable from
+Git before its removal.
 
 ## Validation
 
-- `tests/quantized.rs`: production fp16 attention and quantized
+- `tests/quantized.rs`: production fp16 attention and the int8 activation
   preparation against independent softmax and Hadamard references, including
   padded and partial tiles.
 - `tests/unquantized_parity.rs`, via `scripts/parity.sh`:

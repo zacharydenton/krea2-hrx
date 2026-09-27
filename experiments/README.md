@@ -8,3 +8,11 @@ selected by any build.
   the pinned HRX 0.8 compiler now rejects its accumulator repack
   (`AMDGPU/041`). `tests/quantized.rs` records that rejection; see
   [the evaluation](../docs/attention-2x.md).
+- `sage/`: SageAttention-style smoothed int8 and int4 QK attention (the
+  `attention_sage_*` kernels) and their preparation: key and query means, the
+  per-token quantizers and the `gemm_f16_f32_nt` mean-correction GEMM. On
+  gfx1151 int8 WMMA runs at the fp16 rate, so int8 QK bought nothing; int4 QK
+  made attention 1.32x faster (the ceiling when only QK is quantized) but the
+  preparation took back about 40% of that, leaving a step about 3% faster for
+  2-3 dB less latent PSNR. The host side (`src/session/sage.rs`, the `--attn`
+  option and `KREA2_ATTN_QK`) was removed; it is recoverable from Git.

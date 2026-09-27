@@ -91,7 +91,7 @@ impl PreparedKernels {
         let key = RequestKey {
             name,
             config,
-            grid: if name == "sage_transpose" { (0, 0) } else { grid },
+            grid: if name == "v_transpose" { (0, 0) } else { grid },
             report: super::kernel_reports(),
         };
         // Safety: source is embedded and immutable; the key includes every
@@ -128,7 +128,7 @@ fn auxiliary_source(name: &str) -> Result<(&'static str, &'static str)> {
 /// The export and configuration one auxiliary kernel compiles from.
 ///
 /// `grid_x` and `grid_y` join the configuration for every kernel but
-/// `sage_transpose`, which is written for any grid.
+/// `v_transpose`, which is written for any grid.
 fn specialization(
     name: &str,
     config: &Config,
@@ -136,7 +136,7 @@ fn specialization(
     report: bool,
 ) -> hrx::loom::Specialization {
     let mut config = config.clone();
-    if name != "sage_transpose" {
+    if name != "v_transpose" {
         config.insert("grid_x", u64::from(grid.0));
         config.insert("grid_y", u64::from(grid.1));
     }
@@ -171,7 +171,7 @@ mod tests {
             Some("7")
         );
         assert_eq!(joined.symbol(), "krea2_unary_one");
-        let any = specialization("sage_transpose", &config, (7, 3), false);
-        assert!(!any.configuration().contains_key("krea2.sage_transpose.grid_x"));
+        let any = specialization("v_transpose", &config, (7, 3), false);
+        assert!(!any.configuration().contains_key("krea2.v_transpose.grid_x"));
     }
 }

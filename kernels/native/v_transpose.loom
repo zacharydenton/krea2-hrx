@@ -2,25 +2,25 @@
 // [rows][width] f16 -> [width][row_capacity] f16 through a 32x32 LDS tile: V^T for the attention
 // kernels, whose V tiles are [channel][key]. Columns past `rows` are left as they are (zero headroom).
 // Workgroups (ceil(rows / 32), width / 32) of 256 lanes; a lane moves a vector<4xf16> each way.
-amdgpu.target<gfx11-generic> @krea2_sage_transpose_gfx11 {subgroup_size = 32}
+amdgpu.target<gfx11-generic> @krea2_v_transpose_gfx11 {subgroup_size = 32}
 
-config.decl @krea2.sage_transpose.width : %value: index where [range(%value, 32, 65536), mul(%value, 32)]
+config.decl @krea2.v_transpose.width : %value: index where [range(%value, 32, 65536), mul(%value, 32)]
 
-config.decl @krea2.sage_transpose.row_capacity : %value: index where [range(%value, 32, 1048576), mul(%value, 32)]
+config.decl @krea2.v_transpose.row_capacity : %value: index where [range(%value, 32, 1048576), mul(%value, 32)]
 
-kernel.def target(@krea2_sage_transpose_gfx11) export("krea2_sage_transpose") @krea2_sage_transpose(%rows: index) {
+kernel.def target(@krea2_v_transpose_gfx11) export("krea2_v_transpose") @krea2_v_transpose(%rows: index) {
   %c1 = index.constant 1 : index
   %c31 = index.constant 31 : index
   %c32 = index.constant 32 : index
   %c256 = index.constant 256 : index
-  %width = config.get @krea2.sage_transpose.width : index
+  %width = config.get @krea2.v_transpose.width : index
   %rounded = index.add %rows, %c31 : index
   %row_tiles = index.div %rounded, %c32 : index
   %col_tiles = index.div %width, %c32 : index
   kernel.launch.config workgroups(%row_tiles, %col_tiles, %c1) workgroup_size(%c256, %c1, %c1) : index
 } launch(%rows: index, %x: buffer, %out: buffer) {
-  %width = config.get @krea2.sage_transpose.width : index
-  %cap = config.get @krea2.sage_transpose.row_capacity : index
+  %width = config.get @krea2.v_transpose.width : index
+  %cap = config.get @krea2.v_transpose.row_capacity : index
   %c0 = index.constant 0 : index
   %c1 = index.constant 1 : index
   %c2 = index.constant 2 : index

@@ -248,7 +248,7 @@ fn production_attention_has_no_scratch_spills() {
     let stem = "attention_gqa_lds_f16_wmma";
     let source = krea2::kernels::sources::block(stem).unwrap();
     for tokens in [1043usize, 4115, 9235, 16403] {
-        let shape = krea2::kernels::Shape::new(tokens, krea2::kernels::Attention::F16).unwrap();
+        let shape = krea2::kernels::Shape::new(tokens).unwrap();
         let mut request = hrx::loom::Specialization::new(format!("krea2_{stem}"));
         for (key, value) in [
             ("q_stride", 6144),
@@ -320,7 +320,7 @@ fn production_attention_tiles_match_grouped_cpu_softmax() {
             ("out_stride", heads * d),
         ]);
         config.push(("scale", (1. / (d as f64).sqrt()).to_string()));
-        // V goes in transposed, [kv * d][capacity], as `sage_transpose` writes it.
+        // V goes in transposed, [kv * d][capacity], as `v_transpose` writes it.
         let v_transposed: Vec<f16> =
             (0..kv * d * capacity).map(|i| v[(i % capacity) * kv * d + i / capacity]).collect();
         let out = h.run(

@@ -13,7 +13,7 @@
 //! for the benchmark scope and replay constraints.
 
 pub mod bundle;
-pub mod sage;
+mod v_transpose;
 pub mod weights;
 
 use std::cell::{Cell, RefCell};
@@ -21,12 +21,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::kernels::{Attention, Scalars, Shape, shape};
+use crate::kernels::{Scalars, Shape, shape};
 use hrx::{Buffer, Stream, View};
 
 pub use bundle::Kernels;
-pub use sage::Sage;
-use sage::VTranspose;
+use v_transpose::VTranspose;
 pub use weights::Weights;
 
 pub use crate::{Error, Result};
@@ -90,14 +89,12 @@ struct Buffers {
     sin: Buffer,
 }
 
-/// Dependencies for the next dispatch. A fan-in goes on its consumer directly,
-/// without inserting an empty native graph node.
+/// Dependencies for the next dispatch.
 #[derive(Clone, Copy, Default)]
 enum After {
     #[default]
     None,
     One(hrx::Node),
-    Three([hrx::Node; 3]),
 }
 
 impl After {
@@ -105,7 +102,6 @@ impl After {
         match self {
             Self::None => &[],
             Self::One(node) => std::slice::from_ref(node),
-            Self::Three(nodes) => nodes,
         }
     }
 }
@@ -152,7 +148,6 @@ pub struct Session {
     stream_id: usize,
     tokens: usize,
     layers: usize,
-    shape: Shape,
     kernels: Kernels,
     blocks: Vec<Block>,
     /// The native graph retains its recorded resources until its final replay
@@ -160,12 +155,8 @@ pub struct Session {
     graph: RefCell<Option<hrx::GraphExec>>,
     buffers: Buffers,
     // Calls on one session are serialized: they share the scratch buffers.
-    /// The smoothed attention kernels' preparation pass, when the bundle was
-    /// built with one (`KREA2_ATTN_QK` of 4 or 8).
-    sage: Option<Sage>,
-    /// V transposed for the fp16 attention kernel; `None` beside `sage`,
-    /// which transposes V itself.
-    v_transposed: Option<VTranspose>,
+    /// V transposed for the attention kernel.
+    v_transposed: VTranspose,
     /// What the resident RoPE tables were last filled from. Changed tables are
     /// queued before their next use on this stream.
     rope: Cell<Option<(u64, u64)>>,
@@ -248,8 +239,7 @@ impl Session {
         })?)
     }
 
-    /// Load a checkpoint and prepare its kernel specializations through HRX,
-    /// with the attention kernels [`Attention::from_environment`] selects.
+    /// Load a checkpoint and prepare its kernel specializations through HRX.
     pub fn open(
         stream: &mut Stream,
         checkpoint: &Path,
@@ -258,14 +248,7 @@ impl Session {
     ) -> Result<Session> {
         let (file, plan) = Self::validate(checkpoint, tokens, layers)?;
         let weights = Arc::new(Weights::upload(stream, &file, plan)?);
-        Self::with_weights(
-            stream,
-            weights,
-            tokens,
-            layers,
-            Attention::from_environment()?,
-            None,
-        )
+        Self::with_weights(stream, weights, tokens, layers, None)
     }
 
     /// Everything [`Session::open`] checks before it touches the device: the
@@ -288,11 +271,10 @@ impl Session {
         weights: Arc<Weights>,
         tokens: usize,
         layers: usize,
-        attention: Attention,
         compiler: Option<&str>,
     ) -> Result<Session> {
         Self::validate_dimensions(tokens, layers)?;
-        let shape = Shape::new(tokens, attention)?;
+        let shape = Shape::new(tokens)?;
         let bundle = crate::kernels::prepare_for_target(compiler, &shape, stream.target())?;
         Self::build(stream, weights, &bundle, tokens, layers, compiler)
     }
@@ -360,33 +342,14 @@ impl Session {
         for buffer in [&buffers.q, &buffers.k, &buffers.v, &buffers.fused, &buffers.x] {
             stream.fill(buffer.binding(), 0)?;
         }
-        let v_transposed = match shape.attention {
-            Attention::F16 => {
-                Some(VTranspose::new(stream, tokens, capacity, KV_HEADS, compiler)?)
-            }
-            _ => None,
-        };
-        let sage = match shape.attention {
-            Attention::F16 => None,
-            smoothed => Some(Sage::new(
-                stream,
-                tokens,
-                capacity,
-                KV_HEADS * 4,
-                KV_HEADS,
-                smoothed.bits(),
-                compiler,
-            )?),
-        };
+        let v_transposed = VTranspose::new(stream, tokens, capacity, KV_HEADS, compiler)?;
         Ok(Session {
             stream_id: stream.id(),
             tokens,
             layers,
-            shape,
             kernels,
             blocks,
             buffers,
-            sage,
             v_transposed,
             graph: RefCell::new(None),
             rope: Cell::new(None),
@@ -486,30 +449,6 @@ impl Session {
         Ok(())
     }
 
-    /// The clock a multi-launch stage is timed against, when profiling is on.
-    fn timed(&self, stream: &mut Stream) -> Result<Option<std::time::Instant>> {
-        if !self.profile.load(Ordering::Relaxed) {
-            return Ok(None);
-        }
-        stream.synchronize()?;
-        Ok(Some(std::time::Instant::now()))
-    }
-
-    /// Closes a stage opened by [`Session::timed`].
-    fn record(
-        &self,
-        stream: &mut Stream,
-        stage: &'static str,
-        began: Option<std::time::Instant>,
-    ) -> Result<()> {
-        let Some(began) = began else {
-            return Ok(());
-        };
-        stream.synchronize()?;
-        self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
-        Ok(())
-    }
-
     /// Appends `profile` as one JSON line to `KREA2_PROFILE_JSON`, when set:
     /// the raw device intervals, for comparing kernel changes stage by stage.
     fn export(&self, profile: &hrx::fabric::DeviceProfile) -> Result<()> {
@@ -520,7 +459,6 @@ impl Session {
         let record = serde_json::json!({
             "tokens": self.tokens,
             "layers": self.layers,
-            "attention": format!("{:?}", self.shape.attention),
             "profile": profile,
         });
         let failed = |e: &dyn std::fmt::Display| {
@@ -822,74 +760,26 @@ impl Session {
             &rope,
         )?;
 
-        match &self.sage {
-            // Smoothed int4/int8 QK: the preparation pass quantizes Q and K
-            // against their means and works out the correction the kernel adds
-            // back to the scores.
-            Some(sage) => {
-                // Seven launches, timed as one stage rather than each. Timing
-                // needs a stream to synchronize on, so it applies only to the
-                // direct path -- which is the only one profiling takes anyway.
-                let preparing = match &mut *sink {
-                    Sink::Stream(stream) => self.timed(stream)?,
-                    Sink::Record(_) => None,
-                };
-                sage.run(sink, b.q.binding(), b.k.binding(), b.v.binding())?;
-                if let Sink::Stream(stream) = &mut *sink {
-                    self.record(stream, "SA2 preprocessing", preparing)?;
-                }
-                let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS);
-                let attention = [
-                    sage.q4.binding(),
-                    sage.k4.binding(),
-                    sage.v_transposed.binding(),
-                    sage.q_scale.binding(),
-                    sage.k_scale.binding(),
-                    sage.correction.binding(),
-                    b.attn_gu.binding(),
-                ];
-                let rows = 16 * (self.shape.attention_waves as usize / 4);
-                self.launch(
-                    sink,
-                    &self.kernels.attention,
-                    "SA2 attention",
-                    tokens.div_ceil(rows),
-                    KV_HEADS,
-                    32 * self.shape.attention_waves,
-                    &attention_scalars,
-                    &attention,
-                )?;
-            }
-            // fp16 QK and PV from the RoPE outputs and V transposed, 16 query
-            // rows per workgroup.
-            None => {
-                let transposed = self
-                    .v_transposed
-                    .as_ref()
-                    .ok_or_else(|| Error::internal("an fp16 session has no V transpose"))?;
-                let (kernel, (x, y)) = transposed.launch();
-                let scalars = Scalars::new().index(tokens);
-                let operands = [b.v.binding(), transposed.output.binding()];
-                self.launch(sink, kernel, "V transpose", x, y, 256, &scalars, &operands)?;
-                let attention_scalars = Scalars::new().index(tokens);
-                let attention = [
-                    b.q.binding(),
-                    b.k.binding(),
-                    transposed.output.binding(),
-                    b.attn_gu.binding(),
-                ];
-                self.launch(
-                    sink,
-                    &self.kernels.attention,
-                    "f16 attention",
-                    tokens.div_ceil(16),
-                    KV_HEADS,
-                    128,
-                    &attention_scalars,
-                    &attention,
-                )?;
-            }
-        }
+        // fp16 QK and PV from the RoPE outputs and V transposed, 16 query rows
+        // per workgroup.
+        let transposed = &self.v_transposed;
+        let (kernel, (x, y)) = transposed.launch();
+        let scalars = Scalars::new().index(tokens);
+        let operands = [b.v.binding(), transposed.output.binding()];
+        self.launch(sink, kernel, "V transpose", x, y, 256, &scalars, &operands)?;
+        let attention_scalars = Scalars::new().index(tokens);
+        let attention =
+            [b.q.binding(), b.k.binding(), transposed.output.binding(), b.attn_gu.binding()];
+        self.launch(
+            sink,
+            &self.kernels.attention,
+            "f16 attention",
+            tokens.div_ceil(16),
+            KV_HEADS,
+            128,
+            &attention_scalars,
+            &attention,
+        )?;
 
         let gated_scalars = Scalars::new().index(tokens);
         let gated =
@@ -1125,10 +1015,8 @@ mod tests {
         let (file, plan) = Session::validate(&checkpoint, tokens, 2).unwrap();
         let weights = Arc::new(Weights::upload(&mut stream, &file, plan).unwrap());
         let first =
-            Session::with_weights(&mut stream, weights.clone(), tokens, 2, attention(), None)
-                .unwrap();
-        let second =
-            Session::with_weights(&mut stream, weights, tokens, 2, attention(), None).unwrap();
+            Session::with_weights(&mut stream, weights.clone(), tokens, 2, None).unwrap();
+        let second = Session::with_weights(&mut stream, weights, tokens, 2, None).unwrap();
         let mut starts = Vec::new();
         let mut expected = Vec::new();
         for (phase, session) in [&first, &second].into_iter().enumerate() {
@@ -1197,12 +1085,6 @@ mod tests {
             "{tokens} tokens, two sessions with two blocks each: serial {:.3} ms, independent {:.3} ms",
             samples[0][4], samples[1][4]
         );
-    }
-
-    /// The attention width under test: `KREA2_ATTN_QK`, so one run of these
-    /// tests covers each kernel family in turn.
-    fn attention() -> Attention {
-        Attention::from_environment().expect("KREA2_ATTN_QK must be 4, 8 or 16")
     }
 
     fn fixture() -> (std::path::PathBuf, usize) {

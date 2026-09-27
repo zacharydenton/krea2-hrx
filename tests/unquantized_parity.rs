@@ -335,7 +335,7 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let pipeline = Pipeline::with_options(
         Files::of(&checkpoint).distilled(Some(true)).offline(true).resolve().unwrap(),
         None,
-        krea2::pipeline::PipelineOptions { fusion_backend: backend, ..Default::default() },
+        krea2::pipeline::PipelineOptions { fusion_backend: backend },
     )
     .unwrap();
     let evidence_path = std::env::var_os("KREA2_QUALITY_RESULT").map(PathBuf::from);

@@ -34,14 +34,12 @@ use determine the completed time. Grid size alone does not establish saturation.
 
 ## Dependencies
 
-The block loop orders shared scratch reuse and residual updates. Sage's seven
-preparation kernels form a DAG: the key and query branches have separate storage,
-V transpose is independent of both, and correction consumes the two branches.
-Attention waits directly for query quantization, V transpose and correction.
-Correction already depends on K quantization, so a fourth edge is redundant.
+The block loop is a chain: each launch waits for the one before it, which orders
+shared scratch reuse and residual updates.
 
-There is no empty join node between preparation and attention. In the pinned
-native runtime an empty node splits the command buffer and adds a queue barrier.
+Fan-ins go on their consumer directly rather than through an empty join node. In
+the pinned native runtime an empty node splits the command buffer and adds a
+queue barrier.
 The scheduler considers additional workstreams only after the first 16
 recordable nodes in a partition. Removing unnecessary barriers can help even
 within one workstream; declaring a DAG does not guarantee simultaneous execution.
@@ -54,12 +52,9 @@ A previous full-pipeline A/B/B/A comparison measured 29.58 s direct against
 no consistent win. Historical host submission measured 238 ns per dispatch;
 it does not measure the GPU or give a fixed cost for graph edges.
 
-The Sage benchmark records 28 preparation passes as either a diamond or a chain.
-It alternates measurement order, uses three warmups and nine samples per arm,
-and checks outputs against eager execution. On 2026-09-10 it measured 244.3 ms
-for the diamond and 246.0 ms for the chain. These passes omit the transformer
-kernels that would normally separate them, so their native schedule can differ
-from a complete block loop.
+The retired smoothed-attention preparation, recorded as a seven-kernel diamond,
+measured 244.3 ms against 246.0 ms as a chain over 28 passes (2026-09-10):
+declaring the concurrency was free but bought nothing.
 
 The overlap benchmark measures two sessions with two blocks each. It initializes
 distinct finite inputs, resets them before each sample and checks both outputs
@@ -86,7 +81,6 @@ re-measured on an idle GPU.
 ```sh
 cargo run --release --example dispatch_cost
 cargo test --release --lib -- --ignored --nocapture \
-  the_declared_concurrency_is_priced_against_a_chain \
   two_independent_block_prefixes_are_priced_against_a_chain
 ```
 
@@ -103,7 +97,6 @@ retention prevents deallocation, but does not prevent pool reuse. This session
 uses fixed, unpooled workspaces. HRX's completion-point destructor waits for the
 last replay without flushing unrelated work on the stream.
 
-On 2026-09-10 the replay regression passed with `KREA2_ATTN_QK=16`, `8` and
-`4` against HRX 0.2.0; the session tests take their attention mode from that
-variable. Locked workspace builds, CPU tests, clippy and rustdoc
+On 2026-09-10 the replay regression passed in each attention mode offered at
+the time against HRX 0.2.0. Locked workspace builds, CPU tests, clippy and rustdoc
 with warnings denied also passed using the crates.io package.

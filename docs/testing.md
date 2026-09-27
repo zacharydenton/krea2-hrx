@@ -32,8 +32,7 @@ scripts/parity.sh
 ```
 
 The sweep checks all 2³² float32 encodings. The checkpoint and session tests need
-local Krea weights, and cover the attention mode `KREA2_ATTN_QK` selects (fp16
-when unset), so run them once per mode after an attention change; `scripts/parity.sh` also needs the frozen unquantized BF16
+local Krea weights; `scripts/parity.sh` also needs the frozen unquantized BF16
 fixture described below. Run the timing experiments separately using the
 commands in [graph recording](graph-recording.md).
 

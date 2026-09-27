@@ -10,58 +10,21 @@ struct Job {
     config: Settings,
 }
 
-/// The attention kernel family: how Q and K are multiplied. P·V is fp16 in all
-/// three, with an fp32 online softmax.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, clap::ValueEnum)]
-pub enum Attention {
-    /// fp16 QK straight from the RoPE outputs; the best trajectory agreement.
-    #[default]
-    F16,
-    /// Smoothed per-token int8 QK (SageAttention-style) with a mean correction.
-    I8,
-    /// Smoothed per-token int4 QK with a mean correction.
-    I4,
-}
-
-impl Attention {
-    /// The QK operand width in bits.
-    pub fn bits(self) -> u32 {
-        match self {
-            Attention::F16 => 16,
-            Attention::I8 => 8,
-            Attention::I4 => 4,
-        }
-    }
-
-    /// `KREA2_ATTN_QK` (`16`, `8` or `4`), or fp16 when it is unset or empty.
-    /// For library callers that configure through the environment; the CLI
-    /// passes its `--attn` choice explicitly.
-    pub fn from_environment() -> Result<Attention> {
-        match std::env::var("KREA2_ATTN_QK").as_deref() {
-            Err(_) | Ok("" | "16") => Ok(Attention::F16),
-            Ok("8") => Ok(Attention::I8),
-            Ok("4") => Ok(Attention::I4),
-            Ok(_) => Err(Error::invalid("KREA2_ATTN_QK must be 4, 8 or 16")),
-        }
-    }
-}
+/// The attention kernel: fp16 QK and PV with an fp32 online softmax.
+pub const ATTENTION_SOURCE: &str = "attention_gqa_lds_f16_wmma";
 
 /// Transformer dimensions and launch rules for one sequence length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
     /// Text and image tokens together.
     pub tokens: usize,
-    /// The attention kernel family.
-    pub attention: Attention,
-    /// Waves per attention workgroup.
-    pub attention_waves: u32,
     /// Rows of every sequence-sized buffer, from [`shape::capacity`].
     pub capacity: usize,
 }
 
 impl Shape {
     /// The rules for `tokens`, refusing a length outside [`shape::TOKENS`].
-    pub fn new(tokens: usize, attention: Attention) -> Result<Shape> {
+    pub fn new(tokens: usize) -> Result<Shape> {
         if !shape::TOKENS.contains(&tokens) {
             return Err(Error::invalid(format!(
                 "tokens must be {}..{}",
@@ -69,13 +32,7 @@ impl Shape {
                 shape::TOKENS.end()
             )));
         }
-        Ok(Shape {
-            tokens,
-            attention,
-            // Long sequences leave less room per wave for the score tile.
-            attention_waves: if tokens < 8192 { 8 } else { 4 },
-            capacity: shape::capacity(tokens),
-        })
+        Ok(Shape { tokens, capacity: shape::capacity(tokens) })
     }
 
     fn jobs(&self) -> Vec<Job> {
@@ -128,7 +85,7 @@ impl Shape {
                 ],
             ),
             job(
-                self.attention_source(),
+                ATTENTION_SOURCE,
                 "attention",
                 &[
                     ("q_stride", "6144"),
@@ -140,18 +97,6 @@ impl Shape {
                 ],
             ),
         ]
-    }
-
-    /// The attention kernel for this width. Eight waves have the registers to
-    /// hold the next key tile; four do not, and prefetch instead.
-    pub fn attention_source(&self) -> &'static str {
-        match (self.attention, self.attention_waves) {
-            (Attention::F16, _) => "attention_gqa_lds_f16_wmma",
-            (Attention::I4, 8) => "attention_sage_i4_fast",
-            (Attention::I4, _) => "attention_sage_i4_fast_prefetch",
-            (Attention::I8, 8) => "attention_sage_i8_fast",
-            (Attention::I8, _) => "attention_sage_i8_fast_prefetch",
-        }
     }
 }
 
@@ -231,41 +176,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_smoothed_kernels_take_the_prefetch_variant_only_past_eight_thousand() {
-        let short = Shape::new(4115, Attention::I4).expect("a shape");
-        assert_eq!(short.attention_source(), "attention_sage_i4_fast");
-        let long = Shape::new(9000, Attention::I8).expect("a shape");
-        assert_eq!(long.attention_source(), "attention_sage_i8_fast_prefetch");
-        assert_eq!(
-            Shape::new(4115, Attention::F16).expect("a shape").attention_source(),
-            "attention_gqa_lds_f16_wmma"
-        );
-    }
-
-    #[test]
     fn every_kernel_a_bundle_names_has_an_embedded_source() {
         for tokens in [16, 4115, 9000, 16896] {
-            for attention in [Attention::F16, Attention::I8, Attention::I4] {
-                let shape = Shape::new(tokens, attention).expect("a shape");
-                for job in shape.jobs() {
-                    assert!(
-                        sources::block(job.source).is_some(),
-                        "no source for {} ({tokens}, {attention:?})",
-                        job.source
-                    );
-                }
+            let shape = Shape::new(tokens).expect("a shape");
+            for job in shape.jobs() {
+                assert!(
+                    sources::block(job.source).is_some(),
+                    "no source for {} ({tokens})",
+                    job.source
+                );
             }
         }
     }
 
     #[test]
     fn a_sequence_the_kernels_cannot_serve_is_named() {
-        assert!(
-            Shape::new(15, Attention::F16)
-                .unwrap_err()
-                .to_string()
-                .contains("tokens must be 16..16896")
-        );
-        assert!(Shape::new(16897, Attention::F16).is_err());
+        assert!(Shape::new(15).unwrap_err().to_string().contains("tokens must be 16..16896"));
+        assert!(Shape::new(16897).is_err());
     }
 }

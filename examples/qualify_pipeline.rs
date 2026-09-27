@@ -45,10 +45,7 @@ fn main() -> Result<()> {
         files,
         &context,
         None,
-        PipelineOptions {
-            fusion_backend: krea2::fusion::FusionBackend::Gpu,
-            ..Default::default()
-        },
+        PipelineOptions { fusion_backend: krea2::fusion::FusionBackend::Gpu },
     )?;
     eprintln!("opened pipeline in {:.3}s", start.elapsed().as_secs_f64());
     for (i, (width, height, tokens)) in

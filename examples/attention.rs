@@ -8,7 +8,7 @@
 //!
 //! Sources use the production ABI of `kernels/attention_gqa_lds_f16_wmma.loom`,
 //! V transposed to `[kv_heads * 128][capacity]`, and are also reported with the
-//! cost of the `sage_transpose` producing it. A `natural:` prefix binds V as
+//! cost of the `v_transpose` producing it. A `natural:` prefix binds V as
 //! `[capacity][kv_heads * 128]` instead, for kernels that stage it themselves.
 //! The first is the reference: others must match it byte for byte, or, with
 //! `--tolerance`, stay within that absolute difference, for candidates that
@@ -159,11 +159,11 @@ fn main() -> Result<()> {
     let peak_out = stream.allocate(128 * 16 * 4)?;
     let peak_bindings = [peak_out.binding()];
 
-    let mut transpose_spec = hrx::loom::Specialization::new("krea2_sage_transpose");
-    transpose_spec.set_config("krea2.sage_transpose.width", (KV_HEADS * DIM).to_string());
-    transpose_spec.set_config("krea2.sage_transpose.row_capacity", capacity.to_string());
+    let mut transpose_spec = hrx::loom::Specialization::new("krea2_v_transpose");
+    transpose_spec.set_config("krea2.v_transpose.width", (KV_HEADS * DIM).to_string());
+    transpose_spec.set_config("krea2.v_transpose.row_capacity", capacity.to_string());
     let transpose_artifact = compiler
-        .module(include_str!("../kernels/native/sage_transpose.loom"))
+        .module(include_str!("../kernels/native/v_transpose.loom"))
         .compile(&transpose_spec)?;
     // SAFETY: the transpose reads `tokens` rows of V and writes V^T, both sized above.
     let transpose = unsafe { stream.load_artifact(&transpose_artifact)? };

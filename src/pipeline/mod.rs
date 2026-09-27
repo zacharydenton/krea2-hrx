@@ -20,7 +20,6 @@ use shared::{BlockCache, BlockShape, Blocks, Bridge, native_stream};
 
 use self::profile::Profile;
 
-pub use crate::kernels::Attention;
 pub use crate::models::{Files, hub};
 pub use crate::{Error, Result};
 
@@ -90,7 +89,6 @@ pub struct Pipeline {
     bridge: Arc<Bridge>,
     files: Files,
     compiler: Option<String>,
-    attention: Attention,
     models: Models,
     /// Calls are serialized: they share the models' buffer pool.
     state: Mutex<State>,
@@ -110,9 +108,6 @@ struct State {
 pub struct PipelineOptions {
     /// Backend for the first text-fusion up projection. `Auto` is the GPU.
     pub fusion_backend: crate::fusion::FusionBackend,
-    /// Attention kernels for every block session. `None` takes
-    /// [`Attention::from_environment`] when the pipeline opens.
-    pub attention: Option<Attention>,
 }
 
 impl Pipeline {
@@ -141,10 +136,6 @@ impl Pipeline {
     ) -> Result<Pipeline> {
         // The models allocate on the stream that will later dispatch them, which
         // then moves into the state lock.
-        let attention = match options.attention {
-            Some(attention) => attention,
-            None => Attention::from_environment()?,
-        };
         let mut stream = native_stream(context)?;
         let mut models = Models::open(&mut stream, &files, compiler)?;
         models.fusion.set_backend(options.fusion_backend);
@@ -154,7 +145,6 @@ impl Pipeline {
             models,
             files,
             compiler: compiler.map(str::to_string),
-            attention,
             state: Mutex::new(State {
                 stream,
                 weights: None,
@@ -392,7 +382,6 @@ impl Pipeline {
                 resident,
                 shape.tokens(),
                 28,
-                self.attention,
                 self.compiler.as_deref(),
             )?;
             let (cos, sin) = rope(shape);

@@ -12,7 +12,7 @@ pub mod sources;
 use hrx::{Constants, Kernel};
 
 pub use crate::{Error, Result};
-pub use blocks::{Attention, PreparedBundle, Shape, prepare_for_target};
+pub use blocks::{ATTENTION_SOURCE, PreparedBundle, Shape, prepare_for_target};
 pub use cache::{PreparedKernels, compiler};
 
 /// Named kernel configuration values, sorted for stable cache serialization.
