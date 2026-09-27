@@ -1,0 +1,11 @@
+# `cargo deny check advisories`, run in CI. Each ignore is reviewed and says
+# when it can go.
+[advisories]
+ignore = [
+    # A stack overflow parsing untrusted protobuf. hrx-rs 0.8 pins protobuf
+    # =3.4.0 for its ONNX support; krea2 parses no protobuf or ONNX input.
+    # Remove once hrx-rs moves to protobuf 3.7.2 or later.
+    { id = "RUSTSEC-2024-0437", reason = "pinned by hrx-rs; krea2 parses no protobuf input" },
+    # Unmaintained, not vulnerable: a compile-time macro crate tokenizers uses.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time dependency of tokenizers" },
+]
