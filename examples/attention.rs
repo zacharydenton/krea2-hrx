@@ -13,7 +13,8 @@
 //! The first is the reference: others must match it byte for byte, or, with
 //! `--tolerance`, stay within that absolute difference, for candidates that
 //! legitimately reorder floating-point work. Device timestamps need a native
-//! bridge with HRX's profiling exports; see `docs/graph-recording.md`.
+//! bridge with HRX's profiling exports, as in hrx-rs 0.8.10's bundle; see
+//! `docs/graph-recording.md`.
 use anyhow::{Context, Result, bail, ensure};
 use half::f16;
 use hrx::{Buffer, Constants, Stream};

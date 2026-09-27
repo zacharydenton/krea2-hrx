@@ -15,7 +15,7 @@
 //! `llvm-objdump -d --mcpu=gfx1151`.
 //!
 //! Device timestamps need a native bridge with HRX's optional profiling
-//! exports; see `docs/graph-recording.md`.
+//! exports, as in hrx-rs 0.8.10's bundle; see `docs/graph-recording.md`.
 use anyhow::{Context, Result, bail, ensure};
 use hrx::{Constants, Kernel, Stream};
 

@@ -38,7 +38,7 @@ default = []
 npu = ["hrx/npu", "dep:serde", "dep:tempfile"]
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.8.9" }
+hrx = { package = "hrx-rs", version = "0.8.10" }
 
 # The CLI's error reporting, and the npu input capture's.
 anyhow = "1"
