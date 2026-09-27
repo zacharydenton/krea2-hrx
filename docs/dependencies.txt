@@ -163,7 +163,6 @@ num-conv
 num-traits
 once_cell
 oneshot
-onnx-protobuf
 openssl-probe
 option-ext
 os_str_bytes

@@ -48,7 +48,7 @@ Clone the repository and install the runtime CLI:
 git clone https://github.com/zacharydenton/krea2-hrx.git
 cd krea2-hrx
 
-cargo install --locked hrx-rs --version 0.8.8
+cargo install --locked hrx-rs --version 0.8.9
 hrx prepare
 cargo install --locked --path .
 
@@ -63,7 +63,7 @@ The native bundle is pinned by hash. See the
 [runtime guide](docs/hrx-runtime.md) for what `hrx prepare` fetches.
 
 The [experimental XDNA2 text-fusion backend](docs/npu-fusion.md) now uses native
-Loom on HRX 0.8.8, without Chess or IRON. Build with `--features npu` and select
+Loom on HRX 0.8.9, without Chess or IRON. Build with `--features npu` and select
 `--fusion-backend npu` to experiment. `auto` remains GPU: the native candidate
 is not qualified for automatic selection.
 

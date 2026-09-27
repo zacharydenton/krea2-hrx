@@ -1,6 +1,6 @@
 # Native Loom NPU text fusion
 
-The `npu` feature enables a native Loom/XDNA implementation on HRX 0.8.8.
+The `npu` feature enables a native Loom/XDNA implementation on HRX 0.8.9.
 [Measured results](npu-fusion-native-results.md) show a working but much slower
 candidate; automatic selection stays on GPU.
 It replaces the retired Chess/IRON execution path for
