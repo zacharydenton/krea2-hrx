@@ -21,6 +21,13 @@ JSON line: the sequence length, layer count, attention mode and HRX's raw
 and the interval union, span and gaps). Compare two builds by their per-label
 sums rather than by the printed table, which is rounded.
 
+For kernel work, `cargo run --release --example gemm_ab -- BASELINE.loom
+CANDIDATE.loom` times int8 GEMM sources the same way at the four transformer
+shapes, interleaving them round by round with a register-only WMMA peak
+(`experiments/peak_i8.loom`), so each result is a fraction of the ceiling
+measured under the same contention. Candidates must match the baseline byte
+for byte; `--no-check` admits diagnostic variants that deliberately skip work.
+
 Replay has not demonstrated a consistent end-to-end speedup on gfx1151. It
 reduces host recording work, but native barriers, partitioning and GPU resource
 use determine the completed time. Grid size alone does not establish saturation.
