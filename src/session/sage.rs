@@ -16,8 +16,8 @@
 //! 128 for int8, with `[heads][capacity]` float32 scales, so one key tile is
 //! one contiguous block. The correction is
 //! `[query heads][ceil(tokens / 64)][capacity]` in float32.
-use crate::kernels::Scalars;
 use crate::kernels::{Config, cache::PreparedKernels};
+use crate::kernels::{Scalars, grid, workgroup};
 use hrx::{Buffer, Stream, View};
 
 use super::{After, Error, Result, Sink};
@@ -28,7 +28,7 @@ struct Plan {
     name: &'static str,
     config: Config,
     scalars: Scalars,
-    grid: (u32, u32),
+    grid: (usize, usize),
     threads: u32,
 }
 
@@ -94,7 +94,8 @@ impl Sage {
         let cache = PreparedKernels::new(compiler);
         let mut prepared = Vec::with_capacity(7);
         for plan in Sage::plans(tokens, capacity, heads, kv_heads, tiles, bits) {
-            let kernel = cache.get(stream, plan.name, plan.config.clone(), plan.grid)?;
+            let [x, y, _] = grid(plan.name, plan.grid.0, plan.grid.1)?;
+            let kernel = cache.get(stream, plan.name, plan.config.clone(), (x, y))?;
             prepared.push((plan, kernel));
         }
         // One head's codes: a nibble or a byte per channel of 128.
@@ -157,7 +158,7 @@ impl Sage {
                     ("ysize", tiles * kv * 128),
                 ]),
                 scalars: Scalars::new().index(t),
-                grid: (kv as u32, tiles as u32),
+                grid: (kv, tiles),
                 threads: 128,
             },
             Plan {
@@ -170,7 +171,7 @@ impl Sage {
                     ("ysize", kv * 128),
                 ]),
                 scalars: Scalars::new().index(t),
-                grid: (kv as u32, 1),
+                grid: (kv, 1),
                 threads: 128,
             },
             // The query mean is per tile, not per sequence: each query tile
@@ -185,7 +186,7 @@ impl Sage {
                     ("ysize", h * tiles * 128),
                 ]),
                 scalars: Scalars::new().index(t),
-                grid: (tiles as u32, h as u32),
+                grid: (tiles, h),
                 threads: 128,
             },
             Plan {
@@ -201,7 +202,7 @@ impl Sage {
                     ("ssize", c * h),
                 ]),
                 scalars: Scalars::new().index(t),
-                grid: (t.div_ceil(8) as u32, h as u32),
+                grid: (t.div_ceil(8), h),
                 threads: 256,
             },
             Plan {
@@ -218,14 +219,14 @@ impl Sage {
                 ]),
                 scalars: Scalars::new().index(t),
                 // Over the capacity, not the tokens: the padded rows are read.
-                grid: (c.div_ceil(8) as u32, kv as u32),
+                grid: (c.div_ceil(8), kv),
                 threads: 256,
             },
             Plan {
                 name: "sage_transpose",
                 config: config(&[("width", kv * 128), ("row_capacity", c)]),
                 scalars: Scalars::new().index(t),
-                grid: (t.div_ceil(32) as u32, (kv * 128 / 32) as u32),
+                grid: (t.div_ceil(32), kv * 128 / 32),
                 threads: 256,
             },
             Plan {
@@ -241,7 +242,7 @@ impl Sage {
                     ("bstride", b_stride),
                 ]),
                 scalars: Scalars::new().index(m).float(1.0),
-                grid: (n.div_ceil(64) as u32, (kv * m.div_ceil(64)) as u32),
+                grid: (n.div_ceil(64), kv * m.div_ceil(64)),
                 threads: 256,
             },
         ]
@@ -296,14 +297,14 @@ impl Sage {
             Sink::Stream(stream) => {
                 for ((plan, kernel), operands) in self.prepared.iter().zip(&bindings) {
                     let constants = plan.scalars.pack(plan.name, kernel)?;
-                    self.check(plan, kernel)?;
+                    let block = workgroup(plan.name, kernel, plan.threads)?;
                     // Safety: the bindings match the shape each plan was
                     // compiled for, which `new` derived from the same fields.
                     unsafe {
                         stream.dispatch(
                             kernel,
-                            [plan.grid.0, plan.grid.1, 1],
-                            [plan.threads, 1, 1],
+                            grid(plan.name, plan.grid.0, plan.grid.1)?,
+                            block,
                             &constants,
                             operands,
                         )
@@ -320,7 +321,7 @@ impl Sage {
             self.prepared.iter().zip(&bindings).enumerate()
         {
             let constants = plan.scalars.pack(plan.name, kernel)?;
-            self.check(plan, kernel)?;
+            let block = workgroup(plan.name, kernel, plan.threads)?;
             let pair;
             let after = match after_table[index] {
                 [] => entry.as_slice(),
@@ -336,8 +337,8 @@ impl Sage {
                 recording.graph.dispatch(
                     after,
                     kernel,
-                    [plan.grid.0, plan.grid.1, 1],
-                    [plan.threads, 1, 1],
+                    grid(plan.name, plan.grid.0, plan.grid.1)?,
+                    block,
                     &constants,
                     operands,
                 )
@@ -347,19 +348,6 @@ impl Sage {
         // Correction already depends on K quantization. These three nodes
         // cover every attention input and order scratch reuse in the next pass.
         recording.last = After::Three([nodes[3], nodes[5], nodes[6]]);
-        Ok(())
-    }
-
-    /// The runtime validates the block against what the kernel was compiled
-    /// with; disagreeing with it here names the stage instead of the export.
-    fn check(&self, plan: &Plan, kernel: &hrx::Kernel) -> Result<()> {
-        let compiled = kernel.info().workgroup_size;
-        if compiled != [plan.threads, 1, 1] {
-            return Err(Error::internal(format!(
-                "{}: compiled for workgroup {compiled:?} but the host asked for {}",
-                plan.name, plan.threads
-            )));
-        }
         Ok(())
     }
 }

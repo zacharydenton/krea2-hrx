@@ -205,7 +205,7 @@ impl Pipeline {
         let State { stream, .. } = &mut *state;
         self.bridge.check()?;
         let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
-        let rgb = self.models.decode(stream, &packed, height, width)?;
+        let rgb = self.models.decode(stream, &packed, width, height)?;
         stream.synchronize()?;
         Ok(rgb)
     }
@@ -301,7 +301,7 @@ impl Pipeline {
             }
         }
         timing.mark(stream, "denoise")?;
-        let rgb = self.models.decode(stream, &latents, height, width)?;
+        let rgb = self.models.decode(stream, &latents, width, height)?;
         stream.synchronize()?;
         timing.mark(stream, "VAE decode")?;
         Ok(rgb)

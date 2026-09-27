@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::RangedU64ValueParser;
 use clap::{CommandFactory, Parser};
 use krea2::pipeline::{Attention, Files, Pipeline, PipelineOptions, Request};
 
@@ -50,13 +51,15 @@ struct Args {
     /// Images to generate, from consecutive seeds, named out-0, out-1, ...
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=1000))]
     images: u32,
-    #[arg(long, default_value_t = 1024)]
-    width: i32,
-    #[arg(long, default_value_t = 1024)]
-    height: i32,
+    /// Image width in pixels, a multiple of 16
+    #[arg(long, default_value_t = 1024, value_parser = RangedU64ValueParser::<usize>::new().range(64..=2048))]
+    width: usize,
+    /// Image height in pixels, a multiple of 16
+    #[arg(long, default_value_t = 1024, value_parser = RangedU64ValueParser::<usize>::new().range(64..=2048))]
+    height: usize,
     /// Sampling steps (default: the checkpoint's)
-    #[arg(long, value_parser = clap::value_parser!(i32).range(1..=100))]
-    steps: Option<i32>,
+    #[arg(long, value_parser = RangedU64ValueParser::<usize>::new().range(1..=100))]
+    steps: Option<usize>,
     #[arg(long, default_value_t = 0)]
     seed: u64,
     /// Classifier-free guidance, cond + g * (cond - uncond)
@@ -113,7 +116,7 @@ fn output_format(path: &Path) -> std::result::Result<OutputFormat, &'static str>
     }
 }
 
-fn write_image(path: &Path, rgb: &[u8], width: i32, height: i32) -> Result<()> {
+fn write_image(path: &Path, rgb: &[u8], width: usize, height: usize) -> Result<()> {
     // Validate before creating the file so an unsupported extension never
     // truncates an existing output or leaves misleading image bytes behind.
     let format = output_format(path).map_err(anyhow::Error::msg)?;
@@ -122,7 +125,8 @@ fn write_image(path: &Path, rgb: &[u8], width: i32, height: i32) -> Result<()> {
     let mut file = std::io::BufWriter::new(file);
     match format {
         OutputFormat::Png => {
-            let mut encoder = png::Encoder::new(&mut file, width as u32, height as u32);
+            let mut encoder =
+                png::Encoder::new(&mut file, u32::try_from(width)?, u32::try_from(height)?);
             encoder.set_color(png::ColorType::Rgb);
             encoder.set_depth(png::BitDepth::Eight);
             let mut writer = encoder.write_header()?;
@@ -171,11 +175,8 @@ fn run(args: Args) -> Result<()> {
     if prompt.trim().is_empty() {
         return Err(usage("no prompt (give -p \"...\" or pipe it on stdin)"));
     }
-    if args.width % 16 != 0 || args.height % 16 != 0 {
+    if !args.width.is_multiple_of(16) || !args.height.is_multiple_of(16) {
         return Err(usage("--width and --height must be multiples of 16"));
-    }
-    if !(64..=2048).contains(&args.width) || !(64..=2048).contains(&args.height) {
-        return Err(usage("--width and --height must be between 64 and 2048"));
     }
     if args.guidance.is_some_and(|g| !(0.0..=100.0).contains(&g)) {
         return Err(usage("--guidance must be between 0 and 100"));
@@ -235,9 +236,9 @@ fn run(args: Args) -> Result<()> {
         let request = Request {
             prompt: &prompt,
             negative_prompt: args.negative.as_deref().unwrap_or(""),
-            width: args.width as usize,
-            height: args.height as usize,
-            steps: args.steps.map(|steps| steps as usize),
+            width: args.width,
+            height: args.height,
+            steps: args.steps,
             guidance: args.guidance,
             seed: args.seed + u64::from(index),
             initial_latents: None,
@@ -303,9 +304,9 @@ mod tests {
 
     #[test]
     fn png_round_trips_and_ppm_carries_its_header() {
-        let directory = std::env::temp_dir().join(format!("krea2-cli-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let (width, height): (i32, i32) = (7, 5);
+        let directory = tempfile::tempdir().unwrap();
+        let directory = directory.path();
+        let (width, height) = (7usize, 5usize);
         let rgb: Vec<u8> = (0..width * height * 3).map(|i| (i * 7 % 256) as u8).collect();
 
         let png_path = directory.join("image.png");
@@ -323,6 +324,5 @@ mod tests {
         let header = format!("P6\n{width} {height}\n255\n");
         assert!(bytes.starts_with(header.as_bytes()));
         assert_eq!(&bytes[header.len()..], &rgb[..]);
-        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

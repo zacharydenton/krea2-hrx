@@ -74,6 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, (kernel, constants)) in loaded.iter().enumerate() {
         // Safety: bindings are sized and initialized for all valid rows and zero
         // headroom, and each workgroup owns sixteen query rows and four heads.
+        // SAFETY: the bindings are sized for the configuration this
+        // kernel was compiled with above.
         unsafe {
             stream.dispatch(kernel, grid, [128, 1, 1], constants, &bindings)?;
         }
@@ -102,6 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             stream.synchronize()?;
             let began = Instant::now();
             for _ in 0..BATCH {
+                // SAFETY: the bindings are sized for the configuration this
+                // kernel was compiled with above.
                 unsafe {
                     stream.dispatch(kernel, grid, [128, 1, 1], constants, &bindings)?;
                 }

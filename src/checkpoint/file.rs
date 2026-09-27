@@ -3,15 +3,16 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use hrx::artifacts::safetensors::{DType, FileView};
+use hrx::artifacts::safetensors::{Entry, FileView};
+
+pub use hrx::artifacts::safetensors::DType;
 
 use super::{Error, Result};
 
 /// One tensor's dtype, shape and bytes.
 #[derive(Clone, Copy, Debug)]
 pub struct Tensor<'a> {
-    /// As safetensors names it: `I8`, `F32`, `BF16`, `F8_E4M3`.
-    pub dtype: &'a str,
+    pub dtype: DType,
     pub shape: &'a [usize],
     pub bytes: &'a [u8],
 }
@@ -28,36 +29,6 @@ impl Tensor<'_> {
             return Err(Error::invalid("tensor size is not a whole number of rows"));
         }
         Ok(self.bytes.len() / rows)
-    }
-}
-
-struct Entry {
-    dtype: &'static str,
-    shape: Vec<usize>,
-    original: String,
-}
-
-/// The dtype names this runtime matches on, which are safetensors' own.
-fn dtype_name(dtype: DType) -> &'static str {
-    match dtype {
-        DType::BOOL => "BOOL",
-        DType::U8 => "U8",
-        DType::I8 => "I8",
-        DType::F8_E4M3 => "F8_E4M3",
-        DType::F8_E5M2 => "F8_E5M2",
-        DType::I16 => "I16",
-        DType::U16 => "U16",
-        DType::F16 => "F16",
-        DType::BF16 => "BF16",
-        DType::I32 => "I32",
-        DType::U32 => "U32",
-        DType::F32 => "F32",
-        DType::F64 => "F64",
-        DType::I64 => "I64",
-        DType::U64 => "U64",
-        // Something this runtime has never seen. Every consumer matches on the
-        // names above and reports the rest as unsupported, which this is.
-        _ => "UNSUPPORTED",
     }
 }
 
@@ -82,6 +53,7 @@ fn unwrap_model(entries: BTreeMap<String, Entry>) -> BTreeMap<String, Entry> {
 pub struct Checkpoint {
     path: PathBuf,
     file: FileView,
+    /// The file's entries under their unwrapped names.
     entries: BTreeMap<String, Entry>,
 }
 
@@ -106,21 +78,7 @@ impl Checkpoint {
         let file = unsafe { FileView::map(path) }.map_err(|error| {
             Error::invalid(format!("cannot read {}: {error}", path.display()))
         })?;
-        let entries = file
-            .entries()
-            .iter()
-            .map(|(name, entry)| {
-                (
-                    name.clone(),
-                    Entry {
-                        dtype: dtype_name(entry.dtype),
-                        shape: entry.shape.clone(),
-                        original: name.clone(),
-                    },
-                )
-            })
-            .collect();
-        let entries = unwrap_model(entries);
+        let entries = unwrap_model(file.entries().clone());
         Ok(Checkpoint { path: path.to_path_buf(), file, entries })
     }
 
@@ -136,11 +94,7 @@ impl Checkpoint {
         let entry = self.entries.get(name).ok_or_else(|| {
             Error::invalid(format!("missing tensor {name} in {}", self.path.display()))
         })?;
-        Ok(Tensor {
-            dtype: entry.dtype,
-            shape: &entry.shape,
-            bytes: self.file.get(&entry.original)?.bytes,
-        })
+        Ok(Tensor { dtype: entry.dtype, shape: &entry.shape, bytes: self.file.bytes(entry)? })
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -150,7 +104,9 @@ impl Checkpoint {
     /// The transformer blocks the file carries, counted by their attention
     /// weights.
     pub fn block_count(&self) -> usize {
-        (0..).take_while(|i| self.has(&format!("blocks.{i}.attn.wq.weight"))).count()
+        (0..self.entries.len())
+            .take_while(|i| self.has(&format!("blocks.{i}.attn.wq.weight")))
+            .count()
     }
 }
 
@@ -206,9 +162,12 @@ mod tests {
             write("read.safetensors", header, &[1, 2, 3, 4, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0]);
         let file = Checkpoint::open(&path).expect("the fixture opens");
         let w = file.get("w").expect("w");
-        assert_eq!((w.dtype, w.shape, w.bytes), ("I8", &[2, 3][..], &[1, 2, 3, 4, 5, 6][..]));
+        assert_eq!(
+            (w.dtype, w.shape, w.bytes),
+            (DType::I8, &[2, 3][..], &[1, 2, 3, 4, 5, 6][..])
+        );
         assert_eq!((w.rows().unwrap(), w.row_bytes().unwrap()), (2, 3));
-        assert_eq!(file.get("s").expect("s").dtype, "F32");
+        assert_eq!(file.get("s").expect("s").dtype, DType::F32);
         assert!(!file.has("__metadata__"), "metadata is not a tensor");
         let error = file.get("missing").unwrap_err();
         assert!(error.to_string().starts_with("missing tensor missing in "), "{error}");

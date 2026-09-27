@@ -15,9 +15,9 @@ fn prepared_operations_reuse_both_shapes_and_remain_ordered() {
         let buffer = stream.allocate(count * 2).unwrap();
         stream.fill(buffer.binding(), 0).unwrap();
         let constants = Scalars::new().index(count).pack("unary_one", &kernel).unwrap();
-        // Safety: unary_one operates independently on count bf16 elements.
-        // Input/output aliasing is intentional; both launches use this stream.
         let bindings = [buffer.binding(), buffer.binding()];
+        // SAFETY: unary_one operates independently on count bf16 elements.
+        // Input/output aliasing is intentional; both launches use this stream.
         unsafe {
             stream
                 .dispatch(&kernel, [grid.0, grid.1, 1], [256, 1, 1], &constants, &bindings)

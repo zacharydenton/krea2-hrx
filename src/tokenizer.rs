@@ -46,30 +46,53 @@ impl Tokenizer {
     /// Token ids for arbitrary text, with no template and no added specials —
     /// special tokens written out in the text itself are still recognized.
     pub fn encode(&self, text: &str) -> Result<Vec<i32>> {
-        if text.len() > MAX_BYTES {
-            return Err(Error::invalid(format!("prompt exceeds {MAX_BYTES} UTF-8 bytes")));
-        }
-        let encoding = self
-            .0
-            .encode(text, false)
-            .map_err(|e| Error::invalid(format!("cannot tokenize: {e}")))?;
-        Ok(encoding.get_ids().iter().map(|&id| id as i32).collect())
+        check_length(text)?;
+        self.ids(text)
     }
 
     /// Text for token ids, for tests and for anything that wants to show what
     /// the model was given.
     pub fn decode(&self, ids: &[i32]) -> Result<String> {
-        let ids: Vec<u32> = ids.iter().map(|&id| id as u32).collect();
+        let ids = ids
+            .iter()
+            .map(|&id| u32::try_from(id).map_err(|_| Error::invalid(format!("token id {id}"))))
+            .collect::<Result<Vec<_>>>()?;
         self.0.decode(&ids, false).map_err(|e| Error::invalid(format!("cannot decode: {e}")))
     }
 
     /// The prompt under Krea's chat template, truncated as the model expects.
+    /// The byte limit applies to the prompt, not to the template around it.
     pub fn prompt(&self, text: &str) -> Result<Vec<i32>> {
-        let mut ids = self.encode(&format!("{PREFIX}{text}"))?;
+        check_length(text)?;
+        let mut ids = self.ids(&format!("{PREFIX}{text}"))?;
         ids.truncate(MAX_TEMPLATED);
-        ids.extend(self.encode(SUFFIX)?);
+        ids.extend(self.ids(SUFFIX)?);
         Ok(ids)
     }
+
+    /// Token ids, as the `i32` the text encoder's embedding lookup reads.
+    fn ids(&self, text: &str) -> Result<Vec<i32>> {
+        let encoding = self
+            .0
+            .encode(text, false)
+            .map_err(|e| Error::invalid(format!("cannot tokenize: {e}")))?;
+        encoding
+            .get_ids()
+            .iter()
+            .map(|&id| {
+                i32::try_from(id).map_err(|_| {
+                    Error::invalid(format!("token id {id} exceeds the vocabulary"))
+                })
+            })
+            .collect()
+    }
+}
+
+fn check_length(text: &str) -> Result<()> {
+    if text.len() > MAX_BYTES {
+        return Err(Error::invalid(format!("prompt exceeds {MAX_BYTES} UTF-8 bytes")));
+    }
+    Ok(())
 }
 
 /// NFC, for comparing round-tripped text with its normalized input.
@@ -127,6 +150,9 @@ mod tests {
     fn text_beyond_the_byte_limit_is_refused() {
         let error = tokenizer().encode(&"x".repeat(MAX_BYTES + 1)).unwrap_err();
         assert_eq!(error.to_string(), "prompt exceeds 65536 UTF-8 bytes");
+        // The limit is the prompt's own: the template around it does not count.
+        assert!(tokenizer().prompt(&"x".repeat(MAX_BYTES)).is_ok());
+        assert!(tokenizer().prompt(&"x".repeat(MAX_BYTES + 1)).is_err());
     }
 
     #[test]

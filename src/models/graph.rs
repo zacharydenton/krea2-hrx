@@ -17,6 +17,9 @@ use super::{Error, Result};
 /// The blocks' six modulation vectors, for all 28 of them.
 const MODULATION_ELEMENTS: usize = 28 * 6 * 6144;
 
+/// Every attention head here is this wide.
+const HEAD_DIM: usize = 128;
+
 /// The text encoder's hidden width, and the transformer's.
 const TEXT_WIDTH: usize = 2560;
 const WIDTH: usize = 6144;
@@ -83,6 +86,27 @@ impl Models {
         self.ops.linear(stream, x, weight, bias)
     }
 
+    /// RMSNorm over each 128-wide head of `x`'s rows, as QK normalization
+    /// takes it.
+    fn head_norm(
+        &self,
+        stream: &mut Stream,
+        x: &Tensor,
+        weight: &Weight,
+        mode: Norm,
+        eps: f32,
+    ) -> Result<Tensor> {
+        let heads = x.cols() / HEAD_DIM;
+        let normed = self.ops.norm(
+            stream,
+            &x.view(x.rows() * heads, HEAD_DIM, 0)?,
+            weight,
+            mode,
+            eps,
+        )?;
+        normed.view(x.rows(), x.cols(), 0)
+    }
+
     /// Qwen3-VL's 35 layers, returning the 12 layer taps the fusion consumes.
     ///
     /// The prompt's 34-token prefix is context for the encoder and not part of
@@ -105,16 +129,16 @@ impl Models {
         stream.upload(identifiers.binding(), bytemuck::cast_slice(ids))?;
         let args_scalars = Scalars::new().index(x.size());
         let args = [embedding.values()?, identifiers.binding(), x.binding()?];
+        // SAFETY: every id is checked against the embedding's rows above, and `x` holds
+        // one row per id.
         unsafe {
-            self.ops.launch(
+            self.ops.launch_1d(
                 stream,
                 "embedding",
                 config(&[("wsize", embedding.count), ("rows", count), ("cols", TEXT_WIDTH)]),
                 &args_scalars,
                 &args,
-                x.size().div_ceil(256),
-                1,
-                256,
+                x.size(),
             )
         }?;
 
@@ -131,26 +155,10 @@ impl Models {
             let q = self.lin(stream, &normed, &self.text, &format!("{attn}.q_proj"))?;
             let k = self.lin(stream, &normed, &self.text, &format!("{attn}.k_proj"))?;
             let v = self.lin(stream, &normed, &self.text, &format!("{attn}.v_proj"))?;
-            let q = self
-                .ops
-                .norm(
-                    stream,
-                    &q.view(count * 32, 128, 0)?,
-                    self.text.get(&format!("{attn}.q_norm.weight"))?,
-                    Norm::Scale,
-                    1e-6,
-                )?
-                .view(count, 4096, 0)?;
-            let k = self
-                .ops
-                .norm(
-                    stream,
-                    &k.view(count * 8, 128, 0)?,
-                    self.text.get(&format!("{attn}.k_norm.weight"))?,
-                    Norm::Scale,
-                    1e-6,
-                )?
-                .view(count, 1024, 0)?;
+            let q_norm = self.text.get(&format!("{attn}.q_norm.weight"))?;
+            let k_norm = self.text.get(&format!("{attn}.k_norm.weight"))?;
+            let q = self.head_norm(stream, &q, q_norm, Norm::Scale, 1e-6)?;
+            let k = self.head_norm(stream, &k, k_norm, Norm::Scale, 1e-6)?;
             let q = self.ops.rope(stream, &q, count, 32, 5e6)?;
             let k = self.ops.rope(stream, &k, count, 8, 5e6)?;
             let attended =
@@ -181,8 +189,10 @@ impl Models {
             if index % 3 == 1 {
                 let args_scalars = Scalars::new().index(tokens * TEXT_WIDTH);
                 let args = [x.binding()?, taps.binding()?];
+                // SAFETY: `taps` holds twelve slots of `tokens` rows; the tap index is below twelve
+                // because this runs for every third of 35 layers.
                 unsafe {
-                    self.ops.launch(
+                    self.ops.launch_1d(
                         stream,
                         "tap",
                         config(&[
@@ -192,9 +202,7 @@ impl Models {
                         ]),
                         &args_scalars,
                         &args,
-                        (tokens * TEXT_WIDTH).div_ceil(256),
-                        1,
-                        256,
+                        tokens * TEXT_WIDTH,
                     )
                 }?;
             }
@@ -225,26 +233,10 @@ impl Models {
         let q = self.lin(stream, &normed, w, &format!("{prefix}.attn.wq"))?;
         let k = self.lin(stream, &normed, w, &format!("{prefix}.attn.wk"))?;
         let v = self.lin(stream, &normed, w, &format!("{prefix}.attn.wv"))?;
-        let q = self
-            .ops
-            .norm(
-                stream,
-                &q.view(q.rows() * 20, 128, 0)?,
-                w.get(&format!("{prefix}.attn.qknorm.qnorm.scale"))?,
-                Norm::OnePlusScale,
-                1e-5,
-            )?
-            .view(x.rows(), TEXT_WIDTH, 0)?;
-        let k = self
-            .ops
-            .norm(
-                stream,
-                &k.view(k.rows() * 20, 128, 0)?,
-                w.get(&format!("{prefix}.attn.qknorm.knorm.scale"))?,
-                Norm::OnePlusScale,
-                1e-5,
-            )?
-            .view(x.rows(), TEXT_WIDTH, 0)?;
+        let q_norm = w.get(&format!("{prefix}.attn.qknorm.qnorm.scale"))?;
+        let k_norm = w.get(&format!("{prefix}.attn.qknorm.knorm.scale"))?;
+        let q = self.head_norm(stream, &q, q_norm, Norm::OnePlusScale, 1e-5)?;
+        let k = self.head_norm(stream, &k, k_norm, Norm::OnePlusScale, 1e-5)?;
         let attended =
             self.ops.attention(stream, &q, &k, &v, batch, tokens, 20, 20, 128, false)?;
         let gate = self.ops.unary(
@@ -273,9 +265,10 @@ impl Models {
             Unary::Silu,
         )?;
         let (weight, bias) = linear_layer(w, &format!("{prefix}.mlp.up"))?;
-        let offloaded = match offload {
-            true => self.fusion.linear(stream, &self.ops, &normed, weight, bias)?,
-            false => None,
+        let offloaded = if offload {
+            self.fusion.linear(stream, &self.ops, &normed, weight, bias)?
+        } else {
+            None
         };
         let up = match offloaded {
             Some(output) => output,
@@ -316,16 +309,16 @@ impl Models {
         let projected = self.ops.tensor(stream, tokens, TEXT_WIDTH)?;
         let args_scalars = Scalars::new().index(projected.size());
         let args = [x.binding()?, projector.values()?, projected.binding()?];
+        // SAFETY: `x` is twelve taps per token and `projected` one row per token, checked
+        // against the projector's twelve weights above.
         unsafe {
-            self.ops.launch(
+            self.ops.launch_1d(
                 stream,
                 "fuse",
                 config(&[("xsize", x.size()), ("wsize", 12)]),
                 &args_scalars,
                 &args,
-                projected.size().div_ceil(256),
-                1,
-                256,
+                projected.size(),
             )
         }?;
         x = projected;
@@ -396,16 +389,16 @@ impl Models {
         let out = self.ops.pool().acquire(stream, MODULATION_ELEMENTS * 4)?;
         let args_scalars = Scalars::new().index(MODULATION_ELEMENTS);
         let args = [vector.binding()?, self.block_tables.binding()?, out.binding()];
+        // SAFETY: `vector` is checked to hold six rows of `WIDTH`, and the tables and the
+        // output both hold `MODULATION_ELEMENTS`.
         unsafe {
-            self.ops.launch(
+            self.ops.launch_1d(
                 stream,
                 "modulation",
                 config(&[("xsize", vector.size())]),
                 &args_scalars,
                 &args,
-                MODULATION_ELEMENTS.div_ceil(256),
-                1,
-                256,
+                MODULATION_ELEMENTS,
             )
         }?;
         Ok(out)
@@ -428,6 +421,8 @@ impl Models {
         let factor = self.ops.tensor(stream, 1, WIDTH)?;
         let args_scalars = Scalars::new().index(WIDTH);
         let args = [scale.binding()?, factor.binding()?];
+        // SAFETY: `scale` and `factor` are each one row of `WIDTH`, a multiple
+        // of 256.
         unsafe {
             self.ops.launch(
                 stream,
@@ -476,9 +471,10 @@ impl Models {
         height: usize,
         width: usize,
     ) -> Result<Tensor> {
-        let skip = match self.vae.has(&format!("{prefix}.conv_shortcut.weight")) {
-            true => self.conv(stream, x, height, width, &format!("{prefix}.conv_shortcut"))?,
-            false => x.clone(),
+        let skip = if self.vae.has(&format!("{prefix}.conv_shortcut.weight")) {
+            self.conv(stream, x, height, width, &format!("{prefix}.conv_shortcut"))?
+        } else {
+            x.clone()
         };
         let y =
             self.ops.norm_silu(stream, x, self.vae.get(&format!("{prefix}.norm1.gamma"))?)?;
@@ -563,8 +559,9 @@ impl Models {
         let y = self.ops.tensor(stream, x.rows(), count)?;
         let args_scalars = Scalars::new().index(y.size());
         let args = [x.binding()?, y.binding()?];
+        // SAFETY: `y` takes `count` of `x`'s columns; the configuration names both sizes.
         unsafe {
-            self.ops.launch(
+            self.ops.launch_1d(
                 stream,
                 "columns",
                 config(&[
@@ -575,15 +572,14 @@ impl Models {
                 ]),
                 &args_scalars,
                 &args,
-                y.size().div_ceil(256),
-                1,
-                256,
+                y.size(),
             )
         }?;
         Ok(y)
     }
 
-    /// Packed latents to RGB bytes, decoded in overlapping tiles.
+    /// Packed latents to RGB bytes for a `width x height` image, decoded in
+    /// overlapping tiles.
     ///
     /// The VAE's activations are quadratic in tile area, so a large image is
     /// decoded in 32x32-latent tiles with a 64-pixel overlap blended linearly.
@@ -591,8 +587,8 @@ impl Models {
         &self,
         stream: &mut Stream,
         packed: &Tensor,
-        height: usize,
         width: usize,
+        height: usize,
     ) -> Result<Vec<u8>> {
         let (h, w) = (height / 8, width / 8);
         let latent = unpack(&packed.download(stream)?, h, w)?;
@@ -771,9 +767,10 @@ fn blend_into(tile: &mut Tile, neighbour: &[u16], blend: usize, vertical: bool) 
 /// The transformer checkpoint: everything but the blocks' quantised linears
 /// (those are the block session's), plus each block's modulation table.
 fn transformer_name(key: &str) -> String {
-    match key.starts_with("blocks.") && !key.ends_with(".mod.lin") {
-        true => String::new(),
-        false => key.to_string(),
+    if key.starts_with("blocks.") && !key.ends_with(".mod.lin") {
+        String::new()
+    } else {
+        key.to_string()
     }
 }
 

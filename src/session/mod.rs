@@ -18,6 +18,7 @@ pub mod weights;
 
 use std::cell::{Cell, RefCell};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::kernels::{Attention, Scalars, Shape, shape};
@@ -30,14 +31,14 @@ pub use weights::Weights;
 pub use crate::{Error, Result};
 
 /// The model's shape, fixed by the checkpoint.
-pub const HIDDEN: i32 = 6144;
-pub const KV_HEADS: i32 = 12;
-pub const HEAD_DIM: i32 = 128;
-pub const INTER: i32 = 16384;
+pub const HIDDEN: usize = 6144;
+pub const KV_HEADS: usize = 12;
+pub const HEAD_DIM: usize = 128;
+pub const INTER: usize = 16384;
 /// wq | wk | wv | attention gate, concatenated into one operand.
-pub const QKVG: i32 = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN;
+pub const QKVG: usize = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN;
 /// Where the attention gate's rows start inside that operand.
-pub const GATE_OFFSET: i32 = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
+pub const GATE_OFFSET: usize = HIDDEN + 2 * KV_HEADS * HEAD_DIM;
 const THREADS: u32 = 256;
 
 /// FNV-1a fingerprint of all RoPE table bytes for upload caching.
@@ -120,9 +121,16 @@ pub(crate) enum Sink<'g, 'r> {
     Record(&'r mut Recording<'g>),
 }
 
+/// This block's slice of the modulation tables: prescale, preshift, pregate,
+/// postscale, postshift, postgate, each 6144 floats.
+fn modulation(mods: View<'_>, index: usize, part: usize) -> Result<View<'_>> {
+    let row = HIDDEN * 4;
+    Ok(mods.slice(index * 6 * row + part * row, row)?)
+}
+
 /// The gate half of the fused QKVG buffer: from its offset to the end.
 fn gate_half(fused: &Buffer) -> Result<View<'_>> {
-    let at = GATE_OFFSET as usize * 2;
+    let at = GATE_OFFSET * 2;
     fused.try_slice(at, fused.bytes() - at).map_err(Error::from)
 }
 
@@ -150,7 +158,7 @@ pub struct Session {
     /// forwards dispatch directly instead of replaying the recorded graph.
     profile: AtomicBool,
     stages: RefCell<Vec<(&'static str, f64)>>,
-    weights: std::sync::Arc<Weights>,
+    weights: Arc<Weights>,
 }
 
 impl Session {
@@ -177,27 +185,19 @@ impl Session {
         {
             return Err(Error::invalid("session belongs to another model context device"));
         }
-        if cos.len() != self.tokens * HEAD_DIM as usize || sin.len() != cos.len() {
+        if cos.len() != self.tokens * HEAD_DIM || sin.len() != cos.len() {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
         self.upload_rope(&mut stream, &cos, &sin)?;
         // Record before handing the stream to workers; no compilation or graph
         // preparation is deferred to warm inference.
         if self.graph.borrow().is_none() {
-            let mut recording = Recording { graph: stream.graph()?, last: After::None };
-            for index in 0..self.layers {
-                self.block(
-                    &mut Sink::Record(&mut recording),
-                    index,
-                    self.buffers.mods.binding(),
-                )?;
-            }
-            *self.graph.borrow_mut() = Some(recording.graph.finish()?);
+            *self.graph.borrow_mut() = Some(self.record_graph(&mut stream)?);
         }
         stream.synchronize()?;
-        let x = TensorDesc::new(DType::BF16, vec![self.tokens, HIDDEN as usize])?
+        let x = TensorDesc::new(DType::BF16, vec![self.tokens, HIDDEN])?
             .with_layout(Layout::Rows)?;
-        let mods = TensorDesc::new(DType::F32, vec![self.layers, 6, HIDDEN as usize])?;
+        let mods = TensorDesc::new(DType::F32, vec![self.layers, 6, HIDDEN])?;
         let mut owned = Some((self, stream, cos, sin));
         Ok(PreparedModel::prepare(context, 1, |context| {
             let inputs = vec![context.allocate(x.clone())?, context.allocate(mods.clone())?];
@@ -234,7 +234,7 @@ impl Session {
         layers: usize,
     ) -> Result<Session> {
         let (file, plan) = Self::validate(checkpoint, tokens, layers)?;
-        let weights = std::sync::Arc::new(Weights::upload(stream, &file, plan)?);
+        let weights = Arc::new(Weights::upload(stream, &file, plan)?);
         Self::with_weights(
             stream,
             weights,
@@ -262,7 +262,7 @@ impl Session {
     /// `compiler` selects a Loom shared library for all session kernels.
     pub fn with_weights(
         stream: &mut Stream,
-        weights: std::sync::Arc<Weights>,
+        weights: Arc<Weights>,
         tokens: usize,
         layers: usize,
         attention: Attention,
@@ -287,7 +287,7 @@ impl Session {
 
     fn build(
         stream: &mut Stream,
-        weights: std::sync::Arc<Weights>,
+        weights: Arc<Weights>,
         bundle: &crate::kernels::PreparedBundle,
         tokens: usize,
         layers: usize,
@@ -299,38 +299,38 @@ impl Session {
             let p = format!("blocks.{index}");
             let at = |name: &str, bytes: usize| weights.locate(&format!("{p}.{name}"), bytes);
             blocks.push(Block {
-                qkvg_q: at("qkvg.q", QKVG as usize * HIDDEN as usize)?,
-                qkvg_s: at("qkvg.s", QKVG as usize * 4)?,
-                wo_q: at("wo.q", HIDDEN as usize * HIDDEN as usize)?,
-                wo_s: at("wo.s", HIDDEN as usize * 4)?,
-                gu_q: at("gu.q", 2 * INTER as usize * HIDDEN as usize)?,
-                gu_s: at("gu.s", 2 * INTER as usize * 4)?,
-                down_q: at("down.q", HIDDEN as usize * INTER as usize)?,
-                down_s: at("down.s", HIDDEN as usize * 4)?,
-                prenorm: at("prenorm", HIDDEN as usize * 4)?,
-                postnorm: at("postnorm", HIDDEN as usize * 4)?,
-                qnorm: at("qnorm", HEAD_DIM as usize * 4)?,
-                knorm: at("knorm", HEAD_DIM as usize * 4)?,
+                qkvg_q: at("qkvg.q", QKVG * HIDDEN)?,
+                qkvg_s: at("qkvg.s", QKVG * 4)?,
+                wo_q: at("wo.q", HIDDEN * HIDDEN)?,
+                wo_s: at("wo.s", HIDDEN * 4)?,
+                gu_q: at("gu.q", 2 * INTER * HIDDEN)?,
+                gu_s: at("gu.s", 2 * INTER * 4)?,
+                down_q: at("down.q", HIDDEN * INTER)?,
+                down_s: at("down.s", HIDDEN * 4)?,
+                prenorm: at("prenorm", HIDDEN * 4)?,
+                postnorm: at("postnorm", HIDDEN * 4)?,
+                qnorm: at("qnorm", HEAD_DIM * 4)?,
+                knorm: at("knorm", HEAD_DIM * 4)?,
             });
         }
         let kernels = Kernels::load(stream, bundle)?;
         let capacity = shape.capacity;
-        let kv_bytes = KV_HEADS as usize * HEAD_DIM as usize * capacity * 2;
+        let kv_bytes = KV_HEADS * HEAD_DIM * capacity * 2;
         let allocate = |bytes: usize| stream.allocate(bytes).map_err(Error::from);
         let buffers = Buffers {
-            x: allocate(capacity * HIDDEN as usize * 2)?,
+            x: allocate(capacity * HIDDEN * 2)?,
             // the widest prepared operand: down's K = 16384 at its padded pitch
-            a_q: allocate(capacity * shape::gemm_pitch(INTER as usize))?,
+            a_q: allocate(capacity * shape::gemm_pitch(INTER))?,
             a_s: allocate(capacity * 4)?,
-            fused: allocate(capacity * QKVG as usize * 2)?,
-            q: allocate(capacity * HIDDEN as usize * 2)?,
+            fused: allocate(capacity * QKVG * 2)?,
+            q: allocate(capacity * HIDDEN * 2)?,
             k: allocate(kv_bytes)?,
             v: allocate(kv_bytes)?,
             // Also holds silu(gate) * up, the wider of these two intermediates.
-            attn_gu: allocate(capacity * INTER as usize * 2)?,
-            mods: allocate(layers * 6 * HIDDEN as usize * 4)?,
-            cos: allocate(capacity * HEAD_DIM as usize * 4)?,
-            sin: allocate(capacity * HEAD_DIM as usize * 4)?,
+            attn_gu: allocate(capacity * INTER * 2)?,
+            mods: allocate(layers * 6 * HIDDEN * 4)?,
+            cos: allocate(capacity * HEAD_DIM * 4)?,
+            sin: allocate(capacity * HEAD_DIM * 4)?,
         };
         // Headroom rows are read by the kernels and must be zero, not whatever
         // the allocator last held.
@@ -343,8 +343,8 @@ impl Session {
                 stream,
                 tokens,
                 capacity,
-                (KV_HEADS * 4) as usize,
-                KV_HEADS as usize,
+                KV_HEADS * 4,
+                KV_HEADS,
                 smoothed.bits(),
                 compiler,
             )?),
@@ -396,20 +396,15 @@ impl Session {
         sink: &mut Sink<'g, '_>,
         kernel: &'g hrx::Kernel,
         stage: &'static str,
-        grid_x: u32,
-        grid_y: u32,
+        grid_x: usize,
+        grid_y: usize,
         threads: u32,
         scalars: &Scalars,
         bindings: &[View<'g>],
     ) -> Result<()> {
         let constants = scalars.pack(stage, kernel)?;
-        let compiled = kernel.info().workgroup_size;
-        if compiled != [threads, 1, 1] {
-            return Err(Error::internal(format!(
-                "{stage}: compiled for workgroup {compiled:?} but the host asked for {threads}"
-            )));
-        }
-        let grid = [grid_x, grid_y, 1];
+        let grid = crate::kernels::grid(stage, grid_x, grid_y)?;
+        let compiled = crate::kernels::workgroup(stage, kernel, threads)?;
         let stream = match sink {
             Sink::Record(recording) => {
                 let after = recording.last.as_slice();
@@ -426,11 +421,15 @@ impl Session {
             Sink::Stream(stream) => stream,
         };
         if !self.profile.load(Ordering::Relaxed) {
+            // SAFETY: every binding is one of this session's buffers or resident
+            // weights, allocated in `build` at the capacity the kernels were
+            // compiled for, and the block matches the compiled workgroup.
             unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
             return Ok(());
         }
         stream.synchronize()?;
         let began = std::time::Instant::now();
+        // SAFETY: as above.
         unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
         stream.synchronize()?;
         self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
@@ -453,12 +452,12 @@ impl Session {
     }
 
     /// The clock a multi-launch stage is timed against, when profiling is on.
-    fn timed(&self, stream: &mut Stream) -> Option<std::time::Instant> {
+    fn timed(&self, stream: &mut Stream) -> Result<Option<std::time::Instant>> {
         if !self.profile.load(Ordering::Relaxed) {
-            return None;
+            return Ok(None);
         }
-        let _ = stream.synchronize();
-        Some(std::time::Instant::now())
+        stream.synchronize()?;
+        Ok(Some(std::time::Instant::now()))
     }
 
     /// Closes a stage opened by [`Session::timed`].
@@ -526,17 +525,17 @@ impl Session {
             return Err(Error::invalid("block range must be within the loaded layers"));
         }
         let tokens = self.tokens;
-        if x.len() != tokens * HIDDEN as usize {
+        if x.len() != tokens * HIDDEN {
             return Err(Error::invalid(format!(
                 "x has {} elements, expected {}",
                 x.len(),
-                tokens * HIDDEN as usize
+                tokens * HIDDEN
             )));
         }
-        if mods.len() != self.layers * 6 * HIDDEN as usize {
+        if mods.len() != self.layers * 6 * HIDDEN {
             return Err(Error::invalid("mods has the wrong element count"));
         }
-        if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
+        if cos.len() != tokens * HEAD_DIM || sin.len() != tokens * HEAD_DIM {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
         stream.upload(self.buffers.x.binding(), bytemuck::cast_slice(x))?;
@@ -571,7 +570,7 @@ impl Session {
     ) -> Result<()> {
         self.check_stream(stream)?;
         let tokens = self.tokens;
-        if cos.len() != tokens * HEAD_DIM as usize || sin.len() != tokens * HEAD_DIM as usize {
+        if cos.len() != tokens * HEAD_DIM || sin.len() != tokens * HEAD_DIM {
             return Err(Error::invalid("cos/sin have the wrong element count"));
         }
         // Into the session's own buffers, whose headroom rows are already zero.
@@ -579,7 +578,7 @@ impl Session {
         // fixes its addresses: the caller allocates modulation from a pool and
         // gets a different address each forward, while this one is the
         // session's for its whole life. One 4 MB device copy per forward.
-        let rows = tokens * HIDDEN as usize * 2;
+        let rows = tokens * HIDDEN * 2;
         let table = self.buffers.mods.bytes();
         if mods.len() < table {
             return Err(Error::invalid(format!(
@@ -612,29 +611,22 @@ impl Session {
             return Ok(());
         }
         let mut recorded = self.graph.borrow_mut();
-        if recorded.is_none() {
-            let mut recording = Recording { graph: stream.graph()?, last: After::None };
-            for index in 0..self.layers {
-                self.block(
-                    &mut Sink::Record(&mut recording),
-                    index,
-                    self.buffers.mods.binding(),
-                )?;
-            }
-            // `finish` ends the graph's borrow of this session and the stream.
-            *recorded = Some(recording.graph.finish()?);
-        }
-        let graph = recorded.as_mut().expect("just recorded");
+        let graph = match &mut *recorded {
+            Some(graph) => graph,
+            None => recorded.insert(self.record_graph(stream)?),
+        };
         stream.launch(graph)?;
         Ok(())
     }
 
-    /// This block's slice of the modulation tables: prescale, preshift,
-    /// pregate, postscale, postshift, postgate, each 6144 floats.
-    fn modulation<'a>(&self, mods: View<'a>, index: usize, part: usize) -> Result<View<'a>> {
-        let row = HIDDEN as usize * 4;
-        let stride = 6 * row;
-        mods.slice(index * stride + part * row, row).map_err(Error::from)
+    /// Every block, recorded once into a graph over the session's own buffers.
+    fn record_graph(&self, stream: &mut Stream) -> Result<hrx::GraphExec> {
+        let mut recording = Recording { graph: stream.graph()?, last: After::None };
+        for index in 0..self.layers {
+            self.block(&mut Sink::Record(&mut recording), index, self.buffers.mods.binding())?;
+        }
+        // `finish` ends the graph's borrow of this session and the stream.
+        Ok(recording.graph.finish()?)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -645,7 +637,7 @@ impl Session {
         stage: &'static str,
         weights: View<'g>,
         scales: View<'g>,
-        n: i32,
+        n: usize,
         out: View<'g>,
         gate: Option<View<'g>>,
     ) -> Result<()> {
@@ -654,16 +646,7 @@ impl Session {
         let all = [a_q, weights, scales, a_s, out, gate.unwrap_or(out)];
         let bindings = &all[..5 + usize::from(gate.is_some())];
         let grid_y = shape::gemm_grid_rows(self.tokens);
-        self.launch(
-            sink,
-            kernel,
-            stage,
-            (n / 128) as u32,
-            grid_y as u32,
-            THREADS,
-            &scalars,
-            bindings,
-        )
+        self.launch(sink, kernel, stage, n / 128, grid_y, THREADS, &scalars, bindings)
     }
 
     fn block<'g>(
@@ -681,8 +664,8 @@ impl Session {
         let norm = [
             b.x.binding(),
             w.view(block.prenorm),
-            self.modulation(mods, index, 0)?,
-            self.modulation(mods, index, 1)?,
+            modulation(mods, index, 0)?,
+            modulation(mods, index, 1)?,
             b.a_q.binding(),
             b.a_s.binding(),
         ];
@@ -690,7 +673,7 @@ impl Session {
             sink,
             &self.kernels.prepare_norm,
             "prepare",
-            tokens as u32,
+            tokens,
             1,
             THREADS,
             &norm_scalars,
@@ -723,7 +706,7 @@ impl Session {
             sink,
             &self.kernels.rope,
             "qk norm + rope",
-            tokens as u32,
+            tokens,
             1,
             THREADS,
             &rope_scalars,
@@ -739,14 +722,14 @@ impl Session {
                 // needs a stream to synchronize on, so it applies only to the
                 // direct path -- which is the only one profiling takes anyway.
                 let preparing = match &mut *sink {
-                    Sink::Stream(stream) => self.timed(stream),
+                    Sink::Stream(stream) => self.timed(stream)?,
                     Sink::Record(_) => None,
                 };
                 sage.run(sink, b.q.binding(), b.k.binding(), b.v.binding())?;
                 if let Sink::Stream(stream) = &mut *sink {
                     self.record(stream, "SA2 preprocessing", preparing)?;
                 }
-                let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS as usize);
+                let attention_scalars = Scalars::new().index(tokens).index(KV_HEADS);
                 let attention = [
                     sage.q4.binding(),
                     sage.k4.binding(),
@@ -756,15 +739,14 @@ impl Session {
                     sage.correction.binding(),
                     b.attn_gu.binding(),
                 ];
-                let waves = self.shape.attention_waves as usize;
-                let rows = 16 * (waves / 4);
+                let rows = 16 * (self.shape.attention_waves as usize / 4);
                 self.launch(
                     sink,
                     &self.kernels.attention,
                     "SA2 attention",
-                    tokens.div_ceil(rows) as u32,
-                    KV_HEADS as u32,
-                    32 * waves as u32,
+                    tokens.div_ceil(rows),
+                    KV_HEADS,
+                    32 * self.shape.attention_waves,
                     &attention_scalars,
                     &attention,
                 )?;
@@ -779,8 +761,8 @@ impl Session {
                     sink,
                     &self.kernels.attention,
                     "f16 attention",
-                    tokens.div_ceil(16) as u32,
-                    KV_HEADS as u32,
+                    tokens.div_ceil(16),
+                    KV_HEADS,
                     128,
                     &attention_scalars,
                     &attention,
@@ -795,7 +777,7 @@ impl Session {
             sink,
             &self.kernels.prepare_gated,
             "prepare gated",
-            tokens as u32,
+            tokens,
             1,
             THREADS,
             &gated_scalars,
@@ -810,15 +792,15 @@ impl Session {
             w.view(block.wo_s),
             HIDDEN,
             b.x.binding(),
-            Some(self.modulation(mods, index, 2)?),
+            Some(modulation(mods, index, 2)?),
         )?;
 
         let post_scalars = Scalars::new().index(tokens);
         let post = [
             b.x.binding(),
             w.view(block.postnorm),
-            self.modulation(mods, index, 3)?,
-            self.modulation(mods, index, 4)?,
+            modulation(mods, index, 3)?,
+            modulation(mods, index, 4)?,
             b.a_q.binding(),
             b.a_s.binding(),
         ];
@@ -826,7 +808,7 @@ impl Session {
             sink,
             &self.kernels.prepare_norm,
             "prepare",
-            tokens as u32,
+            tokens,
             1,
             THREADS,
             &post_scalars,
@@ -850,7 +832,7 @@ impl Session {
             sink,
             &self.kernels.prepare_swiglu,
             "prepare swiglu",
-            tokens as u32,
+            tokens,
             1,
             THREADS,
             &swiglu_scalars,
@@ -865,7 +847,7 @@ impl Session {
             w.view(block.down_s),
             HIDDEN,
             b.x.binding(),
-            Some(self.modulation(mods, index, 5)?),
+            Some(modulation(mods, index, 5)?),
         )?;
         Ok(())
     }
@@ -887,10 +869,10 @@ mod tests {
         let resident = || session.rope.get();
         assert_eq!(resident(), None, "nothing is resident before the first call");
 
-        let mods = vec![0.01f32; 6 * HIDDEN as usize];
+        let mods = vec![0.01f32; 6 * HIDDEN];
         let a = (vec![1.0f32; tokens * 128], vec![0.0f32; tokens * 128]);
         let b = (vec![0.0f32; tokens * 128], vec![1.0f32; tokens * 128]);
-        let mut x = vec![0x3f00u16; tokens * HIDDEN as usize];
+        let mut x = vec![0x3f00u16; tokens * HIDDEN];
 
         session.run(&mut stream, &mut x, &mods, &a.0, &a.1, 0, Some(1)).expect("A");
         let after_a = resident();
@@ -908,14 +890,13 @@ mod tests {
         layers: usize,
         phase: usize,
     ) -> (Vec<u16>, Vec<f32>, Vec<f32>, Vec<f32>) {
-        let x = (0..tokens * HIDDEN as usize)
+        let x = (0..tokens * HIDDEN)
             .map(|i| ((0.25 + ((i + phase * 17) % 97) as f32 / 128.0).to_bits() >> 16) as u16)
             .collect();
-        let mods = (0..layers * 6 * HIDDEN as usize)
-            .map(|i| 0.01 + ((i + phase) % 7) as f32 * 0.001)
-            .collect();
+        let mods =
+            (0..layers * 6 * HIDDEN).map(|i| 0.01 + ((i + phase) % 7) as f32 * 0.001).collect();
         let angle = phase as f32 * 0.125;
-        let cos = vec![angle.cos(); tokens * HEAD_DIM as usize];
+        let cos = vec![angle.cos(); tokens * HEAD_DIM];
         let sin = vec![angle.sin(); cos.len()];
         (x, mods, cos, sin)
     }
@@ -1018,7 +999,7 @@ mod tests {
         let (checkpoint, _) = fixture();
         let mut stream = Stream::open().unwrap();
         let (file, plan) = Session::validate(&checkpoint, tokens, 2).unwrap();
-        let weights = std::sync::Arc::new(Weights::upload(&mut stream, &file, plan).unwrap());
+        let weights = Arc::new(Weights::upload(&mut stream, &file, plan).unwrap());
         let first =
             Session::with_weights(&mut stream, weights.clone(), tokens, 2, attention(), None)
                 .unwrap();

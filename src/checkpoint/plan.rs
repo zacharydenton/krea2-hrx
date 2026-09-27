@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use super::{Checkpoint, Error, Result};
+use super::{Checkpoint, DType, Error, Result};
 
 /// Rows to copy from one checkpoint tensor, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,9 +55,9 @@ pub struct Plan {
 
 fn int8_rows<'a>(file: &'a Checkpoint, name: &str) -> Result<super::Tensor<'a>> {
     let tensor = file.get(&format!("{name}.weight"))?;
-    if tensor.dtype != "I8" || tensor.shape.len() != 2 {
+    if tensor.dtype != DType::I8 || tensor.shape.len() != 2 {
         return Err(Error::invalid(format!(
-            "{name}.weight is {}, not int8 ConvRot rows ({})",
+            "{name}.weight is {:?}, not int8 ConvRot rows ({})",
             tensor.dtype,
             file.path().display()
         )));
@@ -70,7 +70,7 @@ fn int8_rows<'a>(file: &'a Checkpoint, name: &str) -> Result<super::Tensor<'a>> 
 
 fn scales<'a>(file: &'a Checkpoint, name: &str, rows: usize) -> Result<super::Tensor<'a>> {
     let tensor = file.get(&format!("{name}.weight_scale"))?;
-    if tensor.dtype != "F32" {
+    if tensor.dtype != DType::F32 {
         return Err(Error::invalid(format!("{name}.weight_scale is not float32")));
     }
     if tensor.bytes.len() != rows * 4 {
@@ -223,7 +223,7 @@ fn operand(
 /// the bf16 a half-precision save stores them in.
 fn vector(file: &Checkpoint, name: &str) -> Result<Span> {
     let tensor = file.get(name)?;
-    if tensor.dtype == "BF16" {
+    if tensor.dtype == DType::BF16 {
         let host: Vec<u8> = tensor
             .bytes
             .as_chunks::<2>()
@@ -241,8 +241,8 @@ fn vector(file: &Checkpoint, name: &str) -> Result<Span> {
             host,
         });
     }
-    if tensor.dtype != "F32" {
-        return Err(Error::invalid(format!("{name} is {}, not float32", tensor.dtype)));
+    if tensor.dtype != DType::F32 {
+        return Err(Error::invalid(format!("{name} is {:?}, not float32", tensor.dtype)));
     }
     Ok(Span {
         device_offset: 0,

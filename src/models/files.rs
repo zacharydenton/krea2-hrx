@@ -104,11 +104,8 @@ impl<'a> Request<'a> {
         if name.is_empty() || name.contains('/') || name.contains("..") {
             return Err(Error::invalid(format!("cannot read {name}")));
         }
-        let name = match name.ends_with(".safetensors") {
-            true => name.to_string(),
-            false => format!("{name}.safetensors"),
-        };
-        Ok(format!("diffusion_models/{name}"))
+        let extension = if name.ends_with(".safetensors") { "" } else { ".safetensors" };
+        Ok(format!("diffusion_models/{name}{extension}"))
     }
 }
 

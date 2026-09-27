@@ -225,6 +225,8 @@ impl Ops {
         let wave = mode == Norm::Group && x.cols() <= 1024;
         let name = if wave { "norm_2_wave" } else { mode.kernel() };
         let grid = if wave { x.rows().div_ceil(8) } else { x.rows() };
+        // SAFETY: `x` and `y` share a shape and the scales hold one float per
+        // column, checked above; one workgroup per row, or per eight rows.
         unsafe {
             self.launch(
                 stream,
@@ -253,6 +255,8 @@ impl Ops {
         let y = self.tensor(stream, x.rows(), x.cols())?;
         let scalars = Scalars::new().index(x.rows()).float(1e-5);
         let bindings = [x.binding()?, scales, y.binding()?];
+        // SAFETY: as `norm`'s wave path: rows of at most 1024 columns, checked
+        // above, eight to a workgroup.
         unsafe {
             self.launch(
                 stream,
@@ -277,18 +281,8 @@ impl Ops {
             Unary::Gelu => "unary_gelu",
             Unary::Sigmoid => "unary_sigmoid",
         };
-        unsafe {
-            self.launch(
-                stream,
-                name,
-                Config::new(),
-                &scalars,
-                &bindings,
-                x.size().div_ceil(256),
-                1,
-                256,
-            )
-        }?;
+        // SAFETY: `x` and `y` are equal-shape tensors, one element per thread.
+        unsafe { self.launch_1d(stream, name, Config::new(), &scalars, &bindings, x.size()) }?;
         Ok(y)
     }
 
@@ -310,16 +304,15 @@ impl Ops {
             Binary::Add => "binary_add",
             Binary::Mul => "binary_mul",
         };
+        // SAFETY: `y` divides `x`, which the check above guarantees; `z` is `x`'s shape.
         unsafe {
-            self.launch(
+            self.launch_1d(
                 stream,
                 name,
                 config(&[("yn", y.size())]),
                 &scalars,
                 &bindings,
-                x.size().div_ceil(256),
-                1,
-                256,
+                x.size(),
             )
         }?;
         Ok(z)
@@ -346,16 +339,15 @@ impl Ops {
         let y = self.tensor(stream, x.rows(), x.cols())?;
         let scalars = Scalars::new().index(x.size()).float(theta);
         let bindings = [x.binding()?, y.binding()?];
+        // SAFETY: `x` and `y` share a shape the check above validated against `heads`.
         unsafe {
-            self.launch(
+            self.launch_1d(
                 stream,
                 "rope",
                 config(&[("dim", x.cols() / heads), ("heads", heads)]),
                 &scalars,
                 &bindings,
-                x.size().div_ceil(256),
-                1,
-                256,
+                x.size(),
             )
         }?;
         Ok(y)
@@ -375,17 +367,9 @@ impl Ops {
         }
         let scalars = Scalars::new().index(sample.size()).float(delta);
         let bindings = [sample.binding()?, velocity.binding()?];
+        // SAFETY: `sample` and `velocity` share the shape checked above.
         unsafe {
-            self.launch(
-                stream,
-                "euler",
-                Config::new(),
-                &scalars,
-                &bindings,
-                sample.size().div_ceil(256),
-                1,
-                256,
-            )
+            self.launch_1d(stream, "euler", Config::new(), &scalars, &bindings, sample.size())
         }
     }
 
@@ -403,17 +387,9 @@ impl Ops {
         }
         let scalars = Scalars::new().index(cond.size()).float(scale);
         let bindings = [cond.binding()?, uncond.binding()?];
+        // SAFETY: `cond` and `uncond` share the shape checked above.
         unsafe {
-            self.launch(
-                stream,
-                "guidance",
-                Config::new(),
-                &scalars,
-                &bindings,
-                cond.size().div_ceil(256),
-                1,
-                256,
-            )
+            self.launch_1d(stream, "guidance", Config::new(), &scalars, &bindings, cond.size())
         }
     }
 
@@ -436,17 +412,18 @@ impl Ops {
         dim: usize,
         causal: bool,
     ) -> Result<Tensor> {
-        if batch == 0
-            || tokens == 0
-            || heads == 0
-            || kv == 0
-            || dim == 0
+        let dimensions = || Error::invalid("attention dimensions");
+        let queries = product(&[batch, tokens, heads, dim]).ok_or_else(dimensions)?;
+        let keys = product(&[batch, tokens, kv, dim]).ok_or_else(dimensions)?;
+        // The score matrix, `rows x tokens` float32, is the largest operand.
+        let count = product(&[batch, heads, tokens, tokens, 4]).ok_or_else(dimensions)? / 4;
+        if kv == 0
             || !heads.is_multiple_of(kv)
-            || q.size() != batch * tokens * heads * dim
-            || k.size() != batch * tokens * kv * dim
-            || v.size() != k.size()
+            || q.size() != queries
+            || k.size() != keys
+            || v.size() != keys
         {
-            return Err(Error::invalid("attention dimensions"));
+            return Err(dimensions());
         }
         let rows = batch * heads * tokens;
         let packed = [q, k, v]
@@ -456,8 +433,10 @@ impl Ops {
                 let out = self.tensor(stream, rows, dim)?;
                 let scalars = Scalars::new().index(out.size());
                 let bindings = [source.binding()?, out.binding()?];
+                // SAFETY: `source` is `[batch * tokens][heads or kv][dim]`, checked above; `out`
+                // holds `rows * dim` and the configuration names both sizes.
                 unsafe {
-                    self.launch(
+                    self.launch_1d(
                         stream,
                         "head_pack",
                         config(&[
@@ -472,16 +451,13 @@ impl Ops {
                         ]),
                         &scalars,
                         &bindings,
-                        out.size().div_ceil(256),
-                        1,
-                        256,
+                        out.size(),
                     )
                 }?;
                 Ok(out)
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let count = batch * heads * tokens * tokens;
         let scores = self.pool.acquire(stream, count * 4)?;
         self.matmul(
             stream,
@@ -500,6 +476,8 @@ impl Ops {
         let probabilities = self.tensor(stream, rows, tokens)?;
         let scalars = Scalars::new().index(rows);
         let bindings = [scores.binding(), probabilities.binding()?];
+        // SAFETY: `scores` holds `count` floats and `probabilities` as many
+        // bf16 values, one row of `tokens` per workgroup.
         unsafe {
             self.launch(
                 stream,
@@ -531,8 +509,10 @@ impl Ops {
         let out = self.tensor(stream, batch * tokens, heads * dim)?;
         let scalars = Scalars::new().index(weighted.size());
         let bindings = [weighted.binding()?, out.binding()?];
+        // SAFETY: `weighted` is `[batch * heads * tokens][dim]` and `out` its unpacked
+        // `[batch * tokens][heads * dim]`; the configuration names both sizes.
         unsafe {
-            self.launch(
+            self.launch_1d(
                 stream,
                 "head_unpack",
                 config(&[
@@ -545,9 +525,7 @@ impl Ops {
                 ]),
                 &scalars,
                 &bindings,
-                weighted.size().div_ceil(256),
-                1,
-                256,
+                weighted.size(),
             )
         }?;
         Ok(out)
@@ -592,6 +570,8 @@ impl Ops {
         // One workgroup per output pixel when a row of channels is a whole
         // number of 32-lane reads.
         let coalesced = kernel == 3 && x.cols().is_multiple_of(32) && x.cols() <= 1024;
+        // SAFETY: `x` is `height * width` pixels, checked above, and `patches`
+        // holds `kernel²` taps of every channel for each of them.
         unsafe {
             self.launch(
                 stream,
@@ -637,6 +617,9 @@ impl Ops {
         let all = [x_values, w.values()?, y_values, bias.unwrap_or(y_values)];
         let bindings = &all[..3 + usize::from(bias.is_some())];
         let Tile { name, rows: tile_m, columns: tile_n } = tile(base, m, n, k);
+        // SAFETY: the weights hold `n * k` values (checked above), the bias
+        // `n` (checked by `check_bias`), and `x` and `y` are `m` rows of the
+        // input and output channels; the grid covers `y` in whole tiles.
         unsafe {
             self.launch(
                 stream,
@@ -679,16 +662,16 @@ impl Ops {
         let y = self.tensor(stream, height * width * 4, x.cols())?;
         let scalars = Scalars::new().index(y.size());
         let bindings = [x.binding()?, y.binding()?];
+        // SAFETY: `y` holds four pixels per input pixel of `x`, whose rows are checked
+        // against `height * width` above.
         unsafe {
-            self.launch(
+            self.launch_1d(
                 stream,
                 "upsample",
                 config(&[("xsize", x.size()), ("channels", x.cols()), ("width", width)]),
                 &scalars,
                 &bindings,
-                y.size().div_ceil(256),
-                1,
-                256,
+                y.size(),
             )
         }?;
         Ok(y)
@@ -711,27 +694,35 @@ impl Ops {
         grid_y: usize,
         threads: u32,
     ) -> Result<()> {
-        let kernel = self.kernels.get(stream, name, config, (grid_x as u32, grid_y as u32))?;
+        let grid = crate::kernels::grid(name, grid_x, grid_y)?;
+        let kernel = self.kernels.get(stream, name, config, (grid[0], grid[1]))?;
         let constants = scalars.pack(name, &kernel)?;
-        // The runtime validates the block against the size the kernel was
-        // compiled with, which the address-based path never checked. Disagreeing
-        // is a host bug, so say so here rather than launch a different shape.
-        let compiled = kernel.info().workgroup_size;
-        if compiled != [threads, 1, 1] {
-            return Err(Error::internal(format!(
-                "{name}: compiled for workgroup {compiled:?} but the host asked for {threads}"
-            )));
-        }
-        unsafe {
-            stream.dispatch(
-                &kernel,
-                [grid_x as u32, grid_y as u32, 1],
-                compiled,
-                &constants,
-                bindings,
-            )
-        }?;
+        let block = crate::kernels::workgroup(name, &kernel, threads)?;
+        // SAFETY: the caller vouches for the bindings, extents and grid (this
+        // function's contract), and the block is the one the kernel was
+        // compiled for.
+        unsafe { stream.dispatch(&kernel, grid, block, &constants, bindings) }?;
         Ok(())
+    }
+
+    /// [`Ops::launch`] for an elementwise kernel: one 256-thread workgroup per
+    /// 256 of `elements`.
+    ///
+    /// # Safety
+    /// As [`Ops::launch`].
+    pub unsafe fn launch_1d(
+        &self,
+        stream: &Stream,
+        name: &str,
+        config: Config,
+        scalars: &Scalars,
+        bindings: &[View<'_>],
+        elements: usize,
+    ) -> Result<()> {
+        // SAFETY: forwarded from the caller.
+        unsafe {
+            self.launch(stream, name, config, scalars, bindings, elements.div_ceil(256), 1, 256)
+        }
     }
 
     /// The bf16 GEMM every dense layer here goes through, at the tile [`tile`]
@@ -765,6 +756,9 @@ impl Ops {
             ("astride", m * k),
             ("bstride", n * k),
         ]);
+        // SAFETY: every caller passes operands of `m x k`, `n x k` and `m x n`
+        // per batch, and a bias of `n` checked by `check_bias`; the grid
+        // covers the output in whole tiles.
         unsafe {
             self.launch(
                 stream,
@@ -818,6 +812,11 @@ fn tile(base: &'static str, m: usize, n: usize, k: usize) -> Tile {
         _ => base,
     };
     Tile { name, rows: if wide { 128 } else { 64 }, columns: if square { 128 } else { 64 } }
+}
+
+/// The product of `dimensions`, or `None` when it is zero or overflows.
+fn product(dimensions: &[usize]) -> Option<usize> {
+    dimensions.iter().try_fold(1usize, |total, &d| total.checked_mul(d)).filter(|&n| n > 0)
 }
 
 /// A bias is one bf16 per output column. The kernels read `n` of them with no

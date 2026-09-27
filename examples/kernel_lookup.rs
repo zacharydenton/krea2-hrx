@@ -39,6 +39,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hrx::loom::ReportMode::None
         });
         // Both caches are warm before timing. All source is embedded and trusted.
+        // SAFETY: the source is embedded and trusted, and the specialization
+        // is the one that names it.
         unsafe { source_cache.get(&stream, source, &spec)? };
         keyed_cache.get(&stream, name, config.clone(), (1, 1))?;
         let mut samples = [Vec::new(), Vec::new()];
@@ -49,6 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let kernel = if arm == 0 {
                         // Conservative baseline: even specialization construction
                         // is outside the timer for the source-based API.
+                        // SAFETY: as the warm-up above.
                         unsafe { source_cache.get(&stream, source, &spec)? }
                     } else {
                         keyed_cache.get(&stream, name, config.clone(), (1, 1))?

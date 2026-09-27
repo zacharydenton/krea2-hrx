@@ -10,7 +10,7 @@
 pub mod file;
 pub mod plan;
 
-pub use file::{Checkpoint, Tensor};
+pub use file::{Checkpoint, DType, Tensor};
 pub use plan::{Plan, Segment, Span};
 
 pub use crate::{Error, Result};

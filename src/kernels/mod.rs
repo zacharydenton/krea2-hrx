@@ -72,6 +72,31 @@ pub fn report(name: &str, artifact: &hrx::loom::Artifact) {
     }
 }
 
+/// A two-dimensional launch grid in the runtime's `u32` workgroup counts,
+/// refusing one that does not fit rather than truncating it.
+pub fn grid(stage: &str, x: usize, y: usize) -> Result<[u32; 3]> {
+    let fit = |count: usize| {
+        u32::try_from(count).map_err(|_| {
+            Error::internal(format!("{stage}: {count} workgroups exceed the grid"))
+        })
+    };
+    Ok([fit(x)?, fit(y)?, 1])
+}
+
+/// The block size a kernel was compiled for, checked against the one the
+/// host is about to launch it with. The runtime validates the block against
+/// the compiled size too; disagreeing here names the stage instead of the
+/// export, and a mismatch is always a host bug.
+pub fn workgroup(stage: &str, kernel: &Kernel, threads: u32) -> Result<[u32; 3]> {
+    let compiled = kernel.info().workgroup_size;
+    if compiled != [threads, 1, 1] {
+        return Err(Error::internal(format!(
+            "{stage}: compiled for workgroup {compiled:?} but the host asked for {threads}"
+        )));
+    }
+    Ok(compiled)
+}
+
 /// A kernel's scalar arguments: Loom packs the leading indices, then the floats.
 ///
 /// Loom picks each index's width by range analysis, so the host cannot know it
@@ -90,13 +115,17 @@ impl Scalars {
         Scalars::default()
     }
 
+    /// Appends an index. Kernels take at most four.
     pub fn index(mut self, value: usize) -> Scalars {
+        assert!(self.index_count < self.indices.len(), "a kernel takes at most four indices");
         self.indices[self.index_count] = value as u64;
         self.index_count += 1;
         self
     }
 
+    /// Appends a float. Kernels take at most two.
     pub fn float(mut self, value: f32) -> Scalars {
+        assert!(self.float_count < self.floats.len(), "a kernel takes at most two floats");
         self.floats[self.float_count] = value;
         self.float_count += 1;
         self
@@ -119,7 +148,9 @@ impl Scalars {
         let mut constants = Constants::new();
         for index in &self.indices[..self.index_count] {
             match width {
-                4 => constants.push(*index as u32),
+                4 => constants.push(u32::try_from(*index).map_err(|_| {
+                    Error::internal(format!("{name}: index {index} exceeds its 32-bit slot"))
+                })?),
                 8 => constants.push(*index),
                 _ => return Err(Error::internal(format!("{name}: odd index width {width}"))),
             }?;

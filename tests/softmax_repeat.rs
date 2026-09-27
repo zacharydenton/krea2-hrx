@@ -36,6 +36,8 @@ fn the_softmax_is_exact_and_stays_exact_over_repeated_dispatches() {
             let name = if causal { "softmax_causal" } else { "softmax" };
             for repeat in 0..repeats {
                 let bindings = [scores.binding(), out.binding().expect("a binding")];
+                // SAFETY: `scores` holds `count` floats and `out` as many bf16
+                // values; one row of `tokens` per workgroup.
                 unsafe {
                     ops.launch(
                         &stream,

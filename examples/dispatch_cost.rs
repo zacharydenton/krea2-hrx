@@ -26,11 +26,15 @@ fn main() {
                         .unwrap();
                     let constants =
                         Scalars::new().index(256).pack("unary_one", &kernel).unwrap();
+                    // SAFETY: unary_one reads and writes 256 bf16 elements, which the
+                    // 512-byte binding holds; the block is the compiled one.
                     unsafe {
                         stream.dispatch(&kernel, [1; 3], [256, 1, 1], &constants, &bindings)
                     }
                     .unwrap();
                 } else {
+                    // SAFETY: unary_one reads and writes 256 bf16 elements, which the
+                    // 512-byte binding holds; the block is the compiled one.
                     unsafe {
                         stream.dispatch(&kernel, [1; 3], [256, 1, 1], &constants, &bindings)
                     }

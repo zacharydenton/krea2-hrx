@@ -46,6 +46,8 @@ impl Harness {
         let indices: Vec<_> = scalars.iter().map(|&v| u32::try_from(v).unwrap()).collect();
         let constants = Constants::indices(&kernel, &indices).unwrap();
         let bindings: Vec<_> = buffers.iter().map(Buffer::binding).collect();
+        // SAFETY: every test sizes `buffers` from the dimensions it passes
+        // as the kernel's configuration.
         unsafe {
             self.stream
                 .dispatch(&kernel, grid, [threads, 1, 1], &constants, &bindings)
