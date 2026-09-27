@@ -1213,9 +1213,9 @@ dependencies = [
 
 [[package]]
 name = "hrx-rs"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fc42ac30ebc68e4ba8de9f35637f8c9697d26ca9a9f816201e4d488efaee381"
+checksum = "ecc660f92358c5b6d0beb4192d6dcc5f9aa619e533d016291afc21f02e490338"
 dependencies = [
  "flate2",
  "hf-hub",
@@ -2899,7 +2899,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

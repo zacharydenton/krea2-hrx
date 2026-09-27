@@ -49,7 +49,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 Install the matching CLI from crates.io:
 
 ```sh
-cargo install --locked hrx-rs --version 0.8.5
+cargo install --locked hrx-rs --version 0.8.8
 hrx prepare
 cargo build --release
 ```
@@ -143,7 +143,7 @@ checks the output. Completed batches averaged 2.1–2.25 µs per tiny kernel.
 These are wall-clock costs, not GPU timestamps or whole-model latency. Image
 quality, checkpoint-scale load time and peak memory were not remeasured.
 
-The [native NPU text-fusion experiment](npu-fusion.md) uses Loom on HRX 0.8.3.
+The [native NPU text-fusion experiment](npu-fusion.md) uses Loom on HRX 0.8.8.
 Auto uses GPU; explicit NPU selection is not performance or quality qualified.
 
 ## HRX 0.8.5 qualification — 2026-09-23
