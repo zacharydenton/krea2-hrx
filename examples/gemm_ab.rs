@@ -5,11 +5,13 @@
 //! ```sh
 //! cargo run --release --example gemm_ab -- kernels/gemm_i8_256.loom candidate.loom
 //! cargo run --release --example gemm_ab -- --shape 4115,16384,6144 --rounds 21 a.loom b.loom
+//! cargo run --release --example gemm_ab -- --m-group 2 kernels/gemm_i8_256.loom
 //! ```
 //!
 //! Every source must have the plain GEMM ABI of `kernels/gemm_i8_256.loom`
 //! (`m_size`; `a`, `w`, `scale`, `a_scale`, `c`) and its `k_size`, `k_stride`,
-//! `n_size` and `m_group` configuration. Outputs must match the first source
+//! `n_size` and `m_group` configuration; `--m-group` sets the raster group
+//! (default 4, production's). Outputs must match the first source
 //! byte for byte unless `--no-check` is given, for diagnostic variants that
 //! deliberately skip work. Each kernel's compiled artifact path is printed for
 //! `llvm-objdump -d --mcpu=gfx1151`.
@@ -29,13 +31,19 @@ const PEAK_WORKGROUPS: usize = 40 * 8;
 struct Options {
     shapes: Vec<(usize, usize, usize)>,
     rounds: usize,
+    m_group: usize,
     check: bool,
     sources: Vec<String>,
 }
 
 fn options() -> Result<Options> {
-    let mut options =
-        Options { shapes: Vec::new(), rounds: 11, check: true, sources: Vec::new() };
+    let mut options = Options {
+        shapes: Vec::new(),
+        rounds: 11,
+        m_group: 4,
+        check: true,
+        sources: Vec::new(),
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -48,6 +56,9 @@ fn options() -> Result<Options> {
             }
             "--rounds" => {
                 options.rounds = args.next().context("--rounds needs a count")?.parse()?
+            }
+            "--m-group" => {
+                options.m_group = args.next().context("--m-group needs 1 to 4")?.parse()?
             }
             "--no-check" => options.check = false,
             flag if flag.starts_with("--") => bail!("unknown option {flag}"),
@@ -144,7 +155,8 @@ fn main() -> Result<()> {
         let bindings =
             [a.binding(), w.binding(), scale.binding(), a_scale.binding(), c.binding()];
         let grid = [(n / 128) as u32, m.div_ceil(256) as u32, 1];
-        let config = [("k_size", k), ("k_stride", stride), ("n_size", n), ("m_group", 4)];
+        let config =
+            [("k_size", k), ("k_stride", stride), ("n_size", n), ("m_group", options.m_group)];
 
         println!("{m}x{k}x{n}:");
         let mut kernels = Vec::new();
