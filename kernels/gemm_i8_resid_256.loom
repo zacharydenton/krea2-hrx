@@ -134,6 +134,8 @@ kernel.def target(@krea2_gemm_i8_resid_256_gfx11) export("krea2_gemm_i8_resid_25
   %wave_row = index.mul %wave_m, %c64 : index
   %wave_col = index.mul %wave_n, %c64 : index
   %base_m = index.mul %tile_m_id, %c256 : index
+  %wave_first_row = index.add %base_m, %wave_row : index
+  %wave_active = index.cmp ult, %wave_first_row, %m_bounded : index
   %base_n = index.mul %tile_n_id, %c128 : index
   // A and W rows are k_stride/4 i32 quads; only the first k_size/4 are read.
   %k_quads = index.div %k_stride, %c4 : index
@@ -239,134 +241,141 @@ kernel.def target(@krea2_gemm_i8_resid_256_gfx11) export("krea2_gemm_i8_resid_25
     %nw1 = vector.load %w_view[%w_row1, %kq_next] : view<[%n_size]x[%k_quads]xi32> -> vector<4xi32>
 
     // 4 16-wide sub-steps over the staged 64 bytes: 4 A + 4 W runs, 16 WMMAs each.
-    %da0_0 = vector.load %a_stage[%fa0, %c0] : view<256x20xi32> -> vector<4xi32>
-    %da1_0 = vector.load %a_stage[%fa1, %c0] : view<256x20xi32> -> vector<4xi32>
-    %da2_0 = vector.load %a_stage[%fa2, %c0] : view<256x20xi32> -> vector<4xi32>
-    %da3_0 = vector.load %a_stage[%fa3, %c0] : view<256x20xi32> -> vector<4xi32>
-    %db0_0 = vector.load %w_stage[%fb0, %c0] : view<128x20xi32> -> vector<4xi32>
-    %db1_0 = vector.load %w_stage[%fb1, %c0] : view<128x20xi32> -> vector<4xi32>
-    %db2_0 = vector.load %w_stage[%fb2, %c0] : view<128x20xi32> -> vector<4xi32>
-    %db3_0 = vector.load %w_stage[%fb3, %c0] : view<128x20xi32> -> vector<4xi32>
-    %la0_0 = vector.fragment<lhs> %da0_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la1_0 = vector.fragment<lhs> %da1_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la2_0 = vector.fragment<lhs> %da2_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la3_0 = vector.fragment<lhs> %da3_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb0_0 = vector.fragment<rhs> %db0_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb1_0 = vector.fragment<rhs> %db1_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb2_0 = vector.fragment<rhs> %db2_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb3_0 = vector.fragment<rhs> %db3_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %o00_0 = vector.mma %la0_0, %rb0_0, %r00 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o01_0 = vector.mma %la0_0, %rb1_0, %r01 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o02_0 = vector.mma %la0_0, %rb2_0, %r02 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o03_0 = vector.mma %la0_0, %rb3_0, %r03 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o10_0 = vector.mma %la1_0, %rb0_0, %r10 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o11_0 = vector.mma %la1_0, %rb1_0, %r11 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o12_0 = vector.mma %la1_0, %rb2_0, %r12 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o13_0 = vector.mma %la1_0, %rb3_0, %r13 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o20_0 = vector.mma %la2_0, %rb0_0, %r20 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o21_0 = vector.mma %la2_0, %rb1_0, %r21 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o22_0 = vector.mma %la2_0, %rb2_0, %r22 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o23_0 = vector.mma %la2_0, %rb3_0, %r23 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o30_0 = vector.mma %la3_0, %rb0_0, %r30 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o31_0 = vector.mma %la3_0, %rb1_0, %r31 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o32_0 = vector.mma %la3_0, %rb2_0, %r32 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o33_0 = vector.mma %la3_0, %rb3_0, %r33 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %da0_1 = vector.load %a_stage[%fa0, %c4] : view<256x20xi32> -> vector<4xi32>
-    %da1_1 = vector.load %a_stage[%fa1, %c4] : view<256x20xi32> -> vector<4xi32>
-    %da2_1 = vector.load %a_stage[%fa2, %c4] : view<256x20xi32> -> vector<4xi32>
-    %da3_1 = vector.load %a_stage[%fa3, %c4] : view<256x20xi32> -> vector<4xi32>
-    %db0_1 = vector.load %w_stage[%fb0, %c4] : view<128x20xi32> -> vector<4xi32>
-    %db1_1 = vector.load %w_stage[%fb1, %c4] : view<128x20xi32> -> vector<4xi32>
-    %db2_1 = vector.load %w_stage[%fb2, %c4] : view<128x20xi32> -> vector<4xi32>
-    %db3_1 = vector.load %w_stage[%fb3, %c4] : view<128x20xi32> -> vector<4xi32>
-    %la0_1 = vector.fragment<lhs> %da0_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la1_1 = vector.fragment<lhs> %da1_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la2_1 = vector.fragment<lhs> %da2_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la3_1 = vector.fragment<lhs> %da3_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb0_1 = vector.fragment<rhs> %db0_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb1_1 = vector.fragment<rhs> %db1_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb2_1 = vector.fragment<rhs> %db2_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb3_1 = vector.fragment<rhs> %db3_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %o00_1 = vector.mma %la0_1, %rb0_1, %o00_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o01_1 = vector.mma %la0_1, %rb1_1, %o01_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o02_1 = vector.mma %la0_1, %rb2_1, %o02_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o03_1 = vector.mma %la0_1, %rb3_1, %o03_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o10_1 = vector.mma %la1_1, %rb0_1, %o10_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o11_1 = vector.mma %la1_1, %rb1_1, %o11_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o12_1 = vector.mma %la1_1, %rb2_1, %o12_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o13_1 = vector.mma %la1_1, %rb3_1, %o13_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o20_1 = vector.mma %la2_1, %rb0_1, %o20_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o21_1 = vector.mma %la2_1, %rb1_1, %o21_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o22_1 = vector.mma %la2_1, %rb2_1, %o22_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o23_1 = vector.mma %la2_1, %rb3_1, %o23_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o30_1 = vector.mma %la3_1, %rb0_1, %o30_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o31_1 = vector.mma %la3_1, %rb1_1, %o31_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o32_1 = vector.mma %la3_1, %rb2_1, %o32_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o33_1 = vector.mma %la3_1, %rb3_1, %o33_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %da0_2 = vector.load %a_stage[%fa0, %c8] : view<256x20xi32> -> vector<4xi32>
-    %da1_2 = vector.load %a_stage[%fa1, %c8] : view<256x20xi32> -> vector<4xi32>
-    %da2_2 = vector.load %a_stage[%fa2, %c8] : view<256x20xi32> -> vector<4xi32>
-    %da3_2 = vector.load %a_stage[%fa3, %c8] : view<256x20xi32> -> vector<4xi32>
-    %db0_2 = vector.load %w_stage[%fb0, %c8] : view<128x20xi32> -> vector<4xi32>
-    %db1_2 = vector.load %w_stage[%fb1, %c8] : view<128x20xi32> -> vector<4xi32>
-    %db2_2 = vector.load %w_stage[%fb2, %c8] : view<128x20xi32> -> vector<4xi32>
-    %db3_2 = vector.load %w_stage[%fb3, %c8] : view<128x20xi32> -> vector<4xi32>
-    %la0_2 = vector.fragment<lhs> %da0_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la1_2 = vector.fragment<lhs> %da1_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la2_2 = vector.fragment<lhs> %da2_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la3_2 = vector.fragment<lhs> %da3_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb0_2 = vector.fragment<rhs> %db0_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb1_2 = vector.fragment<rhs> %db1_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb2_2 = vector.fragment<rhs> %db2_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb3_2 = vector.fragment<rhs> %db3_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %o00_2 = vector.mma %la0_2, %rb0_2, %o00_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o01_2 = vector.mma %la0_2, %rb1_2, %o01_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o02_2 = vector.mma %la0_2, %rb2_2, %o02_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o03_2 = vector.mma %la0_2, %rb3_2, %o03_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o10_2 = vector.mma %la1_2, %rb0_2, %o10_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o11_2 = vector.mma %la1_2, %rb1_2, %o11_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o12_2 = vector.mma %la1_2, %rb2_2, %o12_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o13_2 = vector.mma %la1_2, %rb3_2, %o13_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o20_2 = vector.mma %la2_2, %rb0_2, %o20_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o21_2 = vector.mma %la2_2, %rb1_2, %o21_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o22_2 = vector.mma %la2_2, %rb2_2, %o22_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o23_2 = vector.mma %la2_2, %rb3_2, %o23_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o30_2 = vector.mma %la3_2, %rb0_2, %o30_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o31_2 = vector.mma %la3_2, %rb1_2, %o31_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o32_2 = vector.mma %la3_2, %rb2_2, %o32_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o33_2 = vector.mma %la3_2, %rb3_2, %o33_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %da0_3 = vector.load %a_stage[%fa0, %c12] : view<256x20xi32> -> vector<4xi32>
-    %da1_3 = vector.load %a_stage[%fa1, %c12] : view<256x20xi32> -> vector<4xi32>
-    %da2_3 = vector.load %a_stage[%fa2, %c12] : view<256x20xi32> -> vector<4xi32>
-    %da3_3 = vector.load %a_stage[%fa3, %c12] : view<256x20xi32> -> vector<4xi32>
-    %db0_3 = vector.load %w_stage[%fb0, %c12] : view<128x20xi32> -> vector<4xi32>
-    %db1_3 = vector.load %w_stage[%fb1, %c12] : view<128x20xi32> -> vector<4xi32>
-    %db2_3 = vector.load %w_stage[%fb2, %c12] : view<128x20xi32> -> vector<4xi32>
-    %db3_3 = vector.load %w_stage[%fb3, %c12] : view<128x20xi32> -> vector<4xi32>
-    %la0_3 = vector.fragment<lhs> %da0_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la1_3 = vector.fragment<lhs> %da1_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la2_3 = vector.fragment<lhs> %da2_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %la3_3 = vector.fragment<lhs> %da3_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb0_3 = vector.fragment<rhs> %db0_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb1_3 = vector.fragment<rhs> %db1_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb2_3 = vector.fragment<rhs> %db2_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %rb3_3 = vector.fragment<rhs> %db3_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
-    %o00_3 = vector.mma %la0_3, %rb0_3, %o00_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o01_3 = vector.mma %la0_3, %rb1_3, %o01_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o02_3 = vector.mma %la0_3, %rb2_3, %o02_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o03_3 = vector.mma %la0_3, %rb3_3, %o03_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o10_3 = vector.mma %la1_3, %rb0_3, %o10_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o11_3 = vector.mma %la1_3, %rb1_3, %o11_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o12_3 = vector.mma %la1_3, %rb2_3, %o12_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o13_3 = vector.mma %la1_3, %rb3_3, %o13_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o20_3 = vector.mma %la2_3, %rb0_3, %o20_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o21_3 = vector.mma %la2_3, %rb1_3, %o21_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o22_3 = vector.mma %la2_3, %rb2_3, %o22_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o23_3 = vector.mma %la2_3, %rb3_3, %o23_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o30_3 = vector.mma %la3_3, %rb0_3, %o30_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o31_3 = vector.mma %la3_3, %rb1_3, %o31_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o32_3 = vector.mma %la3_3, %rb2_3, %o32_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
-    %o33_3 = vector.mma %la3_3, %rb3_3, %o33_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+    // Waves whose rows all lie past M skip the multiply; they still stage and
+    // join the barriers.
+    %o00_3, %o01_3, %o02_3, %o03_3, %o10_3, %o11_3, %o12_3, %o13_3, %o20_3, %o21_3, %o22_3, %o23_3, %o30_3, %o31_3, %o32_3, %o33_3 = scf.if %wave_active -> (vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>) {
+      %da0_0 = vector.load %a_stage[%fa0, %c0] : view<256x20xi32> -> vector<4xi32>
+      %da1_0 = vector.load %a_stage[%fa1, %c0] : view<256x20xi32> -> vector<4xi32>
+      %da2_0 = vector.load %a_stage[%fa2, %c0] : view<256x20xi32> -> vector<4xi32>
+      %da3_0 = vector.load %a_stage[%fa3, %c0] : view<256x20xi32> -> vector<4xi32>
+      %db0_0 = vector.load %w_stage[%fb0, %c0] : view<128x20xi32> -> vector<4xi32>
+      %db1_0 = vector.load %w_stage[%fb1, %c0] : view<128x20xi32> -> vector<4xi32>
+      %db2_0 = vector.load %w_stage[%fb2, %c0] : view<128x20xi32> -> vector<4xi32>
+      %db3_0 = vector.load %w_stage[%fb3, %c0] : view<128x20xi32> -> vector<4xi32>
+      %la0_0 = vector.fragment<lhs> %da0_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la1_0 = vector.fragment<lhs> %da1_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la2_0 = vector.fragment<lhs> %da2_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la3_0 = vector.fragment<lhs> %da3_0 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb0_0 = vector.fragment<rhs> %db0_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb1_0 = vector.fragment<rhs> %db1_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb2_0 = vector.fragment<rhs> %db2_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb3_0 = vector.fragment<rhs> %db3_0 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %o00_0 = vector.mma %la0_0, %rb0_0, %r00 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o01_0 = vector.mma %la0_0, %rb1_0, %r01 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o02_0 = vector.mma %la0_0, %rb2_0, %r02 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o03_0 = vector.mma %la0_0, %rb3_0, %r03 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o10_0 = vector.mma %la1_0, %rb0_0, %r10 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o11_0 = vector.mma %la1_0, %rb1_0, %r11 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o12_0 = vector.mma %la1_0, %rb2_0, %r12 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o13_0 = vector.mma %la1_0, %rb3_0, %r13 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o20_0 = vector.mma %la2_0, %rb0_0, %r20 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o21_0 = vector.mma %la2_0, %rb1_0, %r21 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o22_0 = vector.mma %la2_0, %rb2_0, %r22 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o23_0 = vector.mma %la2_0, %rb3_0, %r23 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o30_0 = vector.mma %la3_0, %rb0_0, %r30 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o31_0 = vector.mma %la3_0, %rb1_0, %r31 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o32_0 = vector.mma %la3_0, %rb2_0, %r32 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o33_0 = vector.mma %la3_0, %rb3_0, %r33 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %da0_1 = vector.load %a_stage[%fa0, %c4] : view<256x20xi32> -> vector<4xi32>
+      %da1_1 = vector.load %a_stage[%fa1, %c4] : view<256x20xi32> -> vector<4xi32>
+      %da2_1 = vector.load %a_stage[%fa2, %c4] : view<256x20xi32> -> vector<4xi32>
+      %da3_1 = vector.load %a_stage[%fa3, %c4] : view<256x20xi32> -> vector<4xi32>
+      %db0_1 = vector.load %w_stage[%fb0, %c4] : view<128x20xi32> -> vector<4xi32>
+      %db1_1 = vector.load %w_stage[%fb1, %c4] : view<128x20xi32> -> vector<4xi32>
+      %db2_1 = vector.load %w_stage[%fb2, %c4] : view<128x20xi32> -> vector<4xi32>
+      %db3_1 = vector.load %w_stage[%fb3, %c4] : view<128x20xi32> -> vector<4xi32>
+      %la0_1 = vector.fragment<lhs> %da0_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la1_1 = vector.fragment<lhs> %da1_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la2_1 = vector.fragment<lhs> %da2_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la3_1 = vector.fragment<lhs> %da3_1 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb0_1 = vector.fragment<rhs> %db0_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb1_1 = vector.fragment<rhs> %db1_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb2_1 = vector.fragment<rhs> %db2_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb3_1 = vector.fragment<rhs> %db3_1 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %o00_1 = vector.mma %la0_1, %rb0_1, %o00_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o01_1 = vector.mma %la0_1, %rb1_1, %o01_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o02_1 = vector.mma %la0_1, %rb2_1, %o02_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o03_1 = vector.mma %la0_1, %rb3_1, %o03_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o10_1 = vector.mma %la1_1, %rb0_1, %o10_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o11_1 = vector.mma %la1_1, %rb1_1, %o11_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o12_1 = vector.mma %la1_1, %rb2_1, %o12_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o13_1 = vector.mma %la1_1, %rb3_1, %o13_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o20_1 = vector.mma %la2_1, %rb0_1, %o20_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o21_1 = vector.mma %la2_1, %rb1_1, %o21_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o22_1 = vector.mma %la2_1, %rb2_1, %o22_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o23_1 = vector.mma %la2_1, %rb3_1, %o23_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o30_1 = vector.mma %la3_1, %rb0_1, %o30_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o31_1 = vector.mma %la3_1, %rb1_1, %o31_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o32_1 = vector.mma %la3_1, %rb2_1, %o32_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o33_1 = vector.mma %la3_1, %rb3_1, %o33_0 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %da0_2 = vector.load %a_stage[%fa0, %c8] : view<256x20xi32> -> vector<4xi32>
+      %da1_2 = vector.load %a_stage[%fa1, %c8] : view<256x20xi32> -> vector<4xi32>
+      %da2_2 = vector.load %a_stage[%fa2, %c8] : view<256x20xi32> -> vector<4xi32>
+      %da3_2 = vector.load %a_stage[%fa3, %c8] : view<256x20xi32> -> vector<4xi32>
+      %db0_2 = vector.load %w_stage[%fb0, %c8] : view<128x20xi32> -> vector<4xi32>
+      %db1_2 = vector.load %w_stage[%fb1, %c8] : view<128x20xi32> -> vector<4xi32>
+      %db2_2 = vector.load %w_stage[%fb2, %c8] : view<128x20xi32> -> vector<4xi32>
+      %db3_2 = vector.load %w_stage[%fb3, %c8] : view<128x20xi32> -> vector<4xi32>
+      %la0_2 = vector.fragment<lhs> %da0_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la1_2 = vector.fragment<lhs> %da1_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la2_2 = vector.fragment<lhs> %da2_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la3_2 = vector.fragment<lhs> %da3_2 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb0_2 = vector.fragment<rhs> %db0_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb1_2 = vector.fragment<rhs> %db1_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb2_2 = vector.fragment<rhs> %db2_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb3_2 = vector.fragment<rhs> %db3_2 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %o00_2 = vector.mma %la0_2, %rb0_2, %o00_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o01_2 = vector.mma %la0_2, %rb1_2, %o01_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o02_2 = vector.mma %la0_2, %rb2_2, %o02_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o03_2 = vector.mma %la0_2, %rb3_2, %o03_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o10_2 = vector.mma %la1_2, %rb0_2, %o10_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o11_2 = vector.mma %la1_2, %rb1_2, %o11_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o12_2 = vector.mma %la1_2, %rb2_2, %o12_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o13_2 = vector.mma %la1_2, %rb3_2, %o13_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o20_2 = vector.mma %la2_2, %rb0_2, %o20_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o21_2 = vector.mma %la2_2, %rb1_2, %o21_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o22_2 = vector.mma %la2_2, %rb2_2, %o22_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o23_2 = vector.mma %la2_2, %rb3_2, %o23_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o30_2 = vector.mma %la3_2, %rb0_2, %o30_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o31_2 = vector.mma %la3_2, %rb1_2, %o31_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o32_2 = vector.mma %la3_2, %rb2_2, %o32_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o33_2 = vector.mma %la3_2, %rb3_2, %o33_1 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %da0_3 = vector.load %a_stage[%fa0, %c12] : view<256x20xi32> -> vector<4xi32>
+      %da1_3 = vector.load %a_stage[%fa1, %c12] : view<256x20xi32> -> vector<4xi32>
+      %da2_3 = vector.load %a_stage[%fa2, %c12] : view<256x20xi32> -> vector<4xi32>
+      %da3_3 = vector.load %a_stage[%fa3, %c12] : view<256x20xi32> -> vector<4xi32>
+      %db0_3 = vector.load %w_stage[%fb0, %c12] : view<128x20xi32> -> vector<4xi32>
+      %db1_3 = vector.load %w_stage[%fb1, %c12] : view<128x20xi32> -> vector<4xi32>
+      %db2_3 = vector.load %w_stage[%fb2, %c12] : view<128x20xi32> -> vector<4xi32>
+      %db3_3 = vector.load %w_stage[%fb3, %c12] : view<128x20xi32> -> vector<4xi32>
+      %la0_3 = vector.fragment<lhs> %da0_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la1_3 = vector.fragment<lhs> %da1_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la2_3 = vector.fragment<lhs> %da2_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %la3_3 = vector.fragment<lhs> %da3_3 shape [%m, %k] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb0_3 = vector.fragment<rhs> %db0_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb1_3 = vector.fragment<rhs> %db1_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb2_3 = vector.fragment<rhs> %db2_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %rb3_3 = vector.fragment<rhs> %db3_3 shape [%k, %n] using {schema = %i4_schema : encoding<schema>} : vector<4xi32>
+      %o00_3 = vector.mma %la0_3, %rb0_3, %o00_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o01_3 = vector.mma %la0_3, %rb1_3, %o01_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o02_3 = vector.mma %la0_3, %rb2_3, %o02_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o03_3 = vector.mma %la0_3, %rb3_3, %o03_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o10_3 = vector.mma %la1_3, %rb0_3, %o10_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o11_3 = vector.mma %la1_3, %rb1_3, %o11_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o12_3 = vector.mma %la1_3, %rb2_3, %o12_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o13_3 = vector.mma %la1_3, %rb3_3, %o13_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o20_3 = vector.mma %la2_3, %rb0_3, %o20_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o21_3 = vector.mma %la2_3, %rb1_3, %o21_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o22_3 = vector.mma %la2_3, %rb2_3, %o22_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o23_3 = vector.mma %la2_3, %rb3_3, %o23_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o30_3 = vector.mma %la3_3, %rb0_3, %o30_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o31_3 = vector.mma %la3_3, %rb1_3, %o31_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o32_3 = vector.mma %la3_3, %rb2_3, %o32_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      %o33_3 = vector.mma %la3_3, %rb3_3, %o33_2 : vector<4xi32>, vector<4xi32>, vector<8xi32>
+      scf.yield %o00_3, %o01_3, %o02_3, %o03_3, %o10_3, %o11_3, %o12_3, %o13_3, %o20_3, %o21_3, %o22_3, %o23_3, %o30_3, %o31_3, %o32_3, %o33_3 : vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>
+    } else {
+      scf.yield %r00, %r01, %r02, %r03, %r10, %r11, %r12, %r13, %r20, %r21, %r22, %r23, %r30, %r31, %r32, %r33 : vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>
+    }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
     scf.yield %o00_3, %o01_3, %o02_3, %o03_3, %o10_3, %o11_3, %o12_3, %o13_3, %o20_3, %o21_3, %o22_3, %o23_3, %o30_3, %o31_3, %o32_3, %o33_3, %na0, %na1, %na2, %na3, %nw0, %nw1 : vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<8xi32>, vector<4xi32>, vector<4xi32>, vector<4xi32>, vector<4xi32>, vector<4xi32>, vector<4xi32>
   }
