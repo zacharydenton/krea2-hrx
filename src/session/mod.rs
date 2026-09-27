@@ -699,12 +699,9 @@ impl Session {
         gate: Option<View<'g>>,
     ) -> Result<()> {
         let scalars = Scalars::new().index(self.tokens);
-        let bindings =
-            [self.buffers.a_q.binding(), weights, scales, self.buffers.a_s.binding(), out];
-        let mut bindings = bindings.to_vec();
-        if let Some(gate) = gate {
-            bindings.push(gate);
-        }
+        let (a_q, a_s) = (self.buffers.a_q.binding(), self.buffers.a_s.binding());
+        let all = [a_q, weights, scales, a_s, out, gate.unwrap_or(out)];
+        let bindings = &all[..5 + usize::from(gate.is_some())];
         let grid_y = crate::kernels::shape::gemm_grid_rows(
             self.tokens as i32,
             self.metadata.gemm_rows as i32,
@@ -718,7 +715,7 @@ impl Session {
             grid_y as u32,
             THREADS,
             &scalars,
-            &bindings,
+            bindings,
         )
     }
 

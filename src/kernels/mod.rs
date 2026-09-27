@@ -41,20 +41,25 @@ impl From<String> for Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Named kernel configuration values, sorted for stable cache serialization.
-pub type Config = std::collections::BTreeMap<String, u64>;
+/// The names are the kernels' own `config` spellings, so they are literals.
+pub type Config = std::collections::BTreeMap<&'static str, u64>;
 
 /// A compiler invocation's `--config` values, which are not all counts.
 pub type Settings = std::collections::BTreeMap<String, String>;
 
 /// Convenience for the common `[("tokens", 4115), ...]` literal.
-pub fn config<const N: usize>(entries: [(&str, u64); N]) -> Config {
-    entries.into_iter().map(|(key, value)| (key.to_string(), value)).collect()
+pub fn config<const N: usize>(entries: [(&'static str, u64); N]) -> Config {
+    entries.into_iter().collect()
 }
 
 /// Whether to ask the compiler for its report on every kernel it builds.
-/// Off by default: the reports are large and only wanted when tuning.
+/// Off by default: the reports are large and only wanted when tuning. Read
+/// once per process, since every dispatch's cache key includes it.
 pub fn kernel_reports() -> bool {
-    std::env::var_os("KREA2_KERNEL_REPORT").is_some_and(|v| v == "1")
+    static REPORTS: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var_os("KREA2_KERNEL_REPORT").is_some_and(|v| v == "1")
+    });
+    *REPORTS
 }
 
 /// What the compiler said about one kernel, on stderr.

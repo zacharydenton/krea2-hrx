@@ -59,9 +59,20 @@ pub enum Binary {
 /// normalization, sqrt(width), and weight multiplication.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Norm {
-    OnePlusScale = 0,
-    Scale = 1,
-    Group = 2,
+    OnePlusScale,
+    Scale,
+    Group,
+}
+
+impl Norm {
+    /// The kernel that applies this scaling to one row per workgroup.
+    fn kernel(self) -> &'static str {
+        match self {
+            Norm::OnePlusScale => "norm_0",
+            Norm::Scale => "norm_1",
+            Norm::Group => "norm_2",
+        }
+    }
 }
 
 /// Storage order for convolution weights with logical `[out, in, ky, kx]` shapes.
@@ -237,13 +248,12 @@ impl Ops {
         let bindings = [x.binding()?, scales, y.binding()?];
         // Eight rows per workgroup when a row fits in one wave's registers.
         let wave = mode == Norm::Group && x.cols() <= 1024;
-        let name =
-            if wave { "norm_2_wave".to_string() } else { format!("norm_{}", mode as u8) };
+        let name = if wave { "norm_2_wave" } else { mode.kernel() };
         let grid = if wave { x.rows().div_ceil(8) } else { x.rows() };
         unsafe {
             self.launch(
                 stream,
-                &name,
+                name,
                 config(&[("xsize", x.size()), ("cols", x.cols())]),
                 &scalars,
                 &bindings,
@@ -645,26 +655,17 @@ impl Ops {
         }
         check_bias(bias, n)?;
         let y = self.tensor(stream, m, n)?;
-        let name =
+        let base =
             if bias.is_some() { "conv3x3_bf16_bf16_nt_bias" } else { "conv3x3_bf16_bf16_nt" };
         let scalars = Scalars::new().index(m).float(1.0);
-        let mut bindings = vec![x.binding()?, w.values()?, y.binding()?];
-        if let Some(bias) = bias {
-            bindings.push(bias);
-        }
-        // Widen only when the larger tile adds no padded rows or columns.
-        let wide = m >= 128 && n >= 64 && m.div_ceil(64).is_multiple_of(2);
-        let square = wide && n >= 128 && n.div_ceil(64).is_multiple_of(2) && k >= 128;
-        let (tile_m, tile_n) = (if wide { 128 } else { 64 }, if square { 128 } else { 64 });
-        let name = match (square, wide) {
-            (true, _) => format!("{name}_tiled"),
-            (_, true) => format!("{name}_wide"),
-            _ => name.to_string(),
-        };
+        let (x_values, y_values) = (x.binding()?, y.binding()?);
+        let all = [x_values, w.values()?, y_values, bias.unwrap_or(y_values)];
+        let bindings = &all[..3 + usize::from(bias.is_some())];
+        let Tile { name, rows: tile_m, columns: tile_n } = tile(base, m, n, k);
         unsafe {
             self.launch(
                 stream,
-                &name,
+                name,
                 config(&[
                     ("m", m),
                     ("n", n),
@@ -680,7 +681,7 @@ impl Ops {
                     ("height", height),
                 ]),
                 &scalars,
-                &bindings,
+                bindings,
                 n.div_ceil(tile_n),
                 m.div_ceil(tile_m),
                 256,
@@ -759,16 +760,13 @@ impl Ops {
         Ok(())
     }
 
-    /// The bf16 GEMM every dense layer here goes through.
-    ///
-    /// The row tile doubles when that adds no padded rows, and the column tile
-    /// doubles again for long reductions, which halves how often a convolution
-    /// streams its input.
+    /// The bf16 GEMM every dense layer here goes through, at the tile [`tile`]
+    /// chooses for its shape.
     #[allow(clippy::too_many_arguments)]
     fn matmul(
         &self,
         stream: &Stream,
-        name: &str,
+        name: &'static str,
         a: View<'_>,
         b: View<'_>,
         out: View<'_>,
@@ -780,24 +778,9 @@ impl Ops {
         bias: Option<View<'_>>,
     ) -> Result<()> {
         let scalars = Scalars::new().index(m).float(alpha);
-        let mut bindings = vec![a, b, out];
-        if let Some(bias) = bias {
-            bindings.push(bias);
-        }
-        let wide = m >= 128
-            && n >= 64
-            && m.div_ceil(64).is_multiple_of(2)
-            && (name == "gemm_bf16_bf16_nt" || name == "gemm_bf16_bf16_nt_bias");
-        let square = wide && n >= 128 && n.div_ceil(64).is_multiple_of(2) && k >= 128;
-        let tile_m = if wide { 128 } else { 64 };
-        let tile_n = if square { 128 } else { 64 };
-        let name = if square {
-            format!("{name}_tiled")
-        } else if wide {
-            format!("{name}_wide")
-        } else {
-            name.to_string()
-        };
+        let all = [a, b, out, bias.unwrap_or(out)];
+        let bindings = &all[..3 + usize::from(bias.is_some())];
+        let Tile { name, rows: tile_m, columns: tile_n } = tile(name, m, n, k);
         let config = config(&[
             ("m", m),
             ("n", n),
@@ -811,16 +794,56 @@ impl Ops {
         unsafe {
             self.launch(
                 stream,
-                &name,
+                name,
                 config,
                 &scalars,
-                &bindings,
+                bindings,
                 n.div_ceil(tile_n),
                 batches * m.div_ceil(tile_m),
                 256,
             )
         }
     }
+}
+
+/// The dense kernel a GEMM runs as, and the output tile it covers per
+/// workgroup.
+#[derive(Debug, PartialEq, Eq)]
+struct Tile {
+    name: &'static str,
+    rows: usize,
+    columns: usize,
+}
+
+/// The tile for an `m x n x k` product through the `base` kernel.
+///
+/// The row tile doubles when that adds no padded rows, and the column tile
+/// doubles again for long reductions, which halves how often a convolution
+/// streams its input. Only the bf16-output kernels have the larger tiles.
+fn tile(base: &'static str, m: usize, n: usize, k: usize) -> Tile {
+    const VARIANTS: [(&str, &str, &str); 4] = [
+        ("gemm_bf16_bf16_nt", "gemm_bf16_bf16_nt_wide", "gemm_bf16_bf16_nt_tiled"),
+        (
+            "gemm_bf16_bf16_nt_bias",
+            "gemm_bf16_bf16_nt_bias_wide",
+            "gemm_bf16_bf16_nt_bias_tiled",
+        ),
+        ("conv3x3_bf16_bf16_nt", "conv3x3_bf16_bf16_nt_wide", "conv3x3_bf16_bf16_nt_tiled"),
+        (
+            "conv3x3_bf16_bf16_nt_bias",
+            "conv3x3_bf16_bf16_nt_bias_wide",
+            "conv3x3_bf16_bf16_nt_bias_tiled",
+        ),
+    ];
+    let variants = VARIANTS.iter().find(|(name, ..)| *name == base);
+    let wide = variants.is_some() && m >= 128 && n >= 64 && m.div_ceil(64).is_multiple_of(2);
+    let square = wide && n >= 128 && n.div_ceil(64).is_multiple_of(2) && k >= 128;
+    let name = match variants {
+        Some((_, _, tiled)) if square => tiled,
+        Some((_, wide_name, _)) if wide => wide_name,
+        _ => base,
+    };
+    Tile { name, rows: if wide { 128 } else { 64 }, columns: if square { 128 } else { 64 } }
 }
 
 /// A bias is one bf16 per output column. The kernels read `n` of them with no
@@ -847,36 +870,58 @@ pub fn pack_convolutions() -> bool {
 
 /// A kernel configuration from shape entries, which is how these kernels take
 /// their shapes: compiled in, not passed.
-pub fn config(entries: &[(&str, usize)]) -> Config {
-    entries.iter().map(|(key, value)| ((*key).to_string(), *value as u64)).collect()
+pub fn config(entries: &[(&'static str, usize)]) -> Config {
+    entries.iter().map(|&(key, value)| (key, value as u64)).collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
-    fn the_matmul_tile_widens_only_when_it_adds_no_padded_rows() {
+    fn the_dense_tile_widens_only_when_it_adds_no_padded_rows() {
         // 128 rows are two whole 64-row tiles, so the wide kernel applies;
         // 129 would pad a third, so it does not.
-        for (m, n, k, expected) in [
-            (128usize, 128usize, 128usize, "gemm_bf16_bf16_nt_tiled"),
-            (128, 64, 128, "gemm_bf16_bf16_nt_wide"),
-            (129, 128, 128, "gemm_bf16_bf16_nt"),
-            (128, 128, 64, "gemm_bf16_bf16_nt_wide"),
+        for (base, m, n, k, expected) in [
+            ("gemm_bf16_bf16_nt", 128, 128, 128, ("gemm_bf16_bf16_nt_tiled", 128, 128)),
+            ("gemm_bf16_bf16_nt", 128, 64, 128, ("gemm_bf16_bf16_nt_wide", 128, 64)),
+            ("gemm_bf16_bf16_nt", 129, 128, 128, ("gemm_bf16_bf16_nt", 64, 64)),
+            ("gemm_bf16_bf16_nt", 128, 128, 64, ("gemm_bf16_bf16_nt_wide", 128, 64)),
+            (
+                "gemm_bf16_bf16_nt_bias",
+                256,
+                256,
+                256,
+                ("gemm_bf16_bf16_nt_bias_tiled", 128, 128),
+            ),
+            (
+                "conv3x3_bf16_bf16_nt_bias",
+                256,
+                64,
+                1152,
+                ("conv3x3_bf16_bf16_nt_bias_wide", 128, 64),
+            ),
+            // The float32-output and batched kernels have only the one tile.
+            ("gemm_bf16_f32_nt", 4096, 4096, 128, ("gemm_bf16_f32_nt", 64, 64)),
+            ("gemm_bf16_bf16_nn", 4096, 128, 4096, ("gemm_bf16_bf16_nn", 64, 64)),
         ] {
-            let wide = m >= 128
-                && n >= 64
-                && m.div_ceil(64).is_multiple_of(2)
-                && "gemm_bf16_bf16_nt" == "gemm_bf16_bf16_nt";
-            let square = wide && n >= 128 && n.div_ceil(64).is_multiple_of(2) && k >= 128;
-            let name = if square {
-                "gemm_bf16_bf16_nt_tiled"
-            } else if wide {
-                "gemm_bf16_bf16_nt_wide"
-            } else {
-                "gemm_bf16_bf16_nt"
-            };
-            assert_eq!(name, expected, "m={m} n={n} k={k}");
+            let (name, rows, columns) = expected;
+            assert_eq!(tile(base, m, n, k), Tile { name, rows, columns }, "{base} {m}x{n}x{k}");
+        }
+    }
+
+    #[test]
+    fn every_tile_variant_is_an_embedded_kernel() {
+        for base in [
+            "gemm_bf16_bf16_nt",
+            "gemm_bf16_bf16_nt_bias",
+            "conv3x3_bf16_bf16_nt",
+            "conv3x3_bf16_bf16_nt_bias",
+        ] {
+            for (m, n, k) in [(64, 64, 64), (128, 64, 64), (128, 128, 128)] {
+                let name = tile(base, m, n, k).name;
+                assert!(crate::kernels::sources::auxiliary(name).is_some(), "{name}");
+            }
         }
     }
 }

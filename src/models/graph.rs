@@ -600,28 +600,34 @@ impl Models {
         // Tiles overlap by 8 latents where there is more than one of them.
         let stride = if h > 32 || w > 32 { 24 } else { 32 };
         let output_stride = stride * 8;
-        let mut tiles: Vec<Vec<Tile>> = Vec::new();
+        // Every tile is queued before any is read back, so the device never
+        // idles while the host downloads one tile and submits the next.
+        let mut decoded = Vec::new();
         for y in (0..h).step_by(stride) {
             let mut row = Vec::new();
             for x in (0..w).step_by(stride) {
                 let (th, tw) = (std::cmp::min(32, h - y), std::cmp::min(32, w - x));
-                let mut input = vec![0u16; th * tw * 16];
+                let mut input = Vec::with_capacity(th * tw * 16);
                 for j in 0..th {
                     let source = ((y + j) * w + x) * 16;
-                    input[j * tw * 16..(j + 1) * tw * 16]
-                        .copy_from_slice(&latent[source..source + tw * 16]);
+                    input.extend_from_slice(&latent[source..source + tw * 16]);
                 }
                 let uploaded =
                     Tensor::from_slice(self.ops.pool(), stream, &input, th * tw, 16)?;
-                let output = self.decode_tile(stream, &uploaded, th, tw)?;
-                row.push(Tile {
-                    height: th * 8,
-                    width: tw * 8,
-                    data: output.download(stream)?,
-                });
+                row.push((th * 8, tw * 8, self.decode_tile(stream, &uploaded, th, tw)?));
             }
-            tiles.push(row);
+            decoded.push(row);
         }
+        let tiles = decoded
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|(height, width, output)| {
+                        Ok(Tile { height, width, data: output.download(stream)? })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .collect::<Result<Vec<_>>>()?;
         compose(tiles, output_stride, height, width)
     }
 }
@@ -741,8 +747,8 @@ fn blend_into(tile: &mut Tile, neighbour: &[u16], blend: usize, vertical: bool) 
     let (rows, columns) = if vertical { (blend, tile.width) } else { (tile.height, blend) };
     for y in 0..rows {
         for x in 0..columns {
+            let fraction = if vertical { y as f32 } else { x as f32 } / blend as f32;
             for channel in 0..3 {
-                let fraction = if vertical { y as f32 } else { x as f32 } / blend as f32;
                 let index = (y * tile.width + x) * 3 + channel;
                 let theirs = to_f32(neighbour[(y * columns + x) * 3 + channel]);
                 let mine = to_f32(tile.data[index]);

@@ -133,8 +133,8 @@ impl Sage {
         bits: u32,
     ) -> [Plan; 7] {
         let (t, c, h, kv) = (tokens, capacity, heads, kv_heads);
-        let config = |entries: &[(&str, usize)]| -> Config {
-            entries.iter().map(|(key, value)| ((*key).to_string(), *value as u64)).collect()
+        let config = |entries: &[(&'static str, usize)]| -> Config {
+            entries.iter().map(|&(key, value)| (key, value as u64)).collect()
         };
         let (quant_q, quant_k) = match bits {
             4 => ("sage_quant_q", "sage_quant_k"),
@@ -278,24 +278,18 @@ impl Sage {
         v: View<'g>,
         after_table: &[&'static [usize]; 7],
     ) -> Result<()> {
-        let bindings: [Vec<View<'g>>; 7] = [
-            vec![k, self.key_partial.binding()],
-            vec![self.key_partial.binding(), self.key_mean.binding()],
-            vec![q, self.query_mean.binding(), self.query_mean_half.binding()],
-            vec![q, self.query_mean.binding(), self.q4.binding(), self.q_scale.binding()],
-            vec![
-                k,
-                self.key_mean.binding(),
-                self.k4.binding(),
-                self.k_scale.binding(),
-                self.centered_k.binding(),
-            ],
-            vec![v, self.v_transposed.binding()],
-            vec![
-                self.query_mean_half.binding(),
-                self.centered_k.binding(),
-                self.correction.binding(),
-            ],
+        let (key_partial, key_mean) = (self.key_partial.binding(), self.key_mean.binding());
+        let (query_mean, query_mean_half) =
+            (self.query_mean.binding(), self.query_mean_half.binding());
+        let centered_k = self.centered_k.binding();
+        let bindings: [&[View<'g>]; 7] = [
+            &[k, key_partial],
+            &[key_partial, key_mean],
+            &[q, query_mean, query_mean_half],
+            &[q, query_mean, self.q4.binding(), self.q_scale.binding()],
+            &[k, key_mean, self.k4.binding(), self.k_scale.binding(), centered_k],
+            &[v, self.v_transposed.binding()],
+            &[query_mean_half, centered_k, self.correction.binding()],
         ];
 
         let recording = match sink {

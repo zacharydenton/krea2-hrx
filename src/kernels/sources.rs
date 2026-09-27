@@ -1,9 +1,21 @@
 //! The kernel sources, embedded from `kernels/` at build time.
 include!(concat!(env!("OUT_DIR"), "/sources.rs"));
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 /// One auxiliary kernel's Loom source (`kernels/native/<name>.loom`).
 pub fn auxiliary(name: &str) -> Option<&'static str> {
-    AUXILIARY.iter().find(|(stem, _)| *stem == name).map(|(_, source)| *source)
+    auxiliary_entry(name).map(|(_, source)| source)
+}
+
+/// The same, with the embedded name: a `'static` spelling of `name` that a
+/// cache key can hold without allocating. Looked up by hash, since every
+/// auxiliary dispatch resolves its kernel this way.
+pub fn auxiliary_entry(name: &str) -> Option<(&'static str, &'static str)> {
+    static BY_NAME: LazyLock<HashMap<&str, &str>> =
+        LazyLock::new(|| AUXILIARY.iter().copied().collect());
+    BY_NAME.get_key_value(name).map(|(stem, source)| (*stem, *source))
 }
 
 /// One block kernel's Loom source (`kernels/<name>.loom`).

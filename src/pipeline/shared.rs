@@ -2,7 +2,7 @@
 //! shared-context blocks. Pipeline's state lock excludes concurrent native use.
 use super::*;
 use hrx::{
-    execution::GpuAccess,
+    execution::{BufferView, GpuAccess},
     inference::PreparedModel,
     tensor::{DType, DeviceTensor, Layout, TensorDesc},
     Access, PooledBuffer,
@@ -80,21 +80,32 @@ impl Blocks {
 }
 
 impl Pipeline {
+    /// The 28 blocks over `[text; image]`, returning the image rows of the
+    /// residual stream. The conditioning and image tokens are copied straight
+    /// into the prepared model's residual input, and only the image rows are
+    /// copied back, into a tensor from the native pool.
     pub(super) fn run_blocks(
         &self,
         stream: &mut Stream,
         blocks: &Blocks,
-        residual: &Tensor,
-        modulation: PooledBuffer,
-    ) -> Result<()> {
+        text: &Tensor,
+        image: &Tensor,
+        modulation: &Arc<PooledBuffer>,
+    ) -> Result<Tensor> {
+        let (text_bytes, image_bytes) = (text.size() * 2, image.size() * 2);
+        if text.cols() != WIDTH
+            || image.cols() != WIDTH
+            || blocks.residual.desc().bytes() != text_bytes + image_bytes
+        {
+            return Err(Error("block input dimensions".into()));
+        }
+        let output = self.models.ops.tensor(stream, image.rows(), WIDTH)?;
         // Native producers use their private stream. Drain before handing those
         // owners to a worker; no host readback is involved in this boundary.
         stream.synchronize()?;
-        let bindings = [&blocks.residual, &blocks.modulation].map(|t| GpuAccess {
-            view: t.binding().expect("nonempty input"),
-            access: Access::Write,
-        });
-        let source = residual.clone();
+        let inputs = [&blocks.residual, &blocks.modulation].map(binding);
+        let bindings = inputs.clone().map(|view| GpuAccess { view, access: Access::Write });
+        let (text, image, modulation) = (text.clone(), image.clone(), Arc::clone(modulation));
         let bridge = self.bridge.clone();
         let mut upload = self.context.runtime().graph();
         // SAFETY: Pipeline's state lock excludes all other native uses of these
@@ -104,10 +115,8 @@ impl Pipeline {
         unsafe {
             upload.gpu_scoped(&bindings, move |views| {
                 bridge.run(|stream| {
-                    stream.copy(
-                        views[0],
-                        source.binding().map_err(|e| hrx::Error::Message(e.to_string()))?,
-                    )?;
+                    stream.copy(views[0].slice(0, text_bytes)?, native(&text)?)?;
+                    stream.copy(views[0].slice(text_bytes, image_bytes)?, native(&image)?)?;
                     stream.copy(views[1], modulation.binding())
                 })
             })?;
@@ -118,44 +127,45 @@ impl Pipeline {
         copied.wait()?;
         let inputs = [&blocks.residual, &blocks.modulation]
             .into_iter()
-            .map(|t| {
-                self.context.tensor(
-                    t.desc().clone(),
-                    t.binding().expect("nonempty input"),
-                    copied.clone(),
-                )
+            .zip(inputs)
+            .map(|(tensor, view)| {
+                self.context.tensor(tensor.desc().clone(), view, copied.clone())
             })
             .collect::<hrx::Result<Vec<_>>>()?;
         let result = blocks.plan.submit(&inputs)?;
-        let binding = GpuAccess {
-            view: result.outputs()[0].binding().expect("nonempty output"),
-            access: Access::Read,
-        };
-        let destination = residual.clone();
+        let residual = binding(&result.outputs()[0]);
+        let binding = GpuAccess { view: residual, access: Access::Read };
+        let destination = output.clone();
         let retained_output = result.outputs()[0].clone();
         let bridge = self.bridge.clone();
-        let mut output = self.context.runtime().graph();
+        let mut copy_back = self.context.runtime().graph();
         // SAFETY: The destination remains inaccessible to native operations
         // until the wait below succeeds. The closure owns its allocation and
         // reusable stream, retains the prepared output slot, and drains copies.
         unsafe {
-            output.gpu_scoped(&[binding], move |views| {
+            copy_back.gpu_scoped(&[binding], move |views| {
                 // Retain the slot lease, not merely its underlying allocation,
                 // until completion (or indefinitely on quarantine).
                 let _keep_slot = &retained_output;
                 bridge.run(|stream| {
-                    stream.copy(
-                        destination
-                            .binding()
-                            .map_err(|e| hrx::Error::Message(e.to_string()))?,
-                        views[0],
-                    )
+                    stream.copy(native(&destination)?, views[0].slice(text_bytes, image_bytes)?)
                 })
             })?;
         }
-        output.prepare()?.submit_after(std::slice::from_ref(result.completion()))?.wait()?;
-        Ok(())
+        copy_back.prepare()?.submit_after(std::slice::from_ref(result.completion()))?.wait()?;
+        Ok(output)
     }
+}
+
+/// A shared-context tensor's device view. Every tensor here has a nonzero
+/// shape, so it always has one.
+fn binding(tensor: &DeviceTensor) -> BufferView {
+    tensor.binding().expect("block tensors have nonzero shapes")
+}
+
+/// A native tensor's view, with its error in the runtime's terms.
+fn native(tensor: &Tensor) -> hrx::Result<hrx::View<'_>> {
+    tensor.binding().map_err(|e| hrx::Error::Message(e.to_string()))
 }
 
 #[cfg(test)]

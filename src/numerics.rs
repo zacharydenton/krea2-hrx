@@ -39,17 +39,37 @@ pub fn from_f32_carrying(value: f32) -> Bits {
 /// fp8 E4M3 (`torch.float8_e4m3fn`) → f32, as the `_scaled` text encoders store
 /// it: one NaN encoding, subnormals at 2^-9 steps, no infinities.
 pub fn fp8_e4m3_to_f32(byte: u8) -> f32 {
-    let sign = byte >> 7;
+    FP8_E4M3[byte as usize]
+}
+
+/// Every fp8 E4M3 value, worked out at compile time: dequantizing a checkpoint
+/// looks each byte up rather than decoding it.
+static FP8_E4M3: [f32; 256] = {
+    let mut table = [0.0; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        table[byte] = decode_fp8_e4m3(byte as u8);
+        byte += 1;
+    }
+    table
+};
+
+/// `2^exponent` for the normal f32 exponents fp8 reaches, exactly.
+const fn power_of_two(exponent: i32) -> f32 {
+    f32::from_bits(((exponent + 127) as u32) << 23)
+}
+
+const fn decode_fp8_e4m3(byte: u8) -> f32 {
     let exponent = (byte >> 3) & 15;
-    let mantissa = byte & 7;
-    let value = if exponent == 15 && mantissa == 7 {
+    let mantissa = (byte & 7) as f32;
+    let value = if exponent == 15 && byte & 7 == 7 {
         f32::NAN
     } else if exponent == 0 {
-        f32::from(mantissa) * 2.0f32.powi(-9) // m/8 * 2^-6
+        mantissa * power_of_two(-9) // m/8 * 2^-6
     } else {
-        (1.0 + f32::from(mantissa) / 8.0) * 2.0f32.powi(i32::from(exponent) - 7)
+        (1.0 + mantissa / 8.0) * power_of_two(exponent as i32 - 7)
     };
-    if sign == 1 {
+    if byte >> 7 == 1 {
         -value
     } else {
         value

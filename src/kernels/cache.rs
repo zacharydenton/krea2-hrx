@@ -7,7 +7,7 @@
 //! one.
 use std::num::NonZeroUsize;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use hrx::{Kernel, Stream};
 
@@ -55,7 +55,9 @@ pub fn compiler_for_target(
 /// target to build for.
 #[derive(Default)]
 pub struct PreparedKernels {
-    loaded: Mutex<Option<hrx::loom::KeyedKernels<RequestKey>>>,
+    /// Built on first use, for the target of the stream that first asks. HRX's
+    /// keyed cache does its own locking, so a hit takes no lock of ours.
+    loaded: OnceLock<hrx::loom::KeyedKernels<RequestKey>>,
     compiler: Option<String>,
 }
 
@@ -63,7 +65,7 @@ pub struct PreparedKernels {
 /// these directly; expanding their strings and hashing source is miss-only.
 #[derive(Hash, PartialEq, Eq)]
 struct RequestKey {
-    name: String,
+    name: &'static str,
     config: Config,
     grid: (u32, u32),
     report: bool,
@@ -71,7 +73,7 @@ struct RequestKey {
 
 impl PreparedKernels {
     pub fn new(compiler: Option<&str>) -> Self {
-        Self { loaded: Mutex::default(), compiler: compiler.map(str::to_owned) }
+        Self { loaded: OnceLock::new(), compiler: compiler.map(str::to_owned) }
     }
 
     pub fn get(
@@ -81,41 +83,42 @@ impl PreparedKernels {
         config: Config,
         grid: (u32, u32),
     ) -> Result<Kernel> {
-        let source = auxiliary_source(name)?;
+        let (name, source) = auxiliary_source(name)?;
         let key = RequestKey {
-            name: name.to_owned(),
+            name,
             config,
             grid: if name == "sage_transpose" { (0, 0) } else { grid },
             report: super::kernel_reports(),
         };
-        let mut loaded =
-            self.loaded.lock().map_err(|_| Error("operation cache poisoned".into()))?;
-        let kernels = match &*loaded {
-            Some(kernels) => kernels,
-            None => loaded.insert(
-                hrx::loom::Kernels::new(compiler_for_target(
-                    self.compiler.as_deref(),
-                    stream.target(),
-                )?)
-                .reporting(|artifact| super::report(artifact.symbol(), artifact))
-                .keyed(),
-            ),
-        };
         // Safety: source is embedded and immutable; the key includes every
         // input used to select the source, specialization and report setting.
         Ok(unsafe {
-            kernels.get_or_insert_with(stream, key, |key| {
-                Ok((source, specialization(&key.name, &key.config, key.grid, key.report)))
+            self.loaded(stream)?.get_or_insert_with(stream, key, |key| {
+                Ok((source, specialization(key.name, &key.config, key.grid, key.report)))
             })
         }?)
     }
+
+    /// The keyed cache, built for this stream's target on first use. A racing
+    /// first use builds a second one and drops it; compilers are shared.
+    fn loaded(&self, stream: &Stream) -> Result<&hrx::loom::KeyedKernels<RequestKey>> {
+        if let Some(loaded) = self.loaded.get() {
+            return Ok(loaded);
+        }
+        let compiler = compiler_for_target(self.compiler.as_deref(), stream.target())?;
+        let kernels = hrx::loom::Kernels::new(compiler)
+            .reporting(|artifact| super::report(artifact.symbol(), artifact))
+            .keyed();
+        Ok(self.loaded.get_or_init(|| kernels))
+    }
 }
 
-/// The embedded source for an auxiliary kernel, named in the error when there
-/// is none. Separate from the compile so the lookup can be tested without a
-/// device: naming a kernel now takes a stream, resolving it does not.
-fn auxiliary_source(name: &str) -> Result<&'static str> {
-    sources::auxiliary(name).ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))
+/// The embedded name and source for an auxiliary kernel, named in the error
+/// when there is none. Separate from the compile so the lookup can be tested
+/// without a device: naming a kernel takes a stream, resolving it does not.
+fn auxiliary_source(name: &str) -> Result<(&'static str, &'static str)> {
+    sources::auxiliary_entry(name)
+        .ok_or_else(|| Error(format!("no auxiliary kernel named {name}")))
 }
 
 /// The export and configuration one auxiliary kernel compiles from.
@@ -130,8 +133,8 @@ fn specialization(
 ) -> hrx::loom::Specialization {
     let mut config = config.clone();
     if name != "sage_transpose" {
-        config.insert("grid_x".into(), u64::from(grid.0));
-        config.insert("grid_y".into(), u64::from(grid.1));
+        config.insert("grid_x", u64::from(grid.0));
+        config.insert("grid_y", u64::from(grid.1));
     }
     let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
     request.replace_config(

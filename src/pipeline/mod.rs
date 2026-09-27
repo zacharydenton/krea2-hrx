@@ -96,14 +96,13 @@ impl<'a> Request<'a> {
     }
 }
 
-/// The rope tables for one image geometry, which change only with it.
-#[derive(Default)]
-struct Rope {
-    width: usize,
-    height: usize,
-    text_tokens: usize,
-    cos: Vec<f32>,
-    sin: Vec<f32>,
+/// One sampling step's inputs to the blocks, shared by both guidance branches.
+struct StepInputs {
+    embedding: Tensor,
+    image: Tensor,
+    /// Float32 `[28][6][6144]`. Shared because each block handoff retains the
+    /// source until its copy drains.
+    modulation: Arc<hrx::PooledBuffer>,
 }
 
 /// Everything resident: the three models, the block weights, and whichever
@@ -261,16 +260,9 @@ impl Pipeline {
         let taps = self.upload(stream, text, text_tokens * 12, 2560)?;
         let conditioning = self.models.text_fusion(stream, &taps)?;
         let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
-        let velocity = self.forward(
-            stream,
-            weights,
-            blocks,
-            &packed,
-            &conditioning,
-            timestep,
-            width,
-            height,
-        )?;
+        let inputs = self.step_inputs(stream, &packed, timestep)?;
+        let velocity =
+            self.forward(stream, weights, blocks, &inputs, &conditioning, width, height)?;
         stream.synchronize()?;
         downloaded(stream, &velocity)
     }
@@ -322,11 +314,14 @@ impl Pipeline {
         for step in 0..steps {
             let sigma = schedule::sigma(step, steps, mu);
             let next = schedule::sigma(step + 1, steps, mu);
+            // Both guidance branches see the same latents at the same timestep,
+            // so they share the embeddings and the modulation tables.
+            let inputs = self.step_inputs(stream, &latents, sigma)?;
             let velocity =
-                self.forward(stream, weights, blocks, &latents, &text, sigma, width, height)?;
+                self.forward(stream, weights, blocks, &inputs, &text, width, height)?;
             if let Some(uncond) = &uncond {
-                let unguided = self
-                    .forward(stream, weights, blocks, &latents, uncond, sigma, width, height)?;
+                let unguided =
+                    self.forward(stream, weights, blocks, &inputs, uncond, width, height)?;
                 self.models.ops.guidance(stream, &velocity, &unguided, guidance)?;
             }
             self.models.ops.euler_step(stream, &latents, &velocity, next - sigma)?;
@@ -351,6 +346,22 @@ impl Pipeline {
         Ok(self.models.text_fusion(stream, &taps)?)
     }
 
+    /// What one step's forwards share: the timestep embedding, the image
+    /// tokens, and the blocks' modulation tables.
+    fn step_inputs(
+        &self,
+        stream: &mut Stream,
+        latents: &Tensor,
+        timestep: f32,
+    ) -> Result<StepInputs> {
+        let mut timing = Profile::new(stream, "step");
+        let (embedding, modulation) = self.models.time(stream, timestep)?;
+        let image = self.models.image_in(stream, latents)?;
+        let modulation = Arc::new(self.models.modulation(stream, &modulation)?);
+        timing.mark(stream, "embeddings")?;
+        Ok(StepInputs { embedding, image, modulation })
+    }
+
     /// Text and image tokens through the 28 blocks and the final layer.
     #[allow(clippy::too_many_arguments)]
     fn forward(
@@ -358,26 +369,12 @@ impl Pipeline {
         stream: &mut Stream,
         weights: &mut Option<Arc<Weights>>,
         cache: &BlockCache,
-        latents: &Tensor,
+        inputs: &StepInputs,
         text: &Tensor,
-        timestep: f32,
         width: usize,
         height: usize,
     ) -> Result<Tensor> {
         let mut timing = Profile::new(stream, "forward");
-        let image_tokens = width / PATCH * (height / PATCH);
-        let tokens = text.rows() + image_tokens;
-        let (embedding, modulation) = self.models.time(stream, timestep)?;
-        let image = self.models.image_in(stream, latents)?;
-
-        // The residual stream is the conditioning followed by the image.
-        let x = self.models.ops.tensor(stream, tokens, WIDTH)?;
-        stream.copy(x.binding()?.slice(0, text.size() * 2)?, text.binding()?)?;
-        stream
-            .copy(x.binding()?.slice(text.size() * 2, image.size() * 2)?, image.binding()?)?;
-
-        timing.mark(stream, "embeddings")?;
-        let mods = self.models.modulation(stream, &modulation)?;
         let blocks = self.prepare(
             stream,
             weights,
@@ -385,11 +382,12 @@ impl Pipeline {
             BlockShape { width, height, text_tokens: text.rows() },
         )?;
         timing.mark(stream, "prepare session")?;
-        self.run_blocks(stream, &blocks, &x, mods)?;
+        // The residual stream is the conditioning followed by the image; only
+        // the image rows come back.
+        let output =
+            self.run_blocks(stream, &blocks, text, &inputs.image, &inputs.modulation)?;
         timing.mark(stream, "blocks")?;
-
-        let output = x.view(image_tokens, WIDTH, text.rows() * WIDTH)?;
-        let velocity = self.models.last(stream, &output, &embedding)?;
+        let velocity = self.models.last(stream, &output, &inputs.embedding)?;
         timing.mark(stream, "final layer")?;
         Ok(velocity)
     }
@@ -419,49 +417,13 @@ impl Pipeline {
                 28,
                 self.compiler.as_deref(),
             )?;
-            let mut rope = Rope::default();
-            self.rope(&mut rope, shape.width, shape.height, shape.text_tokens);
-            let plan = session.into_prepared(&self.context, private, rope.cos, rope.sin)?;
+            let (cos, sin) = rope(shape);
+            let plan = session.into_prepared(&self.context, private, cos, sin)?;
             Blocks::new(&self.context, plan, shape.tokens())
         };
         Ok(cache.get_or_prepare(shape, || {
             build().map_err(|e| hrx::Error::Message(e.to_string()))
         })?)
-    }
-
-    /// The rope tables, rebuilt when the geometry changes. Geometry, not just
-    /// the token count: rectangular grids have different phases.
-    fn rope(&self, rope: &mut Rope, width: usize, height: usize, text_tokens: usize) {
-        if rope.width == width && rope.height == height && rope.text_tokens == text_tokens {
-            return;
-        }
-        let (columns, rows) = (width / PATCH, height / PATCH);
-        let tokens = text_tokens + columns * rows;
-        rope.cos = vec![0.0; tokens * 128];
-        rope.sin = vec![0.0; tokens * 128];
-        for token in 0..tokens {
-            let mut offset = 0;
-            // Three axes over 128 channels: 32 for the frame, 48 each for the
-            // row and the column. Text tokens sit at position zero on all three.
-            for axis in 0..3 {
-                let width_of_axis = if axis == 0 { 32 } else { 48 };
-                let position = match (axis, token >= text_tokens) {
-                    (1, true) => (token - text_tokens) / columns,
-                    (2, true) => (token - text_tokens) % columns,
-                    _ => 0,
-                };
-                for channel in 0..width_of_axis {
-                    let phase = position as f64
-                        * 1000f64.powf(-2.0 * (channel / 2) as f64 / width_of_axis as f64);
-                    rope.cos[token * 128 + offset + channel] = phase.cos() as f32;
-                    rope.sin[token * 128 + offset + channel] = phase.sin() as f32;
-                }
-                offset += width_of_axis;
-            }
-        }
-        rope.width = width;
-        rope.height = height;
-        rope.text_tokens = text_tokens;
     }
 
     /// Float32 in, bf16 on the device, refusing what bf16 cannot hold.
@@ -488,6 +450,44 @@ impl Pipeline {
         }
         Ok(Tensor::from_slice(self.models.ops.pool(), stream, &bits, rows, cols)?)
     }
+}
+
+/// The rotary tables for one image geometry: float32 `[tokens][128]` cosines
+/// and sines. Geometry, not just the token count: rectangular grids have
+/// different phases. Built once per prepared block shape.
+fn rope(shape: BlockShape) -> (Vec<f32>, Vec<f32>) {
+    let columns = shape.width / PATCH;
+    let tokens = shape.tokens();
+    // Three axes over 128 channels: 32 for the frame, 48 each for the row and
+    // the column. Each channel pair shares one frequency.
+    let axes = [32usize, 48, 48];
+    let frequencies: Vec<f64> = axes
+        .iter()
+        .flat_map(|&width| {
+            (0..width)
+                .map(move |channel| 1000f64.powf(-2.0 * (channel / 2) as f64 / width as f64))
+        })
+        .collect();
+    let mut cos = vec![0.0; tokens * 128];
+    let mut sin = vec![0.0; tokens * 128];
+    // Text tokens sit at position zero on all three axes, so theirs stay 0/1.
+    for token in 0..shape.text_tokens {
+        cos[token * 128..(token + 1) * 128].fill(1.0);
+    }
+    for token in shape.text_tokens..tokens {
+        let patch = token - shape.text_tokens;
+        let positions = [0, patch / columns, patch % columns];
+        let mut channel = 0;
+        for (axis, &width) in axes.iter().enumerate() {
+            for _ in 0..width {
+                let phase = positions[axis] as f64 * frequencies[channel];
+                cos[token * 128 + channel] = phase.cos() as f32;
+                sin[token * 128 + channel] = phase.sin() as f32;
+                channel += 1;
+            }
+        }
+    }
+    (cos, sin)
 }
 
 fn downloaded(stream: &mut Stream, tensor: &Tensor) -> Result<Vec<f32>> {
@@ -532,6 +532,32 @@ mod tests {
             assert_eq!(*result, shape.tokens());
         }
         assert_eq!(builds, 2);
+    }
+
+    #[test]
+    fn rope_tables_follow_the_three_axis_positions() {
+        let shape = BlockShape { width: 64, height: 48, text_tokens: 2 };
+        let (cos, sin) = rope(shape);
+        assert_eq!(cos.len(), shape.tokens() * 128);
+        // The per-token formula the hoisted frequencies must reproduce exactly.
+        for token in 0..shape.tokens() {
+            let mut offset = 0;
+            for (axis, width) in [32usize, 48, 48].into_iter().enumerate() {
+                let position = match (axis, token >= 2) {
+                    (1, true) => (token - 2) / 4,
+                    (2, true) => (token - 2) % 4,
+                    _ => 0,
+                };
+                for channel in 0..width {
+                    let phase = position as f64
+                        * 1000f64.powf(-2.0 * (channel / 2) as f64 / width as f64);
+                    let at = token * 128 + offset + channel;
+                    assert_eq!(cos[at], phase.cos() as f32, "cos {token} {axis} {channel}");
+                    assert_eq!(sin[at], phase.sin() as f32, "sin {token} {axis} {channel}");
+                }
+                offset += width;
+            }
+        }
     }
 
     #[test]
