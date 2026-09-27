@@ -1,5 +1,8 @@
 //! Quantized transformer GEMMs against independent integer CPU dot products.
 //! Run explicitly with --ignored on gfx1151.
+mod common;
+
+use common::close;
 use half::{bf16, f16};
 use hrx::{Buffer, Constants, Stream};
 use std::path::Path;
@@ -72,15 +75,6 @@ fn halves(v: &[u8], bf: bool) -> Vec<f64> {
 }
 fn values(n: usize, scale: f32) -> Vec<f32> {
     (0..n).map(|i| ((i * 37 % 101) as f32 - 50.) * scale / 50.).collect()
-}
-fn close(got: &[f64], want: &[f64], abs: f64, rel: f64) {
-    assert_eq!(got.len(), want.len());
-    for (i, (&a, &b)) in got.iter().zip(want).enumerate() {
-        assert!(
-            a.is_finite() && (a - b).abs() <= abs + rel * b.abs(),
-            "element {i}: {a} vs {b}"
-        );
-    }
 }
 fn cfg(v: &[(&'static str, usize)]) -> Vec<(&'static str, String)> {
     v.iter().map(|&(k, v)| (k, v.to_string())).collect()

@@ -30,10 +30,14 @@ pub use weights::Weights;
 
 pub use crate::{Error, Result};
 
-/// The model's shape, fixed by the checkpoint.
+/// The residual stream's width. This and the constants below are the
+/// model's shape, fixed by the checkpoint.
 pub const HIDDEN: usize = 6144;
+/// Key and value heads; each serves four of the 48 query heads.
 pub const KV_HEADS: usize = 12;
+/// Channels per attention head.
 pub const HEAD_DIM: usize = 128;
+/// The SwiGLU MLP's inner width.
 pub const INTER: usize = 16384;
 /// wq | wk | wv | attention gate, concatenated into one operand.
 pub const QKVG: usize = HIDDEN + 2 * KV_HEADS * HEAD_DIM + HIDDEN;
@@ -366,10 +370,12 @@ impl Session {
         })
     }
 
+    /// The sequence length this session was built for.
     pub fn tokens(&self) -> usize {
         self.tokens
     }
 
+    /// The blocks this session runs.
     pub fn layers(&self) -> usize {
         self.layers
     }

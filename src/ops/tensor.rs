@@ -75,14 +75,17 @@ impl Tensor {
         })
     }
 
+    /// Rows.
     pub fn rows(&self) -> usize {
         self.rows
     }
 
+    /// Columns.
     pub fn cols(&self) -> usize {
         self.cols
     }
 
+    /// A new tensor holding `values`, row-major, queued for upload.
     pub fn from_slice(
         pool: &Arc<BufferPool>,
         stream: &mut Stream,
@@ -108,6 +111,7 @@ impl Tensor {
         Ok(())
     }
 
+    /// Elements: `rows * cols`.
     pub fn size(&self) -> usize {
         // Checked when the tensor was made, so this cannot overflow here.
         self.rows * self.cols
@@ -136,12 +140,14 @@ impl Tensor {
         Ok(Tensor { rows, cols, storage: self.storage.clone(), offset })
     }
 
+    /// The bf16 values, after waiting for the stream to finish writing them.
     pub fn download(&self, stream: &mut Stream) -> Result<Vec<u16>> {
         let mut values = vec![0u16; self.size()];
         stream.read_blocking(self.binding()?, bytemuck::cast_slice_mut(&mut values))?;
         Ok(values)
     }
 
+    /// Queues a fill of every element with zero.
     pub fn zero(&self, stream: &mut Stream) -> Result<()> {
         stream.fill(self.binding()?, 0)?;
         Ok(())

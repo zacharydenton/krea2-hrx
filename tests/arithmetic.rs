@@ -1,6 +1,8 @@
 //! Device operations checked against CPU arithmetic and alternate layouts.
 //! Scheduler rounding is checked exactly; convolution reduction orders use a
 //! tolerance. Run explicitly with --ignored on gfx1151.
+mod common;
+
 use hrx::BufferPool;
 use hrx::Stream;
 use krea2::numerics::{from_f32, to_f32};
@@ -158,14 +160,10 @@ fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
 fn rounded(v: f32) -> f64 {
     to_f32(from_f32(v)) as f64
 }
+/// Within `tolerance * (1 + |expected|)` of each reference.
 fn close(actual: &[f32], expected: &[f64], tolerance: f64) {
-    assert_eq!(actual.len(), expected.len());
-    for (i, (&a, &b)) in actual.iter().zip(expected).enumerate() {
-        assert!(
-            a.is_finite() && (a as f64 - b).abs() <= tolerance * (1. + b.abs()),
-            "element {i}: {a} vs {b}"
-        );
-    }
+    let actual: Vec<f64> = actual.iter().map(|&a| f64::from(a)).collect();
+    common::close(&actual, expected, tolerance, tolerance);
 }
 
 #[test]

@@ -111,6 +111,7 @@ pub struct Scalars {
 }
 
 impl Scalars {
+    /// No scalars yet.
     pub fn new() -> Scalars {
         Scalars::default()
     }
@@ -131,6 +132,8 @@ impl Scalars {
         self
     }
 
+    /// The scalars in the layout `kernel` declares, with each index at the
+    /// width its constant block implies. `name` labels any error.
     pub fn pack(&self, name: &str, kernel: &Kernel) -> Result<Constants> {
         let declared = kernel.info().constant_byte_length as usize;
         let floats = self.float_count * 4;

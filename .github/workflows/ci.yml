@@ -13,19 +13,43 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install Rust
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           rustup default stable
-      - name: Formatting, lint, documentation, and CPU tests
+      - uses: Swatinem/rust-cache@v2
+      # Formatting, Clippy with and without the npu feature, rustdoc, the
+      # shipped dependency set, and the CPU tests.
+      - name: CPU suite
         run: scripts/test.sh --cpu
       - name: Build and check the installed command
         run: |
           cargo build --locked --release --bin krea2
           target/release/krea2 --help
           target/release/krea2 --version
-      - name: Check GPU-only configuration
-        run: cargo check --locked --all-targets --no-default-features
       - name: Reference tool checks (Python standard library only)
         run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install the declared rust-version
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$version" --profile minimal
+          rustup default "$version"
+      - uses: Swatinem/rust-cache@v2
+      - name: Check every target and feature
+        run: cargo check --locked --all-targets --all-features
+
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories

@@ -8,8 +8,11 @@ use super::{Error, Result};
 /// The three files, and which sampler the checkpoint wants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Files {
+    /// The int8 ConvRot transformer checkpoint.
     pub checkpoint: PathBuf,
+    /// The Qwen3-VL-4B text encoder.
     pub text_encoder: PathBuf,
+    /// The Qwen-Image VAE.
     pub vae: PathBuf,
     /// Optional explicit tokenizer override. `None` uses the bundled tokenizer.
     pub tokenizer: Option<PathBuf>,
@@ -42,6 +45,7 @@ impl<'a> Request<'a> {
         self
     }
 
+    /// Overrides the default VAE with an explicit local file.
     pub fn vae(mut self, path: Option<&'a Path>) -> Request<'a> {
         self.vae = path;
         self
@@ -76,6 +80,8 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// Local paths for all three files, from explicit paths or the Hugging
+    /// Face cache, downloading a cache miss unless offline.
     pub fn resolve(self) -> Result<Files> {
         let distilled = self.is_distilled()?;
         let checkpoint =

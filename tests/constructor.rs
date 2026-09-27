@@ -5,7 +5,9 @@
 //! subject: holding a stream means the runtime is already mapped. What it does
 //! first is [`Session::validate`], which takes no stream — so these run that,
 //! and the mapping assertions still hold over the whole validation path.
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::Path;
 
 use krea2::session::{Error, Session};
 
@@ -17,21 +19,9 @@ fn refused<T>(result: krea2::session::Result<T>, what: &str) -> Error {
     }
 }
 
-/// A directory for a checkpoint, per test.
-fn fixture(name: &str) -> PathBuf {
-    let root =
-        std::env::temp_dir().join(format!("krea2-session-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(&root).expect("the fixture directory");
-    root
-}
-
 /// A safetensors file from a header and that many zero bytes of payload.
 fn checkpoint(path: &Path, header: &str, payload: usize) {
-    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
-    bytes.extend_from_slice(header.as_bytes());
-    bytes.extend(std::iter::repeat_n(0u8, payload));
-    std::fs::write(path, bytes).expect("the checkpoint");
+    common::safetensors(path, header, &vec![0; payload]);
 }
 
 /// Neither the native runtime nor the HSA provider, and therefore not the GPU,
@@ -47,7 +37,8 @@ fn no_device_was_opened() -> bool {
 
 #[test]
 fn an_incomplete_checkpoint_and_invalid_dimensions_are_refused_before_the_gpu() {
-    let root = fixture("reject");
+    let directory = tempfile::tempdir().expect("a fixture directory");
+    let root = directory.path();
 
     // One block's wq only: every other tensor is missing.
     let path = root.join("incomplete.safetensors");
@@ -67,16 +58,16 @@ fn an_incomplete_checkpoint_and_invalid_dimensions_are_refused_before_the_gpu() 
     }
 
     // A path that is not a checkpoint at all.
-    let error = refused(Session::validate(&root, 16, 1), "a directory");
+    let error = refused(Session::validate(root, 16, 1), "a directory");
     assert!(error.to_string().contains(".safetensors"), "{error}");
 
     assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");
-    std::fs::remove_dir_all(root).ok();
 }
 
 #[test]
 fn the_interleaved_gate_and_up_rows_are_validated_before_any_allocation() {
-    let root = fixture("interleave");
+    let directory = tempfile::tempdir().expect("a fixture directory");
+    let root = directory.path();
     let path = root.join("tiny.safetensors");
 
     // mlp.up carries one scale too few, so the 16-row interleave cannot be
@@ -115,5 +106,4 @@ fn the_interleaved_gate_and_up_rows_are_validated_before_any_allocation() {
     }
 
     assert!(no_device_was_opened(), "a rejected constructor loaded the native runtime");
-    std::fs::remove_dir_all(root).ok();
 }

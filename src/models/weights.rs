@@ -166,10 +166,12 @@ impl Weights {
         Ok(Weights { values })
     }
 
+    /// The tensor named `name`, or an invalid-argument error.
     pub fn get(&self, name: &str) -> Result<&Weight> {
         self.values.get(name).ok_or_else(|| Error::invalid(format!("missing tensor {name}")))
     }
 
+    /// Whether the checkpoint has a tensor named `name`.
     pub fn has(&self, name: &str) -> bool {
         self.values.contains_key(name)
     }

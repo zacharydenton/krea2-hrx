@@ -3,7 +3,7 @@
 //! guided generation can alternate conditioning lengths without rebuilding.
 
 pub mod noise;
-pub mod profile;
+mod profile;
 pub mod schedule;
 mod shared;
 
@@ -40,18 +40,26 @@ pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, f64) -> bool;
 /// checkpoint's defaults: Turbo 0 and 8, Raw 3.5 and 52.
 #[derive(Debug, Clone)]
 pub struct Request<'a> {
+    /// What to draw.
     pub prompt: &'a str,
+    /// What guidance steers away from; ignored without guidance.
     pub negative_prompt: &'a str,
+    /// Pixels, a multiple of 16 in 64..=2048.
     pub width: usize,
+    /// Pixels, a multiple of 16 in 64..=2048.
     pub height: usize,
+    /// Sampling steps, 1..=100.
     pub steps: Option<usize>,
+    /// Classifier-free guidance scale, 0..=100; 0 is unguided.
     pub guidance: Option<f32>,
+    /// Seeds the initial noise; repeatable within this backend.
     pub seed: u64,
     /// Float32 packed `[h/16 * w/16][64]`, in place of the seeded noise.
     pub initial_latents: Option<&'a [f32]>,
 }
 
 impl<'a> Request<'a> {
+    /// A 1024x1024 image of `prompt` with the checkpoint's defaults.
     pub fn new(prompt: &'a str) -> Request<'a> {
         Request {
             prompt,
@@ -171,6 +179,7 @@ impl Pipeline {
         self.files.distilled
     }
 
+    /// The resident text encoder, VAE and auxiliary operations.
     pub fn models(&self) -> &Models {
         &self.models
     }

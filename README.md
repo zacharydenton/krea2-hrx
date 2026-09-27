@@ -30,7 +30,8 @@ other GPUs are unsupported. Model weights are separate downloads.
 
 - Linux with an accessible Radeon 8060S and the amdgpu/KFD driver. Other GPUs
   are not supported by the current kernels.
-- A Rust toolchain and the native build tools required by its dependencies.
+- Rust 1.91 or newer (the crate's `rust-version`), and the native build tools
+  its dependencies require.
 - The prebuilt unified HRX/Loom bundle managed by the shared `hrx.rs` crate.
 - The model files below and enough memory to keep the models and GPU workspace
   resident. The transformer checkpoint alone is about 13 GB.
@@ -131,8 +132,9 @@ Use `--model`, `--text-encoder` and `--vae` for individual files. Custom checkpo
 paths require `--checkpoint turbo` or `--checkpoint raw`; the two built-in model
 identifiers select their corresponding sampler. Filenames are never guessed.
 `krea2 --help` lists all options. Invalid arguments exit with code 2; model,
-runtime, and file I/O failures exit with code 1. `KREA2_NATIVE_PROFILE=1` enables
-diagnostic stage timings.
+runtime, and file I/O failures exit with code 1. `KREA2_NATIVE_PROFILE=1` prints
+synchronized stage timings and a per-kernel breakdown of the transformer blocks;
+the synchronization makes profiled runs slower, so do not time them.
 
 ## Gallery
 
@@ -187,6 +189,10 @@ Pin a `rev` for reproducible downstream builds. The Rust import remains `krea2`:
 pipeline components; `krea2::session` provides resident transformer block sessions.
 For custom checkpoint paths, library callers select the sampler with
 `Files::of(path).distilled(Some(true))` for Turbo or `Some(false)` for Raw.
+`PipelineOptions` chooses the attention kernels (`--attn`) and the text-fusion
+backend. Every call returns `krea2::Error`: `is_invalid_argument()` separates
+the caller's mistakes from runtime failures, which keep their `hrx::Error`, and
+`Error::Cancelled` reports a progress callback that stopped generation.
 
 There is no C ABI. Consuming applications bind the Rust library directly — an
 Elixir application wraps `krea2::pipeline::Pipeline` with Rustler, which needs no

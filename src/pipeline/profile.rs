@@ -4,6 +4,7 @@ use hrx::Stream;
 
 use super::Result;
 
+/// One scope's stage clock, or nothing when profiling is off.
 pub struct Profile {
     scope: &'static str,
     last: Option<std::time::Instant>,
@@ -21,6 +22,7 @@ impl Profile {
         Profile { scope, last: Some(std::time::Instant::now()) }
     }
 
+    /// Ends `stage` and prints its time, after waiting for its work.
     pub fn mark(&mut self, stream: &mut Stream, stage: &str) -> Result<()> {
         let Some(last) = self.last else {
             return Ok(());

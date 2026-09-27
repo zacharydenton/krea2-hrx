@@ -17,15 +17,20 @@ pub use tensor::Tensor;
 /// Which pointwise function [`Ops::unary`] applies.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unary {
+    /// `x * sigmoid(x)`.
     Silu,
+    /// The tanh approximation of GELU.
     Gelu,
+    /// `1 / (1 + exp(-x))`.
     Sigmoid,
 }
 
 /// Elementwise, with the right operand broadcast over the left.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Binary {
+    /// `x + y`.
     Add,
+    /// `x * y`.
     Mul,
 }
 
@@ -34,8 +39,11 @@ pub enum Binary {
 /// normalization, sqrt(width), and weight multiplication.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Norm {
+    /// `x * (1 + w)`, the DiT convention.
     OnePlusScale,
+    /// `x * w`.
     Scale,
+    /// The VAE's L2 normalization.
     Group,
 }
 
@@ -64,7 +72,9 @@ pub enum Layout {
 /// Float32 normalization scales are retained from the checkpoint or upcast
 /// once on first use.
 pub struct Weight {
+    /// The logical shape, whatever the storage [`Layout`].
     pub shape: Vec<usize>,
+    /// The element count, the product of `shape`.
     pub count: usize,
     /// The allocation holding the bf16 values, and where in it they start.
     /// Held so a view over this weight cannot outlive its memory.
@@ -111,6 +121,7 @@ impl Weight {
         self
     }
 
+    /// The order the values are stored in.
     pub fn layout(&self) -> Layout {
         self.layout
     }
@@ -148,6 +159,8 @@ pub struct Ops {
 }
 
 impl Ops {
+    /// Operations over `pool`, compiling with `HRX_LOOM_LIBRARY` or the
+    /// pinned bundle.
     pub fn new(pool: Arc<BufferPool>) -> Ops {
         Ops { pool, compiler: None, kernels: PreparedKernels::default() }
     }
@@ -161,14 +174,17 @@ impl Ops {
         }
     }
 
+    /// The compiler override, if one was given.
     pub fn compiler(&self) -> Option<&str> {
         self.compiler.as_deref()
     }
 
+    /// The pool every tensor these operations make comes from.
     pub fn pool(&self) -> &Arc<BufferPool> {
         &self.pool
     }
 
+    /// An uninitialized `rows x cols` tensor from the pool.
     pub fn tensor(&self, stream: &Stream, rows: usize, cols: usize) -> Result<Tensor> {
         Tensor::new(&self.pool, stream, rows, cols)
     }
@@ -272,6 +288,7 @@ impl Ops {
         Ok(y)
     }
 
+    /// `op` applied to every element of `x`.
     pub fn unary(&self, stream: &Stream, x: &Tensor, op: Unary) -> Result<Tensor> {
         let y = self.tensor(stream, x.rows(), x.cols())?;
         let scalars = Scalars::new().index(x.size());

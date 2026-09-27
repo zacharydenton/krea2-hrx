@@ -49,7 +49,9 @@ impl Attention {
 /// Transformer dimensions and launch rules for one sequence length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shape {
+    /// Text and image tokens together.
     pub tokens: usize,
+    /// The attention kernel family.
     pub attention: Attention,
     /// Waves per attention workgroup.
     pub attention_waves: u32,
@@ -58,6 +60,7 @@ pub struct Shape {
 }
 
 impl Shape {
+    /// The rules for `tokens`, refusing a length outside [`shape::TOKENS`].
     pub fn new(tokens: usize, attention: Attention) -> Result<Shape> {
         if !shape::TOKENS.contains(&tokens) {
             return Err(Error::invalid(format!(
@@ -160,9 +163,11 @@ pub struct PreparedBundle {
 }
 
 impl PreparedBundle {
+    /// The shape every artifact was specialized for.
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
+    /// The artifact for one bundle stem, such as `gemm_qkvg`.
     pub fn artifact(&self, stem: &str) -> Option<&hrx::loom::Artifact> {
         self.artifacts.get(stem)
     }

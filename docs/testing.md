@@ -1,7 +1,8 @@
 # Native test coverage
 
-Run `scripts/test.sh --cpu` for formatting, Clippy, rustdoc with warnings denied
-and CPU tests. `scripts/test.sh --gpu` also runs tensor/pool, arithmetic, dispatch,
+Run `scripts/test.sh --cpu` for formatting, Clippy (with and without the `npu`
+feature), rustdoc with warnings denied, the pinned shipped-dependency set and CPU
+tests. `scripts/test.sh --gpu` also runs tensor/pool, arithmetic, dispatch,
 quantized-kernel, softmax and upload regressions on gfx1151. These tests need no
 model checkpoints or parity fixtures. They use the same HRX compiler/cache and
 runtime as inference. Missing prerequisites are errors when GPU tests are
@@ -14,7 +15,7 @@ requested. There is no Python environment.
 | Exact BF16 Euler and guidance arithmetic; activations, broadcast, normalization and fused SiLU | `tests/arithmetic.rs` |
 | Dense matmul, bias, ragged tiles, convolution layouts, grouped/causal attention, rotary embedding and upsampling | `tests/arithmetic.rs` |
 | Repeated resident softmax, including causal masking and non-tile-aligned lengths | `tests/softmax_repeat.rs` |
-| INT4/INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `tests/quantized.rs` |
+| INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `tests/quantized.rs` |
 | Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `tests/quantized.rs` |
 | Shared compiled artifact identity, allocation bounds and native library loading | `tests/dispatch.rs` |
 | Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `tests/constructor.rs` |
@@ -31,9 +32,13 @@ scripts/parity.sh
 ```
 
 The sweep checks all 2³² float32 encodings. The checkpoint and session tests need
-local Krea weights; `scripts/parity.sh` also needs the frozen unquantized BF16
+local Krea weights, and cover the attention mode `KREA2_ATTN_QK` selects (fp16
+when unset), so run them once per mode after an attention change; `scripts/parity.sh` also needs the frozen unquantized BF16
 fixture described below. Run the timing experiments separately using the
 commands in [graph recording](graph-recording.md).
+
+Integration tests share their comparison and fixture helpers through
+`tests/common`, and write fixtures only into `tempfile` directories.
 
 Checked-in Loom source is authoritative. The former Python generators, model
 wrappers, benchmark orchestration and reference implementations are retired.

@@ -1,24 +1,22 @@
 //! Weight upload plans exercise contiguous chunks, gathered rows and padded pitches.
+mod common;
+
 use krea2::checkpoint::{Checkpoint, Plan, Segment, Span};
 use krea2::session::weights::Weights;
 
 #[test]
 #[ignore = "requires gfx1151 and provisioned HRX"]
 fn contiguous_and_padded_uploads_preserve_rows_across_chunks() {
-    let path =
-        std::env::temp_dir().join(format!("krea-upload-{}.safetensors", std::process::id()));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("upload.safetensors");
     let rows = (16 << 20) / 4 + 3;
     let payload: Vec<u8> = (0..rows * 4).map(|i| (i % 251) as u8).collect();
     let header = format!(
         r#"{{"w":{{"dtype":"I8","shape":[{rows},4],"data_offsets":[0,{}]}}}}"#,
         payload.len()
     );
-    let mut file = (header.len() as u64).to_le_bytes().to_vec();
-    file.extend_from_slice(header.as_bytes());
-    file.extend_from_slice(&payload);
-    std::fs::write(&path, file).unwrap();
+    common::safetensors(&path, &header, &payload);
     let checkpoint = Checkpoint::open(&path).unwrap();
-    std::fs::remove_file(&path).unwrap();
     let flat_bytes = payload.len();
     let flat = Span {
         device_offset: 0,

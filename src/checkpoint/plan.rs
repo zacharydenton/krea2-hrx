@@ -30,7 +30,9 @@ pub struct Span {
     /// Rows, and the bytes each occupies in the file and on the device. A
     /// device row is at least as wide as a file row; the padding stays zero.
     pub rows: usize,
+    /// Bytes per row in the file.
     pub row_bytes: usize,
+    /// Bytes per row on the device: the file row plus any pitch padding.
     pub device_row_bytes: usize,
     /// The checkpoint rows that fill it, in order.
     pub segments: Vec<Segment>,
@@ -48,8 +50,11 @@ impl Span {
 /// The whole upload: named spans, and the size of the allocation they need.
 #[derive(Debug, Default)]
 pub struct Plan {
+    /// Every destination, by the name the session locates it with.
     pub spans: BTreeMap<String, Span>,
+    /// The size of the one allocation that holds every span.
     pub total_bytes: usize,
+    /// The transformer blocks the checkpoint carries.
     pub layers: usize,
 }
 
@@ -138,6 +143,7 @@ impl Plan {
         Ok(Plan { spans, total_bytes: total, layers })
     }
 
+    /// The span named `name`.
     pub fn span(&self, name: &str) -> Result<&Span> {
         self.spans.get(name).ok_or_else(|| Error::invalid(format!("no span named {name}")))
     }

@@ -10,6 +10,7 @@ Qwen3-VL-4B encodes the prompt; Qwen-Image VAE decodes the resulting latents.
 | Crate or module | Responsibility |
 | --- | --- |
 | `hrx` | Device, allocations, argument packing and dispatch |
+| `krea2::Error` | The one error type: invalid arguments, cancellation, poisoning, runtime failures and host bugs |
 | `krea2::kernels` | Embedded kernel sources, the specializations they compile to and the launch shapes |
 | `krea2::checkpoint` | Safetensors mapping and block-weight upload plans |
 | `krea2::numerics` | bf16 and fp8 conversions |
@@ -34,14 +35,13 @@ fused into the output and down-projection GEMM epilogues.
 The published int8 ConvRot checkpoints run with int8 weights and activations
 (W8A8). Loading concatenates Q/K/V/gate rows and interleaves MLP gate/up rows in
 16-row groups. Weights keep their checkpoint quantization and float32 norm
-scales; the runtime does not quantize a bf16 checkpoint into W8A8 or W4A4.
-The int4 kernel family remains available for experiments.
+scales; the runtime does not quantize a bf16 checkpoint into W8A8. The int4
+GEMM family was removed once nothing could select it; it remains in Git history.
 
-Operand rows with an 8192-byte pitch receive padding to avoid cache aliasing.
-The upload plan, kernel configuration and launch metadata must agree on the
-pitch. Shape rules live in `src/kernels/shape.rs`, pinned by its own tests. The
-Python kernel builder that once mirrored them, and the parity test between the
-two, were retired with that layer.
+Operand rows whose length is a multiple of 8192 bytes receive 64 bytes of
+padding to avoid cache aliasing. The upload plan, kernel configuration and
+session buffers must agree on the pitch, the 256-row GEMM tile and the buffer
+capacity; those rules live once, in `src/kernels/shape.rs`, pinned by its tests.
 
 ## Precision and sampling
 
@@ -72,7 +72,7 @@ as a memory/performance change.
 ## Validation lessons
 
 - **Full trajectories matter.** Query32 attention passed block checks but lost
-  7.39 dB of image PSNR on the accepted fixture. It remains experimental.
+  7.39 dB of image PSNR on the accepted fixture. It is kept in `experiments/`.
 - **Exercise the loader.** Kernel tests with manually packed weights cannot
   detect missing or inconsistent repacking in checkpoint loading.
 - **Repeat resident calls.** A softmax race appeared only after repeated VAE

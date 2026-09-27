@@ -6,6 +6,7 @@ use hrx::Stream;
 #[cfg(feature = "npu")]
 use std::{path::Path, sync::Mutex};
 
+/// Where the first text-fusion block's MLP up projection runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum FusionBackend {
     /// Use GPU until native NPU latency and full quality qualification passes.

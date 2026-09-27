@@ -242,7 +242,6 @@ thread_local
 time
 time-core
 tinystr
-tinyvec
 tokenizers
 tokio
 tokio-macros
@@ -266,7 +265,6 @@ typenum
 typewit
 unicase
 unicode-ident
-unicode-normalization
 unicode-normalization-alignments
 unicode-segmentation
 unicode_categories

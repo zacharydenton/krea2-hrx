@@ -72,8 +72,10 @@ selects a compiler override.
 Krea's shape/bundle metadata and model-specific operation builders remain here.
 
 Auxiliary dispatches use HRX's `KeyedKernels` with the kernel name, dimensions,
-grid and report setting as their key. Only a miss constructs a specialization
-and hashes the embedded source. HRX owns the key index and the artifact cache;
+grid and report setting as their key. The key holds the embedded kernel's
+`'static` name and configuration names, so a hit allocates nothing and takes no
+lock beyond HRX's own. Only a miss constructs a specialization and hashes the
+embedded source. HRX owns the key index and the artifact cache;
 different keys for the same artifact share one loaded executable. Failed
 requests remain retryable, and cache hits still check the device.
 
@@ -97,9 +99,9 @@ operation sets retain loaded kernels for their lifetime; there is no global
 loaded-kernel cache holding model resources after teardown. Artifacts load from
 owned bytes without a compiler subprocess or an extra filesystem round trip.
 
-Kernel sources live in `kernels`; tokenizer assets live in
-`assets`. Generators and tests use these paths directly.
-Package builds carry the same assets without depending on files outside the package.
+Kernel sources live in `kernels`; tokenizer assets live in `assets`. `build.rs`
+embeds every kernel and tests read the same paths, so package builds carry the
+assets without depending on files outside the package.
 
 Applications combining model crates should resolve to one HRX package version
 and source, sharing a `ModelContext` when they need coordinated ownership.
@@ -112,6 +114,13 @@ wraps `krea2::pipeline::Pipeline` with Rustler. There is no C
 ABI, no generated header and no error-buffer protocol: arguments are Rust types,
 failures are `Result`, and Rustler contains panics at the NIF boundary as the C
 boundary once did.
+
+Every function returns `krea2::Error`, re-exported as each module's `Error`.
+`Error::is_invalid_argument` separates a request the caller can correct from a
+failure; `Error::Cancelled` reports a progress callback that asked to stop and
+`Error::Poisoned` an object an earlier panic left unusable. Runtime failures
+keep their `hrx::Error`, so a lost device or a busy slot stays distinguishable
+all the way to the caller.
 
 Handles must outlive the calls that use them, which ownership already enforces.
 A pipeline or block session serializes its own calls and a panic poisons it, so

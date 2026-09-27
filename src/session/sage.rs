@@ -38,12 +38,12 @@ pub struct Sage {
     /// kernel for the life of the graph, and a per-call cache lookup hands back
     /// a value that would not live that long.
     prepared: Vec<(Plan, hrx::Kernel)>,
-    pub q4: Buffer,
-    pub k4: Buffer,
-    pub q_scale: Buffer,
-    pub k_scale: Buffer,
-    pub correction: Buffer,
-    pub v_transposed: Buffer,
+    pub(crate) q4: Buffer,
+    pub(crate) k4: Buffer,
+    pub(crate) q_scale: Buffer,
+    pub(crate) k_scale: Buffer,
+    pub(crate) correction: Buffer,
+    pub(crate) v_transposed: Buffer,
     key_partial: Buffer,
     key_mean: Buffer,
     query_mean: Buffer,

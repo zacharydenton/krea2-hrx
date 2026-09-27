@@ -1,4 +1,4 @@
-// Embed a table of (name, source) pairs from each maintained .loom directory.
+//! Embeds a table of (name, source) pairs from each maintained .loom directory.
 use std::fmt::Write as _;
 use std::path::Path;
 

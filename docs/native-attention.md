@@ -4,16 +4,21 @@
 
 | Mode | Selection | Arithmetic |
 | --- | --- | --- |
-| fp16 (default) | `--attn f16` or `KREA2_ATTN_QK=16` | fp16 QK/PV, fp32 online softmax |
-| Smoothed int8 QK | `--attn i8` or `KREA2_ATTN_QK=8` | Per-token int8 QK, fp16 PV, fp32 softmax and correction |
-| Smoothed int4 QK | `--attn i4` or `KREA2_ATTN_QK=4` | Per-token int4 QK, fp16 PV, fp32 softmax and correction |
+| fp16 (default) | `--attn f16`, `Attention::F16` | fp16 QK/PV, fp32 online softmax |
+| Smoothed int8 QK | `--attn i8`, `Attention::I8` | Per-token int8 QK, fp16 PV, fp32 softmax and correction |
+| Smoothed int4 QK | `--attn i4`, `Attention::I4` | Per-token int4 QK, fp16 PV, fp32 softmax and correction |
 
-Selection is recorded in the compiled bundle metadata. The default kernel is
-`kernels/attention_gqa_lds_f16_wmma.loom`. Experimental query32 attention is
-not selected by either production builder; see [its evaluation](attention-2x.md).
-The pinned HRX 0.8 compiler rejects its accumulator-to-RHS repack with
-`AMDGPU/041` / `layout_strategy`. Production CPU-oracle tests cover query16;
-a separate diagnostic test records this query32 limitation.
+Library callers set `PipelineOptions::attention`. Left as `None`, the pipeline
+reads `KREA2_ATTN_QK` (`16`, `8` or `4`) once when it opens, and defaults to
+fp16; `Session::open` reads it the same way. The choice is part of each
+sequence length's kernel `Shape`, so a bundle is compiled for exactly one mode.
+
+The default kernel is `kernels/attention_gqa_lds_f16_wmma.loom`. Experimental
+query32 attention lives in `experiments/` and is not embedded; see
+[its evaluation](attention-2x.md). The pinned HRX 0.8 compiler rejects its
+accumulator-to-RHS repack with `AMDGPU/041` / `layout_strategy`. Production
+CPU-oracle tests cover query16; a separate diagnostic test records the query32
+limitation.
 
 The default kernel consumes V fragments in pairs to avoid VGPR spills. See the
 [register-pressure investigation](attention-spills.md) for disassembly findings,

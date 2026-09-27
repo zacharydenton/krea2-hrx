@@ -27,7 +27,9 @@ const WIDTH: usize = 6144;
 /// ComfyUI's three checkpoints, loaded, and the graph over them.
 pub struct Models {
     pub(crate) fusion: crate::fusion::Fusion,
+    /// The auxiliary operations and the buffer pool every model shares.
     pub ops: Ops,
+    /// The prompt tokenizer and chat template.
     pub tokenizer: Tokenizer,
     text: Weights,
     transformer: Weights,

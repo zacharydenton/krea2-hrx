@@ -57,7 +57,9 @@ would need all 28 blocks and the surrounding pipeline work.
 
 A separate historical VAE experiment measured 578 ms with queued tile downloads
 against 569 ms with blocking downloads. That configuration showed no improvement;
-it does not set a general limit on transfer overlap.
+it does not set a general limit on transfer overlap. Decoding now queues every
+tile before reading any back, which is byte-identical; it has not been
+re-measured on an idle GPU.
 
 ```sh
 cargo run --release --example dispatch_cost
@@ -80,5 +82,6 @@ uses fixed, unpooled workspaces. HRX's completion-point destructor waits for the
 last replay without flushing unrelated work on the stream.
 
 On 2026-09-10 the replay regression passed with `KREA2_ATTN_QK=16`, `8` and
-`4` against HRX 0.2.0. Locked workspace builds, CPU tests, clippy and rustdoc
+`4` against HRX 0.2.0; the session tests take their attention mode from that
+variable. Locked workspace builds, CPU tests, clippy and rustdoc
 with warnings denied also passed using the crates.io package.

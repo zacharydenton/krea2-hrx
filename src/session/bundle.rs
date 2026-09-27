@@ -8,15 +8,15 @@ use super::{Error, Result};
 
 /// Every kernel one block needs, loaded from verified artifact bytes.
 pub struct Kernels {
-    pub prepare_norm: Kernel,
-    pub prepare_gated: Kernel,
-    pub prepare_swiglu: Kernel,
-    pub gemm_qkvg: Kernel,
-    pub gemm_gu: Kernel,
-    pub gemm_wo: Kernel,
-    pub gemm_down: Kernel,
-    pub rope: Kernel,
-    pub attention: Kernel,
+    pub(crate) prepare_norm: Kernel,
+    pub(crate) prepare_gated: Kernel,
+    pub(crate) prepare_swiglu: Kernel,
+    pub(crate) gemm_qkvg: Kernel,
+    pub(crate) gemm_gu: Kernel,
+    pub(crate) gemm_wo: Kernel,
+    pub(crate) gemm_down: Kernel,
+    pub(crate) rope: Kernel,
+    pub(crate) attention: Kernel,
 }
 
 impl Kernels {

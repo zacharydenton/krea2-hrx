@@ -72,10 +72,14 @@ struct RequestKey {
 }
 
 impl PreparedKernels {
+    /// An empty set, compiling with `compiler` or, for `None`,
+    /// `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn new(compiler: Option<&str>) -> Self {
         Self { loaded: OnceLock::new(), compiler: compiler.map(str::to_owned) }
     }
 
+    /// The auxiliary kernel `name` specialized for `config` and `grid`,
+    /// compiled and loaded for this stream's device on first use.
     pub fn get(
         &self,
         stream: &Stream,

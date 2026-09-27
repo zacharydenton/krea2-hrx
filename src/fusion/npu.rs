@@ -23,11 +23,14 @@ fn embedded(name: &str) -> Result<&'static str> {
         .ok_or_else(|| Error::Message(format!("no embedded kernel named {name}")))
 }
 
-/// Logical BF16 A[M,K] times transposed BF16 weights[N,K].
+/// Logical BF16 `A[M,K]` times transposed BF16 `weights[N,K]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Shape {
+    /// Activation rows.
     pub m: usize,
+    /// The reduction: activation columns and weight columns.
     pub k: usize,
+    /// Output columns: weight rows.
     pub n: usize,
 }
 impl Shape {

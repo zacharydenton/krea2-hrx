@@ -22,6 +22,7 @@ const SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n";
 /// assistant turn is appended.
 const MAX_TEMPLATED: usize = 541;
 
+/// Qwen3-VL's tokenizer with Krea 2's prompt template.
 pub struct Tokenizer(Inner);
 
 impl Tokenizer {
@@ -30,12 +31,14 @@ impl Tokenizer {
         Self::from_bytes(EMBEDDED)
     }
 
+    /// A tokenizer from `tokenizer.json` contents.
     pub fn from_bytes(json: &[u8]) -> Result<Tokenizer> {
         Inner::from_bytes(json)
             .map(Tokenizer)
             .map_err(|e| Error::invalid(format!("cannot read the tokenizer: {e}")))
     }
 
+    /// A tokenizer from a `tokenizer.json` file.
     pub fn from_file(path: &std::path::Path) -> Result<Tokenizer> {
         let json = std::fs::read(path).map_err(|e| {
             Error::invalid(format!("cannot read tokenizer: {}: {e}", path.display()))

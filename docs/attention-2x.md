@@ -1,8 +1,9 @@
 # Query32 attention experiment
 
-**Status: experimental, not selected by production builders.**
+**Status: experimental; not embedded in the library, and rejected by the pinned
+compiler.**
 
-`kernels/attention_query32.loom` processes more query rows per workgroup to reuse
+`experiments/attention_query32.loom` processes more query rows per workgroup to reuse
 K/V loads. At 4115 tokens, paired kernel measurements reported 1.76–1.78×
 speedup including V transposition. The change nevertheless failed the full
 image-quality gate.
@@ -19,14 +20,18 @@ predict the 7.39 dB image loss. Synthetic oracle and same-input block checks
 were therefore insufficient to promote this kernel. The numerical cause
 remains unresolved.
 
-Both builders select one fp16 query tile at every supported sequence length.
-Bundle metadata records the query-tile count; sessions reject incompatible
-bundles. The experimental generator and kernel remain available for investigation.
+Every sequence length runs one fp16 query tile of 16 rows. The host-side
+support for two tiles (a V transpose, its buffer and a wider capacity rule) was
+removed once the pinned HRX 0.8 compiler began rejecting the kernel's
+accumulator repack (`AMDGPU/041`); `tests/quantized.rs` records that
+rejection. The kernel stays in `experiments/` for investigation, and the host
+support is recoverable from Git.
 
 ## Requirements for reconsideration
 
 A candidate must pass synthetic and real-input attention checks, repeated
-resident dispatch, builder/metadata parity, and the complete trajectory gate:
+resident dispatch, restored host support that agrees with the kernel's shape,
+and the complete trajectory gate:
 
 ```sh
 scripts/test.sh --gpu
