@@ -62,7 +62,7 @@ The single-image decoder takes the last temporal tap of causal 3D convolution
 weights. Dense 3×3 weights are packed as `[out, ky, kx, in]` for implicit GEMM;
 the logical shape remains `[out, in, ky, kx]`. `Weight::layout` determines the
 convolution path. Both the float32 copy and the bf16 copy must use that layout.
-Row-major weights use im2col, and 1×1 convolutions use GEMM directly.
+1×1 convolutions use GEMM directly; no other kernel size is served.
 
 Decode uses 32×32 latent tiles at stride 24 when tiling is needed. Overlap is
 blended in bf16 before conversion to RGB8. Tile geometry affects normalization,

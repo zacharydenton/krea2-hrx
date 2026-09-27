@@ -10,8 +10,7 @@ scripts/test.sh --cpu
 scripts/test.sh --gpu
 ```
 
-The CPU suite runs formatting, Clippy with and without the `npu` feature,
-rustdoc, the pinned shipped-dependency check and CPU tests. CI also builds on the
+The CPU suite runs formatting, Clippy, rustdoc, the pinned shipped-dependency check and CPU tests. CI also builds on the
 `rust-version` in `Cargo.toml` and checks RustSec advisories. Every `unsafe`
 block needs a `// SAFETY:` comment; Clippy enforces it. GPU tests are explicitly
 ignored by default and must be requested on gfx1151; once requested, missing

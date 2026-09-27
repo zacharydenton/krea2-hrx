@@ -9,7 +9,7 @@ pipeline runs on Linux without Python or PyTorch.
 GPU execution, memory management, and caching behind the native `krea2` CLI.
 
 - **Loom kernels, HRX execution:** specialized GPU kernels compiled and cached
-  through the shared runtime, with experimental native XDNA2 NPU text fusion.
+  through the shared runtime.
 - **Complete inference pipeline:** Qwen3-VL-4B text encoding, Krea 2 diffusion
   transformer, and Qwen-Image VAE decoding.
 - **ComfyUI checkpoint support:** load int8 ConvRot safetensors directly, with
@@ -61,11 +61,6 @@ it takes longer than a warm run. See [Models](#models) to reuse local weights.
 
 The native bundle is pinned by hash. See the
 [runtime guide](docs/hrx-runtime.md) for what `hrx prepare` fetches.
-
-The [experimental XDNA2 text-fusion backend](docs/npu-fusion.md) now uses native
-Loom on HRX 0.8.9, without Chess or IRON. Build with `--features npu` and select
-`--fusion-backend npu` to experiment. `auto` remains GPU: the native candidate
-is not qualified for automatic selection.
 
 ## Models
 
@@ -190,7 +185,7 @@ Pin a `rev` for reproducible downstream builds. The Rust import remains `krea2`:
 pipeline components; `krea2::session` provides resident transformer block sessions.
 For custom checkpoint paths, library callers select the sampler with
 `Files::of(path).distilled(Some(true))` for Turbo or `Some(false)` for Raw.
-`PipelineOptions` chooses the text-fusion backend. Every call returns `krea2::Error`: `is_invalid_argument()` separates
+Every call returns `krea2::Error`: `is_invalid_argument()` separates
 the caller's mistakes from runtime failures, which keep their `hrx::Error`, and
 `Error::Cancelled` reports a progress callback that stopped generation.
 
@@ -233,10 +228,6 @@ Report bugs and feature requests through [GitHub Issues](https://github.com/zach
 
 ## License
 
-Rust and Loom code is [MIT licensed](LICENSE). The historical, unused NPU
-generator and tile sources use
-[Apache-2.0 WITH LLVM-exception](native/npu/NOTICE.md). The current native NPU
-backend does not require Chess; no Chess binaries are redistributed.
-The bundled Qwen tokenizer has its
+Rust and Loom code is [MIT licensed](LICENSE). The bundled Qwen tokenizer has its
 [own attribution and Apache-2.0 license](assets/README.md). Model weights are
 separate downloads governed by their upstream licenses.

@@ -1,7 +1,6 @@
 # Native test coverage
 
-Run `scripts/test.sh --cpu` for formatting, Clippy (with and without the `npu`
-feature), rustdoc with warnings denied, the pinned shipped-dependency set and CPU
+Run `scripts/test.sh --cpu` for formatting, Clippy, rustdoc with warnings denied, the pinned shipped-dependency set and CPU
 tests. `scripts/test.sh --gpu` also runs tensor/pool, arithmetic, dispatch,
 quantized-kernel, softmax and upload regressions on gfx1151. These tests need no
 model checkpoints or parity fixtures. They use the same HRX compiler/cache and

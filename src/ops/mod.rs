@@ -548,9 +548,8 @@ impl Ops {
         Ok(out)
     }
 
-    /// Square, odd-sized, stride-one convolution with same padding.
-    /// Packed 3×3 weights use implicit GEMM; row-major weights use im2col.
-    /// A 1×1 kernel uses GEMM directly.
+    /// Stride-one convolution with same padding: a 1×1 kernel uses GEMM
+    /// directly, a 3×3 packed channels-last implicit GEMM.
     pub fn conv(
         &self,
         stream: &Stream,
@@ -574,40 +573,11 @@ impl Ops {
         if kernel == 1 {
             return self.linear(stream, x, w, bias);
         }
-        // The values decide the path, because only they know their order.
-        if w.layout() == Layout::ChannelsLast {
-            if kernel != 3 {
-                return Err(Error::invalid("only a 3x3 is packed channels-last"));
-            }
-            return self.conv3x3(stream, x, height, width, w, bias);
+        // Every 3x3 is packed channels-last at load; nothing else is served.
+        if kernel != 3 || w.layout() != Layout::ChannelsLast {
+            return Err(Error::invalid("only 1x1 and packed 3x3 convolutions are supported"));
         }
-        let patches = self.tensor(stream, height * width, x.cols() * kernel * kernel)?;
-        let scalars = Scalars::new().index(patches.size());
-        let bindings = [x.binding()?, patches.binding()?];
-        // One workgroup per output pixel when a row of channels is a whole
-        // number of 32-lane reads.
-        let coalesced = kernel == 3 && x.cols().is_multiple_of(32) && x.cols() <= 1024;
-        // SAFETY: `x` is `height * width` pixels, checked above, and `patches`
-        // holds `kernel²` taps of every channel for each of them.
-        unsafe {
-            self.launch(
-                stream,
-                if coalesced { "im2col_coalesced" } else { "im2col" },
-                config(&[
-                    ("xsize", x.size()),
-                    ("channels", x.cols()),
-                    ("width", width),
-                    ("height", height),
-                    ("kernel", kernel),
-                ]),
-                &scalars,
-                &bindings,
-                if coalesced { height * width } else { patches.size().div_ceil(256) },
-                1,
-                256,
-            )
-        }?;
-        self.linear(stream, &patches, w, bias)
+        self.conv3x3(stream, x, height, width, w, bias)
     }
 
     /// Implicit GEMM over `[out, ky, kx, in]` weights, without a patch buffer.
@@ -847,15 +817,6 @@ fn check_bias(bias: Option<View<'_>>, n: usize) -> Result<()> {
         ))),
         _ => Ok(()),
     }
-}
-
-/// Whether loaders pack 3×3 weights for implicit GEMM.
-/// `KREA2_CONV_IM2COL=1` disables packing. Read once per process; dispatch
-/// subsequently follows each weight's layout.
-pub fn pack_convolutions() -> bool {
-    static CHOICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *CHOICE
-        .get_or_init(|| std::env::var_os("KREA2_CONV_IM2COL").is_none_or(|value| value != "1"))
 }
 
 /// A kernel configuration from shape entries, which is how these kernels take

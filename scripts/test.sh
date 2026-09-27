@@ -5,9 +5,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 case "${1:---cpu}" in --cpu) gpu=0;; --gpu) gpu=1;; *) echo 'usage: scripts/test.sh [--cpu|--gpu]' >&2; exit 2;; esac
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo clippy --locked --all-targets --features npu -- -D warnings
 RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --locked --no-deps --lib
-RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --locked --no-deps --lib --features npu
 # A statically linked crate never shows up in /proc/self/maps, so the dependency
 # set is pinned instead: an upstream default cannot enlarge the binary unseen.
 shipped=$(mktemp) && allowed=$(mktemp) && trap 'rm -f "$shipped" "$allowed"' EXIT

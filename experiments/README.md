@@ -16,3 +16,9 @@ selected by any build.
   preparation took back about 40% of that, leaving a step about 3% faster for
   2-3 dB less latent PSNR. The host side (`src/session/sage.rs`, the `--attn`
   option and `KREA2_ATTN_QK`) was removed; it is recoverable from Git.
+- `npu-fusion/`: the XDNA2 NPU backend for the first text-fusion up
+  projection (`fusion.xdna.loom` with its GPU pack and reduce kernels) and its
+  write-ups. Automatic selection always chose the GPU: the NPU path never passed
+  its latency and quality gates. The host side (`src/fusion`, the `npu`
+  feature, `--fusion-backend` and `PipelineOptions`) was removed on 2026-09-28,
+  along with the older Chess/IRON generator under `native/npu`.

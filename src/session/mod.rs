@@ -162,16 +162,12 @@ pub struct Session {
     rope: Cell<Option<(u64, u64)>>,
     /// Per-kernel timing, from `KREA2_NATIVE_PROFILE` when the session is
     /// built or [`Session::set_profile`] after. Profiled forwards replay a
-    /// graph with GPU-clock markers, or dispatch directly between host
-    /// synchronizations where the runtime has no device clock.
+    /// graph with GPU-clock markers.
     profile: AtomicBool,
     stages: RefCell<Vec<(&'static str, f64)>>,
     /// The block loop recorded with device-clock markers, and the stage of
     /// each interval it reports. Built on the first profiled forward.
     profiled: RefCell<Option<(hrx::GraphExec, Vec<&'static str>)>>,
-    /// Why device-clock profiling is unavailable, once it has been refused;
-    /// profiling then times each kernel between host synchronizations.
-    device_clock_refused: RefCell<Option<String>>,
     weights: Arc<Weights>,
 }
 
@@ -356,7 +352,6 @@ impl Session {
             profile: AtomicBool::new(crate::kernels::native_profile()),
             stages: RefCell::new(Vec::new()),
             profiled: RefCell::new(None),
-            device_clock_refused: RefCell::new(None),
             weights,
         })
     }
@@ -372,7 +367,7 @@ impl Session {
     }
 
     /// Turns the per-stage timings on stderr on or off, reporting what they
-    /// were. Timing synchronizes after every launch, so it is not free.
+    /// were. Profiled forwards serialize their kernels, so it is not free.
     pub fn set_profile(&self, enable: bool) -> bool {
         self.profile.swap(enable, Ordering::Relaxed)
     }
@@ -418,19 +413,10 @@ impl Session {
             }
             Sink::Stream(stream) => stream,
         };
-        if !self.profile.load(Ordering::Relaxed) {
-            // SAFETY: every binding is one of this session's buffers or resident
-            // weights, allocated in `build` at the capacity the kernels were
-            // compiled for, and the block matches the compiled workgroup.
-            unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
-            return Ok(());
-        }
-        stream.synchronize()?;
-        let began = std::time::Instant::now();
-        // SAFETY: as above.
+        // SAFETY: every binding is one of this session's buffers or resident
+        // weights, allocated in `build` at the capacity the kernels were
+        // compiled for, and the block matches the compiled workgroup.
         unsafe { stream.dispatch(kernel, grid, compiled, &constants, bindings) }?;
-        stream.synchronize()?;
-        self.accumulate(stage, began.elapsed().as_secs_f64() * 1e6);
         Ok(())
     }
 
@@ -486,13 +472,16 @@ impl Session {
             return;
         }
         let mut stages = self.stages.borrow_mut();
+        // Only recorded forwards are profiled; the direct `run` is not timed.
+        if stages.is_empty() {
+            return;
+        }
         let total: f64 = stages.iter().map(|(_, micros)| micros).sum();
         stages.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let clock = match *self.device_clock_refused.borrow() {
-            None => "GPU clock, kernels serialized",
-            Some(_) => "host clock, synchronized per kernel",
-        };
-        eprintln!("stage profile over {blocks} block(s), {} tokens ({clock}):", self.tokens);
+        eprintln!(
+            "stage profile over {blocks} block(s), {} tokens (GPU clock, kernels serialized):",
+            self.tokens
+        );
         for (stage, micros) in stages.iter() {
             eprintln!(
                 "  {stage:<24} {:9.3} ms  {:5.1}%",
@@ -603,26 +592,10 @@ impl Session {
     /// The loop is identical every forward -- same kernels, same buffers, same
     /// constants, same grids -- so it is recorded once per session and replayed
     /// after. Profiling replays a second recording with device-clock markers
-    /// around each kernel. Where the runtime cannot provide those, it
-    /// dispatches directly and synchronizes around every kernel instead.
+    /// around each kernel.
     fn blocks_through(&self, stream: &mut Stream) -> Result<()> {
         if self.profile.load(Ordering::Relaxed) {
-            if self.device_clock_refused.borrow().is_none() {
-                match self.profile_on_device(stream) {
-                    Err(Error::Runtime(hrx::Error::Unsupported(reason))) => {
-                        eprintln!(
-                            "stage profile: no device clock ({reason}); \
-                             timing each kernel between host synchronizations"
-                        );
-                        *self.device_clock_refused.borrow_mut() = Some(reason);
-                    }
-                    result => return result,
-                }
-            }
-            for index in 0..self.layers {
-                self.block(&mut Sink::Stream(stream), index, self.buffers.mods.binding())?;
-            }
-            return Ok(());
+            return self.profile_on_device(stream);
         }
         let mut recorded = self.graph.borrow_mut();
         let graph = match &mut *recorded {

@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use clap::builder::RangedU64ValueParser;
 use clap::{CommandFactory, Parser};
-use krea2::pipeline::{Files, Pipeline, PipelineOptions, Request};
+use krea2::pipeline::{Files, Pipeline, Request};
 
 /// Which sampler a checkpoint wants.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -36,9 +36,6 @@ impl Checkpoint {
     version
 )]
 struct Args {
-    /// Backend for the first text-fusion up projection; auto uses GPU, npu is experimental
-    #[arg(long, value_enum, default_value = "auto")]
-    fusion_backend: krea2::fusion::FusionBackend,
     /// The prompt; read from stdin when absent
     #[arg(short, long)]
     prompt: Option<String>,
@@ -207,11 +204,7 @@ fn run(args: Args) -> Result<()> {
     let files = request.resolve()?;
     let compiler =
         args.compiler_library.as_ref().map(|path| path.to_string_lossy().into_owned());
-    let pipeline = Pipeline::with_options(
-        files,
-        compiler.as_deref(),
-        PipelineOptions { fusion_backend: args.fusion_backend },
-    )?;
+    let pipeline = Pipeline::open(files, compiler.as_deref())?;
     let load = loading.elapsed().as_secs_f64();
     let steps = args.steps.unwrap_or(if pipeline.distilled() { 8 } else { 52 });
     let guidance = args.guidance.unwrap_or(if pipeline.distilled() { 0.0 } else { 3.5 });
@@ -244,9 +237,6 @@ fn run(args: Args) -> Result<()> {
             &request,
             (!args.quiet).then_some(&mut report as krea2::pipeline::Progress),
         )?;
-        if !args.quiet {
-            eprintln!("  fusion: {}", pipeline.fusion_selection());
-        }
         let path = numbered(&args.out, index, args.images);
         write_image(&path, &rgb, args.width, args.height)?;
         println!(

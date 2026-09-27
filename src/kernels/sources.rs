@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn the_kernels_the_host_launches_by_name_are_present() {
-        for name in ["unary_one", "euler", "guidance", "im2col", "softmax"] {
+        for name in ["unary_one", "euler", "guidance", "softmax"] {
             assert!(auxiliary(name).is_some(), "missing auxiliary kernel {name}");
         }
         for name in ["gemm_i8_256", "attention_gqa_lds_f16_wmma", "prepare_norm_i8"] {

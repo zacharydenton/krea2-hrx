@@ -26,7 +26,6 @@ const WIDTH: usize = 6144;
 
 /// ComfyUI's three checkpoints, loaded, and the graph over them.
 pub struct Models {
-    pub(crate) fusion: crate::fusion::Fusion,
     /// The auxiliary operations and the buffer pool every model shares.
     pub ops: Ops,
     /// The prompt tokenizer and chat template.
@@ -63,7 +62,6 @@ impl Models {
     ) -> Result<Models> {
         let pool = BufferPool::new();
         let models = Models {
-            fusion: crate::fusion::Fusion::default(),
             ops: Ops::with_compiler(Arc::clone(&pool), compiler),
             tokenizer: match tokenizer {
                 Some(path) => Tokenizer::from_file(path)?,
@@ -213,8 +211,6 @@ impl Models {
     }
 
     /// One prenorm/attention/postnorm/MLP block of the text fusion tower.
-    /// `offload` routes the MLP up projection through [`crate::fusion`],
-    /// which may run it on the NPU.
     fn fusion_block(
         &self,
         stream: &mut Stream,
@@ -222,7 +218,6 @@ impl Models {
         prefix: &str,
         batch: usize,
         tokens: usize,
-        offload: bool,
     ) -> Result<Tensor> {
         let w = &self.transformer;
         let normed = self.ops.norm(
@@ -267,15 +262,7 @@ impl Models {
             Unary::Silu,
         )?;
         let (weight, bias) = linear_layer(w, &format!("{prefix}.mlp.up"))?;
-        let offloaded = if offload {
-            self.fusion.linear(stream, &self.ops, &normed, weight, bias)?
-        } else {
-            None
-        };
-        let up = match offloaded {
-            Some(output) => output,
-            None => self.ops.linear(stream, &normed, weight, bias)?,
-        };
+        let up = self.ops.linear(stream, &normed, weight, bias)?;
         let mixed = self.ops.binary(stream, &gate, &up, Binary::Mul)?;
         self.ops.binary(
             stream,
@@ -304,8 +291,6 @@ impl Models {
                 &format!("txtfusion.layerwise_blocks.{index}"),
                 tokens,
                 12,
-                // The first block's up projection is the one the NPU serves.
-                index == 0,
             )?;
         }
         let projected = self.ops.tensor(stream, tokens, TEXT_WIDTH)?;
@@ -331,7 +316,6 @@ impl Models {
                 &format!("txtfusion.refiner_blocks.{index}"),
                 1,
                 tokens,
-                false,
             )?;
         }
         let x = self.ops.norm(

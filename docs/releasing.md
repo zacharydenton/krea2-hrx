@@ -25,8 +25,7 @@ the supported GPU and link performance claims to the recorded methodology.
 - Run `scripts/test.sh --gpu` on gfx1151. Run `scripts/parity.sh` with the frozen
   reference fixture and local weights; see [testing](testing.md).
 - Follow the README quick start from a clean checkout and generate an image.
-  Check the default and `--features npu` builds, and the MSRV (`rust-version`
-  in `Cargo.toml`) build that CI runs.
+  Check the MSRV (`rust-version` in `Cargo.toml`) build that CI runs.
 - Review the staged files and repository history for credentials, private data,
   model weights, and generated artifacts. Preserve third-party license notices.
 - Verify `src/models/hub.rs::REVISION` when updating default model weights;

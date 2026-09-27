@@ -1,16 +1,10 @@
 //! Warm production generation, including text encoding, denoising and VAE.
-use krea2::pipeline::{Files, Pipeline, PipelineOptions, Request};
+use krea2::pipeline::{Files, Pipeline, Request};
 use std::{path::Path, time::Instant};
 fn main() -> anyhow::Result<()> {
     let output = std::env::args().nth(1).expect("output RGB path");
-    let backend = match std::env::args().nth(2).as_deref() {
-        None | Some("gpu") => krea2::fusion::FusionBackend::Gpu,
-        Some("npu") => krea2::fusion::FusionBackend::Npu,
-        Some("auto") => krea2::fusion::FusionBackend::Auto,
-        _ => anyhow::bail!("expected gpu|npu|auto"),
-    };
-    let size = std::env::args().nth(3).map(|s| s.parse::<usize>()).transpose()?.unwrap_or(256);
-    let count = std::env::args().nth(4).map(|s| s.parse::<usize>()).transpose()?.unwrap_or(7);
+    let size = std::env::args().nth(2).map(|s| s.parse::<usize>()).transpose()?.unwrap_or(256);
+    let count = std::env::args().nth(3).map(|s| s.parse::<usize>()).transpose()?.unwrap_or(7);
     anyhow::ensure!(
         size > 0 && size.is_multiple_of(16),
         "size must be a positive multiple of 16"
@@ -22,8 +16,7 @@ fn main() -> anyhow::Result<()> {
         memory_budget: Some(residency.budget()),
         ..Default::default()
     })?;
-    let pipeline =
-        Pipeline::open_in(files, &context, None, PipelineOptions { fusion_backend: backend })?;
+    let pipeline = Pipeline::open_in(files, &context, None)?;
     let mut request = Request::new("a red ceramic cup on a wooden table");
     request.width = size;
     request.height = size;
@@ -55,7 +48,6 @@ fn main() -> anyhow::Result<()> {
     println!(
         "{}",
         serde_json::json!({"scope":"warm 2-step full generation", "width":size, "height":size,
-            "backend":format!("{backend:?}"), "selection":pipeline.fusion_selection(),
             "median_ms":median, "samples_ms":chronological,
             "warm_reserved_bytes":warm_reserved, "tracked_peak_bytes":after.peak_bytes,
             "warm_tracked_allocations":after.allocations-warm.allocations})

@@ -110,11 +110,11 @@ fn the_pointwise_and_broadcast_operations_agree_with_the_host() {
     assert_eq!(download(&mut stream, &product), want);
 }
 
-/// Convolution dispatch must respect the declared weight layout.
-/// The two reduction orders must agree within the numerical tolerance.
+/// A packed 3×3 convolution matches a float64 reference over the same bf16
+/// inputs, and a row-major 3×3 weight, which has no kernel, is refused.
 #[test]
 #[ignore = "requires gfx1151 and the provisioned HRX runtime"]
-fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
+fn a_packed_convolution_matches_the_reference_and_row_major_is_refused() {
     let (mut stream, ops) = opened();
     let (height, width, inputs, outputs) = (8usize, 8usize, 8usize, 16usize);
     let image: Vec<f32> =
@@ -134,27 +134,46 @@ fn a_convolution_reads_its_weight_in_the_order_the_weight_is_in() {
     }
 
     let shape = vec![outputs, inputs, 3, 3];
-    let row_weight =
-        weight_on(&mut stream, &row_major, shape.clone()).in_layout(Layout::RowMajor);
     let packed_weight =
         weight_on(&mut stream, &packed, shape.clone()).in_layout(Layout::ChannelsLast);
-
-    let patches =
-        ops.conv(&stream, &x, height, width, &row_weight, None).expect("the patch path");
     let implicit =
         ops.conv(&stream, &x, height, width, &packed_weight, None).expect("the implicit path");
+    let got = download(&mut stream, &implicit);
+    assert_eq!(got.len(), height * width * outputs);
 
-    let (a, b) = (download(&mut stream, &patches), download(&mut stream, &implicit));
-    assert_eq!(a.len(), height * width * outputs);
-    let worst = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
-    let scale = a.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let mut want = vec![0.0f64; height * width * outputs];
+    for y in 0..height {
+        for xx in 0..width {
+            for o in 0..outputs {
+                let mut sum = 0.0f64;
+                for ky in 0..3 {
+                    for kx in 0..3 {
+                        let (sy, sx) =
+                            (y as isize + ky as isize - 1, xx as isize + kx as isize - 1);
+                        if sy < 0 || sx < 0 || sy >= height as isize || sx >= width as isize {
+                            continue;
+                        }
+                        let pixel = sy as usize * width + sx as usize;
+                        for i in 0..inputs {
+                            sum += rounded(image[pixel * inputs + i])
+                                * rounded(row_major[(o * inputs + i) * 9 + ky * 3 + kx]);
+                        }
+                    }
+                }
+                want[(y * width + xx) * outputs + o] = sum;
+            }
+        }
+    }
+    let worst =
+        got.iter().zip(&want).map(|(&a, b)| (f64::from(a) - b).abs()).fold(0.0, f64::max);
+    let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(worst <= 0.02 * scale.max(1.0), "off by {worst} on values up to {scale}");
+
+    let row_weight = weight_on(&mut stream, &row_major, shape).in_layout(Layout::RowMajor);
     assert!(
-        worst <= 0.02 * scale.max(1.0),
-        "the two paths disagree by {worst} on values up to {scale}"
+        ops.conv(&stream, &x, height, width, &row_weight, None).is_err(),
+        "a row-major 3x3 has no kernel"
     );
-    // An explicitly packed 3×3 weight is accepted.
-    let flat = weight_on(&mut stream, &row_major, shape).in_layout(Layout::ChannelsLast);
-    assert!(ops.conv(&stream, &x, height, width, &flat, None).is_ok(), "3x3 packed is fine");
 }
 
 fn rounded(v: f32) -> f64 {

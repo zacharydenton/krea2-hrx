@@ -103,26 +103,10 @@ struct State {
     blocks: BlockCache,
 }
 
-/// Optional execution policy.
-#[derive(Clone, Debug, Default)]
-pub struct PipelineOptions {
-    /// Backend for the first text-fusion up projection. `Auto` is the GPU.
-    pub fusion_backend: crate::fusion::FusionBackend,
-}
-
 impl Pipeline {
     /// `compiler` of `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
-        Self::with_options(files, compiler, PipelineOptions::default())
-    }
-
-    /// Open with an explicit policy for the fusion projection.
-    pub fn with_options(
-        files: Files,
-        compiler: Option<&str>,
-        options: PipelineOptions,
-    ) -> Result<Pipeline> {
-        Self::open_in(files, &ModelContext::new(Default::default())?, compiler, options)
+        Self::open_in(files, &ModelContext::new(Default::default())?, compiler)
     }
 
     /// Share block execution, tensors and dependency tracking with other clients.
@@ -132,13 +116,11 @@ impl Pipeline {
         files: Files,
         context: &ModelContext,
         compiler: Option<&str>,
-        options: PipelineOptions,
     ) -> Result<Pipeline> {
         // The models allocate on the stream that will later dispatch them, which
         // then moves into the state lock.
         let mut stream = native_stream(context)?;
-        let mut models = Models::open(&mut stream, &files, compiler)?;
-        models.fusion.set_backend(options.fusion_backend);
+        let models = Models::open(&mut stream, &files, compiler)?;
         Ok(Pipeline {
             context: context.clone(),
             bridge: Arc::new(Bridge::new(native_stream(context)?)),
@@ -157,11 +139,6 @@ impl Pipeline {
     /// native model weights and auxiliary pools are accounted separately.
     pub fn context(&self) -> &ModelContext {
         &self.context
-    }
-
-    /// Backend and reason selected for the most recent fusion projection.
-    pub fn fusion_selection(&self) -> String {
-        self.models.fusion.reason()
     }
 
     /// Turbo: a fixed timestep shift and no guidance. Raw: neither.

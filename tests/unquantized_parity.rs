@@ -327,15 +327,9 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     let ops = Ops::new(pool.clone());
     let initial: Vec<_> = state.iter().map(|&v| from_f32(v)).collect();
     let resident = Tensor::from_slice(&pool, &mut stream, &initial, tokens, 64).unwrap();
-    let backend = match std::env::var("KREA2_QUALITY_FUSION_BACKEND").as_deref() {
-        Ok("npu") => krea2::fusion::FusionBackend::Npu,
-        Ok("gpu") | Err(_) => krea2::fusion::FusionBackend::Gpu,
-        Ok(other) => panic!("invalid quality fusion backend: {other}"),
-    };
-    let pipeline = Pipeline::with_options(
+    let pipeline = Pipeline::open(
         Files::of(&checkpoint).distilled(Some(true)).offline(true).resolve().unwrap(),
         None,
-        krea2::pipeline::PipelineOptions { fusion_backend: backend },
     )
     .unwrap();
     let evidence_path = std::env::var_os("KREA2_QUALITY_RESULT").map(PathBuf::from);
@@ -398,7 +392,7 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
             serde_json::to_vec_pretty(&serde_json::json!({
                 "seconds": elapsed, "relative_rms_loss_db": loss_db,
                 "image_psnr_loss_db": accepted_psnr - psnr,
-                "reference_files": manifest["files"], "selection": pipeline.fusion_selection(),
+                "reference_files": manifest["files"],
             }))
             .unwrap(),
         )

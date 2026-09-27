@@ -10,10 +10,10 @@ Profiling (`KREA2_NATIVE_PROFILE=1`) replays a second recording built with
 kernel, and the session sums the intervals per stage over all 28 blocks, with
 the idle time between kernels as its own line. The markers add completion
 barriers, so kernels run one at a time: the numbers are per-kernel costs, not
-the latency of an unprofiled forward. The native bundle of hrx-rs 0.8.10 and
-later exports HRX's optional profiling ABI; with an older bridge the session says so once
-and falls back to synchronizing the host around each directly dispatched
-kernel, which also counts launch overhead.
+the latency of an unprofiled forward. It needs the native bundle of hrx-rs
+0.8.10 or later, whose bridge exports HRX's profiling ABI; with an older bridge
+a profiled forward fails with `Unsupported`. The direct `Session::run` is not
+profiled.
 
 `KREA2_PROFILE_JSON=FILE` also appends each profiled forward to `FILE` as one
 JSON line: the sequence length, layer count, attention mode and HRX's raw

@@ -7,8 +7,7 @@
 //! safetensors onto the device layout the kernels expect; [`ops`] provides
 //! device tensors and the auxiliary operations; [`session`] runs the 28
 //! transformer blocks; [`models`] adds the text encoder, the outer graph and
-//! the VAE; [`pipeline`] turns a prompt into pixels. [`fusion`] chooses where
-//! the text-fusion projection runs.
+//! the VAE; [`pipeline`] turns a prompt into pixels.
 //!
 //! Most callers need only [`pipeline::Pipeline`]:
 //!
@@ -26,7 +25,6 @@
 
 pub mod checkpoint;
 mod error;
-pub mod fusion;
 pub mod kernels;
 pub mod models;
 pub mod numerics;

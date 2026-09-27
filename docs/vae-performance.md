@@ -3,8 +3,8 @@
 The decoder uses implicit GEMM for packed 3×3 convolutions: image patches are
 loaded into the GEMM's shared-memory tiles instead of materialized in global
 memory. A 256×256 layer with 96 input channels otherwise needs a 108 MiB patch
-buffer. Weights are packed `[out, ky, kx, in]` and carry an explicit layout;
-ordinary row-major weights retain the im2col path.
+buffer. Weights are packed `[out, ky, kx, in]` and carry an explicit layout.
+The im2col path measured below was retired on 2026-09-28; its kernels are in Git.
 
 The reduction order changes from channel-major to tap-major. Outputs are not
 bit-identical to im2col. Tiling remains 32×32 latents with stride 24 and bf16

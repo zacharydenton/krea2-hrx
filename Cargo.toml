@@ -32,15 +32,10 @@ strip = true
 # Cross-crate inlining for the host-side conversion and tokenization loops.
 lto = "thin"
 
-[features]
-default = []
-# Native Loom/XDNA text-fusion experiment; automatic selection remains GPU.
-npu = ["hrx/npu", "dep:serde", "dep:tempfile"]
-
 [dependencies]
 hrx = { package = "hrx-rs", version = "0.8.11" }
 
-# The CLI's error reporting, and the npu input capture's.
+# The CLI's error reporting.
 anyhow = "1"
 bytemuck = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
@@ -54,16 +49,9 @@ thiserror = "2"
 # oniguruma C library, and no progress bars or HTTP.
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
-# The npu feature's capture files and shape metadata.
-serde = { version = "1", features = ["derive"], optional = true }
-tempfile = { version = "3", optional = true }
-
 [dev-dependencies]
 # An independent implementation of the same rounding, for the oracle tests only.
 half = { version = "2", features = ["bytemuck"] }
 tempfile = "3"
 unicode-normalization = "0.1"
 
-[[example]]
-name = "fusion_npu"
-required-features = ["npu"]

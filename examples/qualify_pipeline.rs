@@ -1,7 +1,7 @@
 //! Byte-exact pipeline regression check. Record outputs with a reference build,
 //! then compare a changed build against them; recording never overwrites.
 use anyhow::{Context, Result, ensure};
-use krea2::pipeline::{Files, Pipeline, PipelineOptions, Request};
+use krea2::pipeline::{Files, Pipeline, Request};
 use std::{io::Write, path::Path, time::Instant};
 
 fn main() -> Result<()> {
@@ -41,12 +41,7 @@ fn main() -> Result<()> {
         memory_budget: Some(residency.budget()),
         ..Default::default()
     })?;
-    let pipeline = Pipeline::open_in(
-        files,
-        &context,
-        None,
-        PipelineOptions { fusion_backend: krea2::fusion::FusionBackend::Gpu },
-    )?;
+    let pipeline = Pipeline::open_in(files, &context, None)?;
     eprintln!("opened pipeline in {:.3}s", start.elapsed().as_secs_f64());
     for (i, (width, height, tokens)) in
         [(64, 64, 3), (128, 64, 3), (64, 128, 3), (64, 64, 5), (64, 64, 3)]

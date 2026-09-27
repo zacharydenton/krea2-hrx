@@ -138,9 +138,8 @@ impl Weights {
             let bytes = staged.as_deref().unwrap_or(&item.tensor.bytes[..item.device_bytes()]);
             // Repack both ordinary 4D and reduced causal 5D convolutions.
             let element = item.stored.device_bytes();
-            let packed = (is_square_convolution(&item.shape, 3)
-                && crate::ops::pack_convolutions())
-            .then(|| channels_last(bytes, &item.shape, element));
+            let packed = is_square_convolution(&item.shape, 3)
+                .then(|| channels_last(bytes, &item.shape, element));
             let layout = if packed.is_some() {
                 crate::ops::Layout::ChannelsLast
             } else {
