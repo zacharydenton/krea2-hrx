@@ -40,7 +40,8 @@ impl Kernels {
             );
             load(stem, &format!("krea2_{source}"))
         };
-        let attention = format!("krea2_{}", crate::kernels::ATTENTION_SOURCE);
+        let attention =
+            format!("krea2_{}", crate::kernels::shape::attention_source(bundle.shape().tokens));
         Ok(Kernels {
             prepare_norm: load("prepare_norm_i8", "krea2_prepare_norm_i8")?,
             prepare_gated: load("prepare_gated_i8", "krea2_prepare_gated_i8")?,

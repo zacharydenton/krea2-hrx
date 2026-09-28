@@ -257,9 +257,9 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
 #[ignore = "requires the provisioned Loom compiler"]
 fn production_attention_has_no_scratch_spills() {
     let compiler = krea2::kernels::compiler(None).unwrap();
-    let stem = "attention_gqa_lds_f16_wmma";
-    let source = krea2::kernels::sources::block(stem).unwrap();
-    for tokens in [1043usize, 4115, 9235, 16403] {
+    for tokens in [1043usize, 4115, 8191, 8192, 9235, 16403] {
+        let stem = krea2::kernels::shape::attention_source(tokens);
+        let source = krea2::kernels::sources::block(stem).unwrap();
         let shape = krea2::kernels::Shape::new(tokens).unwrap();
         let mut request = hrx::loom::Specialization::new(format!("krea2_{stem}"));
         for (key, value) in [
@@ -287,7 +287,7 @@ fn production_attention_has_no_scratch_spills() {
 fn production_attention_tiles_match_grouped_cpu_softmax() {
     let mut h = Harness::new();
     let (heads, kv, d) = (4usize, 1usize, 128usize);
-    for tokens in [17usize, 32, 65] {
+    for tokens in [16usize, 17, 31, 32, 33, 63, 64, 65, 97] {
         let capacity = (tokens + 79).div_ceil(64) * 64;
         let mut q: Vec<_> =
             values(capacity * heads * d, 0.5).into_iter().map(f16::from_f32).collect();
@@ -321,9 +321,6 @@ fn production_attention_tiles_match_grouped_cpu_softmax() {
                 }
             }
         }
-        // The shipping kernel uses query16. Experimental query32 requires a
-        // repack layout rejected by the pinned HRX 0.8 compiler (checked below).
-        let stem = "attention_gqa_lds_f16_wmma";
         let mut config = cfg(&[
             ("q_stride", heads * d),
             ("kv_stride", kv * d),
@@ -335,15 +332,25 @@ fn production_attention_tiles_match_grouped_cpu_softmax() {
         // V goes in transposed, [kv * d][capacity], as `v_transpose` writes it.
         let v_transposed: Vec<f16> =
             (0..kv * d * capacity).map(|i| v[(i % capacity) * kv * d + i / capacity]).collect();
-        let out = h.run(
-            stem,
-            &config,
-            [tokens.div_ceil(16) as u32, kv as u32, 1],
-            128,
-            &[tokens as u64, 0],
-            &[bytes(&q), bytes(&k), bytes(&v_transposed), vec![0; tokens * heads * d * 2]],
-        );
-        close(&halves(&out[3], false), &want, 2e-2, 2e-2);
+        let mut baseline = None;
+        for (stem, rows) in
+            [("attention_gqa_lds_f16_wmma", 16usize), ("attention_gqa_lds_f16_wmma_q32", 32)]
+        {
+            let out = h.run(
+                stem,
+                &config,
+                [tokens.div_ceil(rows) as u32, kv as u32, 1],
+                (rows * 8) as u32,
+                &[tokens as u64, 0],
+                &[bytes(&q), bytes(&k), bytes(&v_transposed), vec![0; tokens * heads * d * 2]],
+            );
+            close(&halves(&out[3], false), &want, 2e-2, 2e-2);
+            if let Some(expected) = &baseline {
+                assert_eq!(&out[3], expected, "{tokens} tokens: query groups changed output");
+            } else {
+                baseline = Some(out[3].clone());
+            }
+        }
     }
 }
 

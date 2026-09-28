@@ -1,0 +1,162 @@
+{
+  "date": "2026-09-28",
+  "status": "accepted_high_resolution_result",
+  "gpu": "AMD Radeon 8060S (gfx1151)",
+  "base_commit": "ce7bb9532d8ffb2379fcfe42a57eb64b64f9070f",
+  "production_change": "Two independent groups of 16 queries share staged K/V in attention at 8192 tokens and above; original per-wave arithmetic retained. Includes logical modulation-copy fix.",
+  "protocol": {
+    "steps": 8,
+    "seed": 37,
+    "prompt": "a red ceramic cup on a wooden table",
+    "warmups": 1,
+    "timed_repeats": 3,
+    "scope": "full prompt-to-RGB, resident model, excludes output verification and file write",
+    "conditions": "After user-authorized manual driver reset, no concurrent GPU benchmarks owned by this task. Desktop remains active; earlier measurements are not controlled before/after runs."
+  },
+  "events": [
+    {
+      "event": "ready",
+      "height": 2048,
+      "steps": 8,
+      "warm_reserved_bytes": 24101851060,
+      "width": 1536
+    },
+    {
+      "elapsed_ms": 95857.511416,
+      "event": "sample",
+      "height": 2048,
+      "reserved_bytes": 24101776308,
+      "rgb_identical": true,
+      "sample": 1,
+      "width": 1536
+    },
+    {
+      "elapsed_ms": 97606.79971199999,
+      "event": "sample",
+      "height": 2048,
+      "reserved_bytes": 24101886900,
+      "rgb_identical": true,
+      "sample": 2,
+      "width": 1536
+    },
+    {
+      "elapsed_ms": 96954.92878,
+      "event": "sample",
+      "height": 2048,
+      "reserved_bytes": 24101874612,
+      "rgb_identical": true,
+      "sample": 3,
+      "width": 1536
+    },
+    {
+      "height": 2048,
+      "median_ms": 96954.92878,
+      "reserved_bytes_after_samples": [
+        24101776308,
+        24101886900,
+        24101874612
+      ],
+      "rgb_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/recovered.1536x2048.rgb",
+      "samples_ms": [
+        95857.511416,
+        97606.79971199999,
+        96954.92878
+      ],
+      "scope": "warm full generation",
+      "steps": 8,
+      "tracked_peak_bytes": 461721600,
+      "warm_reserved_bytes": 24101851060,
+      "warm_tracked_allocations": 0,
+      "width": 1536
+    }
+  ],
+  "rgb_sha256": "66b46dac8451cc2461142d5fc2f5af636c0b20af64cd2a0486ebb1a873e3f982",
+  "rgb_exact_to_original_attention": true,
+  "source_sha256": {
+    "kernels/attention_gqa_lds_f16_wmma_q32.loom": "a251f124c457f878545dbe4146ca80c8d66352b37ab74ccbaad7530f730f7fed",
+    "src/kernels/shape.rs": "c6983547b8b34642d06a32572d1e9496bbbc633c09d785da628f50e9d9e4591f",
+    "src/session/mod.rs": "4dbf6a5a49f14fd55ebeb9884ab10dfd3712ba87a49a9f910d4572d8cc095b7f",
+    "src/pipeline/shared.rs": "6b67da3d4faf5a3f343d814ccb4b3c7f8afaaebb94560f6665dbd1c8df370321",
+    "examples/bench_runtime.rs": "f08fdac820d15a524c38549bbae9bd999d10ae7d4f92cde01a93376fd4854860"
+  },
+  "binary_sha256": "ddc021417b55c21023f4544de23a581c2e9e05e86390ca237f61a8b4e3c66eda",
+  "published_thenoise_comparison": {
+    "source": "https://github.com/lemonade-sdk/thenoise/blob/7633bfda1e3701b781d023f7ad42fe20304b040a/README.md#performance",
+    "seconds": 99,
+    "time_reduction_percent": 2.0657285050505014,
+    "controlled_comparison": false
+  },
+  "quality_gate": {
+    "command": "bash scripts/parity.sh",
+    "status": "passed",
+    "fixture": "frozen official unquantized BF16 reference; unchanged accepted W8A8 baseline",
+    "fixture_size": [
+      1024,
+      1024
+    ],
+    "steps": 8,
+    "latent_cosine": 0.997044,
+    "relative_latent_rms": 0.076912,
+    "image_psnr_db": 31.777828,
+    "latent_loss_db": 0.0,
+    "image_loss_db": 0.0,
+    "log_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/parity-recovered.log",
+    "log_sha256": "a1ae19a093f34c9e226bf9b24e05db40c1fc0277144993fc2039b0d0120709e1",
+    "fixture_manifest_sha256": "c37cb5c77db05a60678c581414db9d3cbab8521fecb94a5009849383c9f993bb",
+    "limitation": "1024-square reference uses original attention tile; separate CPU-oracle and large-sequence exact-output checks cover q32."
+  },
+  "local_thenoise_comparison": {
+    "summary": {
+      "event": "summary",
+      "width": 1536,
+      "height": 2048,
+      "steps": 8,
+      "samples_ms": [
+        186203.7244120147,
+        192040.20687600132,
+        185152.83573701163
+      ],
+      "median_ms": 186203.7244120147,
+      "pre_decode_samples_ms": [
+        168083.78363700467,
+        173023.8566909975,
+        167019.11640100298
+      ],
+      "pre_decode_median_ms": 168083.78363700467,
+      "rgb_sha256": "a6ffe071ed857d23008885c44e9f409577ea06767c30ddea497f23ca6b3ea591"
+    },
+    "environment": {
+      "packages": {
+        "torch": "2.14.0",
+        "transformers": "5.7.0.dev0",
+        "tokenizers": "0.23.1",
+        "huggingface-hub": "1.33.0",
+        "comfy-kitchen": "0.2.35",
+        "accelerate": "1.15.0"
+      },
+      "MIOPEN_FIND_MODE": "FAST",
+      "checkout_commit": "7633bfda1e3701b781d023f7ad42fe20304b040a",
+      "reason": "default VAE solver search appeared in prior failure stack; separate pre-decode timing bounds the impact of solver choice",
+      "isolated_dependency_fix": "tokenizers 0.23.1 overrides incompatible inherited 0.23.2; no global packages changed",
+      "checkout_sha256": {
+        "thenoise/runtime.py": "9923ea9993b7b542d9df7413d177b3ec9cc2910b587810f4853cc044846f64a5",
+        "thenoise/pipeline.py": "2dd3ae308942f2e872c8d015938e5d4f4fd2e5cfa41bac799c7a306c30de1d9b",
+        "thenoise/models/krea2.py": "64fcfdc2553ed54855f158da4b3f15c10d56c7ea335d4cb5a03370f173575db4",
+        "thenoise/dit/krea2/mmdit.py": "0d541faf07b8b8bb066af97c3a612027968856924cc47ff92ff9f2d23f04df5d",
+        "thenoise/utils/attention.py": "f9f67e848d458be710011e9d6f8bba6d3b4554e1f2a27a26765df08e7a25a301",
+        "thenoise/vae/qwen_image.py": "eaad1da3b22d3407b0006998983332f8eeaee5df0a28c3b10ff41753f70458be"
+      },
+      "harness_sha256": "fa4775563a0d179971f23085774c1053e1f371899d6d209aad57243863fd9d53"
+    },
+    "speedup": 1.920518397105203,
+    "time_reduction_percent": 47.93072529233253,
+    "status": "measured on shared GPU at different times; user accepted without further drift recheck"
+  },
+  "user_acceptance": {
+    "date": "2026-09-28",
+    "user_instruction": "that's pretty decent, let's call it a success",
+    "outcome": "User accepted the measured optimization and ended the remaining comparison work.",
+    "verified_scope": "Three local paired resolutions: 512x512, 1024x1024, 1536x2048; native-only 2048x2048; CPU/GPU numerical checks and frozen BF16 quality gate passed.",
+    "unverified_scope": "Remaining 28-case sweep and timing-drift rechecks were cancelled on acceptance. No claim of superiority at every resolution."
+  }
+}

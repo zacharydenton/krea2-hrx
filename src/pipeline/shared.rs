@@ -118,7 +118,7 @@ impl Pipeline {
                 bridge.run(|stream| {
                     stream.copy(views[0].slice(0, text_bytes)?, native(&text)?)?;
                     stream.copy(views[0].slice(text_bytes, image_bytes)?, native(&image)?)?;
-                    stream.copy(views[1], modulation.binding())
+                    copy_modulation(stream, views[1], &modulation)
                 })
             })?;
         }
@@ -169,9 +169,41 @@ fn native(tensor: &Tensor) -> hrx::Result<hrx::View<'_>> {
     tensor.binding().map_err(hrx::Error::from)
 }
 
+fn copy_modulation(
+    stream: &mut Stream,
+    destination: hrx::View<'_>,
+    source: &PooledBuffer,
+) -> hrx::Result<()> {
+    // Pool reuse can return more capacity than the modulation table requested.
+    // Copy only the logical table span, not the backing allocation's tail.
+    stream.copy(destination, source.binding().slice(0, destination.len())?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a provisioned GPU runtime"]
+    fn modulation_copy_accepts_a_larger_recycled_allocation() {
+        let mut stream = Stream::open().unwrap();
+        let pool = hrx::BufferPool::new();
+        let bytes = 28 * 6 * WIDTH * 4;
+        // A previous decode leaves larger allocations available for reuse.
+        drop(pool.acquire(&stream, bytes * 2).unwrap());
+        let source = pool.acquire(&stream, bytes).unwrap();
+        assert_eq!(source.binding().len(), bytes * 2);
+        stream.fill(source.binding(), 0xa5).unwrap();
+        stream.fill(source.binding().slice(0, bytes).unwrap(), 0x3c).unwrap();
+        let destination = stream.allocate(bytes + 64).unwrap();
+        stream.fill(destination.binding(), 0x5a).unwrap();
+        copy_modulation(&mut stream, destination.try_slice(0, bytes).unwrap(), &source)
+            .unwrap();
+        let mut actual = vec![0; bytes + 64];
+        stream.read_blocking(destination.binding(), &mut actual).unwrap();
+        assert!(actual[..bytes].iter().all(|&v| v == 0x3c));
+        assert!(actual[bytes..].iter().all(|&v| v == 0x5a));
+    }
 
     #[test]
     #[ignore = "requires a provisioned GPU runtime"]

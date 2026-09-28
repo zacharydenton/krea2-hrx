@@ -85,7 +85,7 @@ impl Shape {
                 ],
             ),
             job(
-                ATTENTION_SOURCE,
+                shape::attention_source(self.tokens),
                 "attention",
                 &[
                     ("q_stride", "6144"),

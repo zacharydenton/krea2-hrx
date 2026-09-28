@@ -10,6 +10,8 @@
 //! V transposed to `[kv_heads * 128][capacity]`, and are also reported with the
 //! cost of the `v_transpose` producing it. A `natural:` prefix binds V as
 //! `[capacity][kv_heads * 128]` instead, for kernels that stage it themselves.
+//! Prefix transposed-V candidates with `q32:` or `q64:` when their workgroup
+//! processes two or four independent 16-row query tiles (eight or sixteen waves).
 //! The first is the reference: others must match it byte for byte, or, with
 //! `--tolerance`, stay within that absolute difference, for candidates that
 //! legitimately reorder floating-point work. Device timestamps need a native
@@ -39,10 +41,18 @@ fn main() -> Result<()> {
                 tolerance = Some(args.next().context("--tolerance needs a value")?.parse()?)
             }
             flag if flag.starts_with("--") => bail!("unknown option {flag}"),
-            _ => match arg.strip_prefix("natural:") {
-                Some(path) => sources.push((PathBuf::from(path), false)),
-                None => sources.push((PathBuf::from(arg), true)),
-            },
+            _ => {
+                let (path, vt, rows) = if let Some(path) = arg.strip_prefix("natural:") {
+                    (path, false, 16)
+                } else if let Some(path) = arg.strip_prefix("q32:") {
+                    (path, true, 32)
+                } else if let Some(path) = arg.strip_prefix("q64:") {
+                    (path, true, 64)
+                } else {
+                    (arg.as_str(), true, 16)
+                };
+                sources.push((PathBuf::from(path), vt, rows));
+            }
         }
     }
     ensure!(
@@ -52,23 +62,33 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&out)?;
     let compiler = krea2::kernels::compiler(None)?;
     let mut stream = Stream::open()?;
-    let capacity = (tokens + 16).div_ceil(64) * 64;
-    let stem = "attention_gqa_lds_f16_wmma";
-    let mut spec = hrx::loom::Specialization::new(format!("krea2_{stem}"));
-    for (key, value) in [
-        ("q_stride", HEADS * DIM),
-        ("kv_stride", KV_HEADS * DIM),
-        ("out_stride", HEADS * DIM),
-        ("tokens", tokens),
-        ("token_capacity", capacity),
-    ] {
-        spec.set_config(format!("krea2.{stem}.{key}"), value.to_string());
-    }
-    spec.set_config(format!("krea2.{stem}.scale"), "0.08838834764831845");
-    spec.set_report(hrx::loom::ReportMode::Summary);
+    // Match production padding; only experimental wider query groups may need
+    // more rows. Extra padding changes V's pitch and can affect cache behavior.
+    let query_rows = sources.iter().map(|source| source.2).max().unwrap();
+    let capacity =
+        krea2::kernels::shape::capacity(tokens).max(tokens.div_ceil(query_rows) * query_rows);
     let mut loaded = Vec::new();
-    for (i, (path, _)) in sources.iter().enumerate() {
-        let artifact = compiler.module(&std::fs::read_to_string(path)?).compile(&spec)?;
+    for (i, (path, _, _)) in sources.iter().enumerate() {
+        let source = std::fs::read_to_string(path)?;
+        let symbol = source
+            .split("export(\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .context("source has no export")?;
+        let stem = symbol.trim_start_matches("krea2_");
+        let mut spec = hrx::loom::Specialization::new(symbol);
+        for (key, value) in [
+            ("q_stride", HEADS * DIM),
+            ("kv_stride", KV_HEADS * DIM),
+            ("out_stride", HEADS * DIM),
+            ("tokens", tokens),
+            ("token_capacity", capacity),
+        ] {
+            spec.set_config(format!("krea2.{stem}.{key}"), value.to_string());
+        }
+        spec.set_config(format!("krea2.{stem}.scale"), "0.08838834764831845");
+        spec.set_report(hrx::loom::ReportMode::Summary);
+        let artifact = compiler.module(&source).compile(&spec)?;
         std::fs::write(out.join(format!("{i}.hsaco")), artifact.bytes())?;
         let mut resources = String::new();
         if let Some(report) = artifact.report() {
@@ -118,16 +138,24 @@ fn main() -> Result<()> {
     let natural: Vec<_> = buffers.iter().map(Buffer::binding).collect();
     let mut swapped = natural.clone();
     swapped[2] = v_transposed.binding();
-    let bindings = |(_, vt): &(PathBuf, bool)| if *vt { &swapped[..] } else { &natural[..] };
-    let grid = [tokens.div_ceil(16) as u32, KV_HEADS as u32, 1];
+    let bindings = |(_, vt, _): &(PathBuf, bool, usize)| {
+        if *vt { &swapped[..] } else { &natural[..] }
+    };
+    let geometry = |rows: usize| {
+        ([tokens.div_ceil(rows) as u32, KV_HEADS as u32, 1], [(rows * 8) as u32, 1, 1])
+    };
 
     let mut baseline: Option<Vec<f16>> = None;
     for (i, ((kernel, constants), source)) in loaded.iter().zip(&sources).enumerate() {
-        // SAFETY: bindings are sized and initialized for all valid rows and zero
-        // headroom, and each workgroup owns sixteen query rows and four heads.
-        unsafe { stream.dispatch(kernel, grid, [128, 1, 1], constants, bindings(source))? };
+        let (grid, block) = geometry(source.2);
+        // Poison the shared output so an omitted store cannot reuse the baseline.
+        stream.fill(natural[3], 0xff)?;
+        // SAFETY: bindings cover all valid rows and zero headroom. The selected
+        // geometry assigns disjoint query groups to workgroups for this source.
+        unsafe { stream.dispatch(kernel, grid, block, constants, bindings(source))? };
         let bytes = stream.read(natural[3])?.wait(&mut stream)?;
         let values: Vec<f16> = bytemuck::cast_slice(&bytes).to_vec();
+        ensure!(values.iter().all(|v| v.is_finite()), "candidate {i} left invalid output");
         let Some(reference) = &baseline else {
             baseline = Some(values);
             continue;
@@ -175,7 +203,8 @@ fn main() -> Result<()> {
         .iter()
         .zip(&sources)
         .map(|((kernel, constants), source)| {
-            (kernel, constants, grid, [128u32, 1, 1], bindings(source))
+            let (grid, block) = geometry(source.2);
+            (kernel, constants, grid, block, bindings(source))
         })
         .chain([
             (
@@ -225,12 +254,22 @@ fn main() -> Result<()> {
         }
     }
     let medians: Vec<f64> = samples
-        .into_iter()
-        .map(|mut s| {
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
             s.sort_by(f64::total_cmp);
             s[s.len() / 2]
         })
         .collect();
+    std::fs::write(
+        out.join("timings.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "tokens":tokens, "capacity":capacity, "rounds":rounds,
+            "repeats":REPEATS, "sources":sources, "tolerance":tolerance,
+            "samples_ms":samples, "medians_ms":medians,
+            "last_two_arms":["register-only fp16 peak", "V transpose"]
+        }))?,
+    )?;
     let peak_flops = (PEAK_WORKGROUPS * 8 * PEAK_ITERATIONS * 8 * 16 * 16 * 16 * 2) as f64;
     let peak_tflops = peak_flops / medians[loaded.len()] / 1e9;
     let transposing = medians[loaded.len() + 1];

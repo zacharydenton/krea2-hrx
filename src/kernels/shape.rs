@@ -1,4 +1,4 @@
-//! The int8 GEMM launch-shape rules, shared by the kernel builder, the upload
+//! The transformer launch-shape rules, shared by the kernel builder, the upload
 //! plan and the session.
 //!
 //! The prepared artifact shape carries these rules. A session rejects a
@@ -13,6 +13,23 @@ pub const fn capacity(tokens: usize) -> usize {
     let tiles = (tokens + 16).div_ceil(32) * 32;
     let blocks = tokens.div_ceil(64) * 64;
     if tiles > blocks { tiles } else { blocks }
+}
+
+/// Query rows per attention workgroup. Two groups of sixteen rows share K/V
+/// staging for long sequences; shorter sequences retain the four-wave kernel.
+/// The crossover is conservative: the measured gain at 6163 tokens was only 3%,
+/// versus 11% at 8195 and 25% at 12301 on gfx1151.
+pub const fn attention_rows(tokens: usize) -> usize {
+    if tokens >= 8192 { 32 } else { 16 }
+}
+
+/// Attention source paired with [`attention_rows`].
+pub const fn attention_source(tokens: usize) -> &'static str {
+    if attention_rows(tokens) == 32 {
+        "attention_gqa_lds_f16_wmma_q32"
+    } else {
+        super::ATTENTION_SOURCE
+    }
 }
 
 /// Workgroup tile rows of the int8 (W8A8) GEMMs. The family exists on 256x128
@@ -110,6 +127,17 @@ mod tests {
         assert_eq!(capacity(4115), 4160);
         assert_eq!(capacity(16), 64);
         assert_eq!(capacity(2048), 2080);
+    }
+
+    #[test]
+    fn attention_tiles_fit_every_supported_capacity() {
+        assert_eq!(attention_rows(8191), 16);
+        assert_eq!(attention_rows(8192), 32);
+        for tokens in TOKENS {
+            let rows = attention_rows(tokens);
+            assert!(capacity(tokens) >= tokens.div_ceil(rows) * rows);
+            assert_eq!(attention_source(tokens).ends_with("_q32"), rows == 32);
+        }
     }
 
     #[test]

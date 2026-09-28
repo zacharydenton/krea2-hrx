@@ -100,3 +100,117 @@ dawn, soft light, photograph`. Latent cosine was 0.997044, relative RMS 0.076912
 and decoded image PSNR 31.777828 dB. Both latent and image regression against the
 accepted baseline were 0.000000 dB. The reference and accepted baseline fixtures
 were not regenerated.
+
+## 1536x2048 follow-up
+
+A separate shared-GPU run on 2026-09-28 measured **130.786 seconds median** for
+1536x2048 at eight Turbo steps. The three samples after one warm-up were 130.786,
+124.154 and 132.418 seconds. The prompt, seed and full prompt-to-RGB timing scope
+match the 1024x1024 benchmark above, but these runs happened later under potentially
+different external load. They are not a controlled measurement of resolution scaling
+or of the K-tile optimization's benefit at this size.
+
+[TheNoise 0.9.0's published table](https://github.com/lemonade-sdk/thenoise/blob/7633bfda1e3701b781d023f7ad42fe20304b040a/README.md#performance)
+reports 99 seconds for INT8 ConvRot and 117.6 seconds for BF16 on Strix Halo at
+1536x2048, eight steps, after warm-up. Our median here takes 32.1% longer than
+their published INT8 time. This is a cross-project comparison, not a controlled
+head-to-head test; power limits, prompts and GPU contention may differ.
+
+The run exposed a host-side replay bug: a pooled modulation allocation can be
+larger than its logical table after VAE buffer reuse. Copying its whole binding
+into the fixed-size block input failed with `copy requires equal spans`. The
+handoff now slices the source to the logical destination length, consistent with
+HRX's pool contract. The focused GPU regression fails before this fix and passes
+after it; both shared-bridge GPU tests and the CPU suite pass. No kernels or
+arithmetic changed. All repeated images match each other and the successful
+pre-fix first image byte for byte.
+
+The benchmark accepts `WIDTHxHEIGHT` and reports per-image reserved memory rather
+than rejecting any change in pooled capacity. Here it varied by 110,592 bytes
+across the timed images around 24.1 GB, with zero new tracked warm allocations;
+all reserved memory was released when the pipeline dropped.
+
+```sh
+cargo run --release --example bench_runtime -- /tmp/image.rgb 1536x2048 3 8
+```
+
+The [raw record](benchmarks/generation-1536x2048-2026-09-28.json) retains every
+sample, memory readings, hashes and comparison metadata.
+
+## Attention query sharing at large resolutions
+
+A synchronized profile at 1536x2048 (12,301 tokens including the prompt) puts
+attention at 8,483 ms of a 15,502 ms transformer step, or 54.7%. The new
+`attention_gqa_lds_f16_wmma_q32` kernel lets two independent groups of sixteen
+query rows share each staged K/V tile. Each wave retains the original FP16
+matrix products and FP32 online softmax order. This is separate from the old
+experimental query32 fragment repacking kernel.
+
+The builder and runtime select the eight-wave kernel at 8,192 tokens and above.
+Smaller sequences keep the original four-wave kernel. Both compile without
+scratch spills. A sequential sweep on the shared gfx1151 GPU gave these medians:
+
+| Tokens | Original attention (ms) | Two query groups (ms) | Speedup |
+| --- | ---: | ---: | ---: |
+| 5,123 | 25.008 | 25.147 | 0.994x |
+| 6,163 | 37.351 | 36.182 | 1.032x |
+| 8,195 | 71.434 | 64.485 | 1.108x |
+| 12,301 | 180.818 | 144.449 | 1.252x |
+
+Every output element was bit-identical. Each size alternated kernels for seven
+rounds with five samples per round. No other benchmark owned by this session ran
+concurrently; an unrelated GPU application remained active. Earlier overlapping
+screening runs are excluded. These are kernel timings, not whole-image gains.
+The [raw samples](benchmarks/attention-query-groups-2026-09-28.json) retain the
+measurement scope and source identity. Both GPU numerical and compiler regression suites pass, including independent
+CPU softmax checks of both query tilings. The stricter comparison that poisons
+output before each kernel also passes at 8,191, 8,192, 12,301 and 16,403 tokens.
+At the two crossover sizes, the original benchmark used 32 extra padding rows.
+The rerun with the actual 8,224-row capacity remains bit-identical: 73.735 to
+67.375 ms at 8,191 tokens, and 88.834 to 65.100 ms at 8,192 tokens. Those raw
+samples are included separately in the measurement record.
+
+The local TheNoise comparison was interrupted by a GPU reset during its first
+1536x2048 decode. After recovery, our full-image run completed 512x512 at 5.919 s
+median, then stalled after the 1024x1024 warm-up with further driver queue errors.
+The job was terminated; the GPU remained busy with no compute clients. The
+[partial local record](benchmarks/thenoise-local-2026-09-28.json) distinguishes
+completed measurements from failures. The recovered 1536x2048 eight-step warm image is byte-identical to the original
+attention kernel (SHA-256 `66b46dac8451cc2461142d5fc2f5af636c0b20af64cd2a0486ebb1a873e3f982`).
+A user-authorized driver reset at 12:36 CEST restored idle GPU activity and
+passed copy/readback and attention compute checks without rebooting. The resumed
+1536x2048 run measured **96.955 seconds median**, with samples 95.858, 97.607 and
+96.955 seconds. All three outputs match the original attention image exactly.
+The [full-image record](benchmarks/generation-q32-1536x2048-2026-09-28.json)
+retains raw timings, hashes and source identity. This is 2.1% less time than
+TheNoise's published 99 seconds. The resumed local run measured TheNoise at
+186.204 seconds median (186.204, 192.040 and 185.153), including decoding,
+with `MIOPEN_FIND_MODE=FAST`. Its pre-decode median alone was 168.084 seconds.
+The apparent 1.92x full-generation speedup remains provisional: other GPU
+workloads were active and the engines ran at different times. The user accepted
+the measured optimization and ended the remaining work on 2026-09-28. The
+[28-case size and boundary sweep](benchmarks/resolution-matrix-2026-09-28.json)
+therefore remains partial, and the later drift recheck was cancelled. These
+results do not establish superiority at every resolution.
+
+| Resolution | HRX median (s) | Local TheNoise median (s) |
+| --- | ---: | ---: |
+| 512x512 | 7.255 | 9.374 |
+| 1024x1024 | 27.086 | 36.362 |
+| 1536x2048 | 96.955 | 186.204 |
+| 2048x2048 | 144.920 | Not completed |
+
+Each completed generation case uses eight steps and three timed images after
+one warm-up, with exact within-engine replay. The frozen
+1024x1024 BF16 quality gate passes at 31.777828 dB image PSNR with 0.000000 dB
+regression in either latent error or image PSNR against the accepted baseline.
+This fixture exercises the original attention tile; the independent CPU oracle
+and exact large-sequence/full-image comparisons cover the new query grouping.
+
+```sh
+cargo run --release --example attention -- 12301 /tmp/attention-q32 --rounds 7 \
+  kernels/attention_gqa_lds_f16_wmma.loom \
+  q32:kernels/attention_gqa_lds_f16_wmma_q32.loom
+cargo run --release --example bench_runtime -- /tmp/images \
+  512,1024,1536x2048,2048 3 8
+```

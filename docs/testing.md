@@ -15,10 +15,11 @@ requested. There is no Python environment.
 | Dense matmul, bias, ragged tiles, convolution layouts, grouped/causal attention, rotary embedding and upsampling | `tests/arithmetic.rs` |
 | Repeated resident softmax, including causal masking and non-tile-aligned lengths | `tests/softmax_repeat.rs` |
 | INT8 GEMM tiles, padded operand pitch, zero scales, BF16 residual and SwiGLU ordering | `tests/quantized.rs` |
-| Production FP16 attention and quantized preparation against independent softmax and Hadamard references | `tests/quantized.rs` |
+| Both production FP16 attention tiles against CPU softmax and each other, zero spills across the tile crossover; quantized preparation against Hadamard | `tests/quantized.rs` |
 | Shared compiled artifact identity, allocation bounds and native library loading | `tests/dispatch.rs` |
 | Invalid checkpoint, metadata and dimensions rejected before any native library is loaded | `tests/constructor.rs` |
 | Tensor views, pooled allocation reuse and stream affinity | `src/ops/tensor.rs` |
+| Modulation copies from oversized recycled buffers and failed bridge quarantine | `src/pipeline/shared.rs` |
 
 The exhaustive CPU sweep and model-dependent checks remain explicit commands:
 

@@ -1,0 +1,480 @@
+{
+  "date": "2026-09-28",
+  "status": "accepted on completed comparisons; remaining sweep cancelled",
+  "thenoise_revision": "7633bfda1e3701b781d023f7ad42fe20304b040a",
+  "thenoise_checkout_clean": true,
+  "gpu": "AMD Radeon 8060S Graphics (gfx1151)",
+  "torch": "2.14.0",
+  "hip": "7.2.53211",
+  "comfy_kitchen": "0.2.35",
+  "checkpoint": "Comfy-Org/Krea-2 e5ea8b4dd7f38f348b138eb0fe29f92c0e367e96; krea2_turbo_int8_convrot, qwen3vl_4b_bf16, qwen_image_vae",
+  "protocol": {
+    "steps": 8,
+    "seed": 37,
+    "prompt": "a red ceramic cup on a wooden table",
+    "cfg": false,
+    "warmups_per_shape": 1,
+    "samples_per_shape": 3,
+    "scope": "prompt through RGB bytes; no model loading, file writing, or checksum time",
+    "thenoise_cache": "all PipelineCache entries cleared before every generation; torch compile cache remains warm",
+    "residency": "all model components on GPU for both engines",
+    "conditions": "sequential owned GPU jobs; unrelated shared workloads remain active"
+  },
+  "hrx_base_revision": "ce7bb9532d8ffb2379fcfe42a57eb64b64f9070f",
+  "hrx_candidate_binary_sha256": "ddc021417b55c21023f4544de23a581c2e9e05e86390ca237f61a8b4e3c66eda",
+  "initial_thenoise_attempt": {
+    "status": "aborted during 1536x2048 warm-up after denoising; GPU reset",
+    "results": [
+      {
+        "event": "loaded",
+        "torch": "2.14.0",
+        "hip": "7.2.53211",
+        "gpu": "AMD Radeon 8060S Graphics",
+        "cache": "cleared before every generate"
+      },
+      {
+        "event": "warm",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "elapsed_ms": 38821.82544202078,
+        "rgb_sha256": "ba5352099d1fa73c39ae52df110e1bab22783e304b6f8d18ea00eb76109bdc54"
+      },
+      {
+        "event": "sample",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "sample": 1,
+        "elapsed_ms": 8228.888473997358,
+        "rgb_identical": true,
+        "allocated_bytes": 22717946368,
+        "reserved_bytes": 24339546112
+      },
+      {
+        "event": "sample",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "sample": 2,
+        "elapsed_ms": 8141.538787022,
+        "rgb_identical": true,
+        "allocated_bytes": 22717946368,
+        "reserved_bytes": 24339546112
+      },
+      {
+        "event": "sample",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "sample": 3,
+        "elapsed_ms": 8830.652381002437,
+        "rgb_identical": true,
+        "allocated_bytes": 22717946368,
+        "reserved_bytes": 24339546112
+      },
+      {
+        "event": "summary",
+        "width": 512,
+        "height": 512,
+        "steps": 8,
+        "samples_ms": [
+          8228.888473997358,
+          8141.538787022,
+          8830.652381002437
+        ],
+        "median_ms": 8228.888473997358,
+        "rgb_sha256": "ba5352099d1fa73c39ae52df110e1bab22783e304b6f8d18ea00eb76109bdc54"
+      },
+      {
+        "event": "warm",
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "elapsed_ms": 113783.84780100896,
+        "rgb_sha256": "79b8dd7410fdad0762f586dbb1c57bf47c460af135ccc3662647abedc1647d1c"
+      },
+      {
+        "event": "sample",
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "sample": 1,
+        "elapsed_ms": 37050.42181900353,
+        "rgb_identical": true,
+        "allocated_bytes": 22728403968,
+        "reserved_bytes": 28982640640
+      },
+      {
+        "event": "sample",
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "sample": 2,
+        "elapsed_ms": 38924.94002098101,
+        "rgb_identical": true,
+        "allocated_bytes": 22728403968,
+        "reserved_bytes": 28982640640
+      },
+      {
+        "event": "sample",
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "sample": 3,
+        "elapsed_ms": 42700.12369399774,
+        "rgb_identical": true,
+        "allocated_bytes": 22728403968,
+        "reserved_bytes": 28982640640
+      },
+      {
+        "event": "summary",
+        "width": 1024,
+        "height": 1024,
+        "steps": 8,
+        "samples_ms": [
+          37050.42181900353,
+          38924.94002098101,
+          42700.12369399774
+        ],
+        "median_ms": 38924.94002098101,
+        "rgb_sha256": "79b8dd7410fdad0762f586dbb1c57bf47c460af135ccc3662647abedc1647d1c"
+      }
+    ]
+  },
+  "failure_evidence": {
+    "exit_code": 134,
+    "phase": "after 1536x2048 warmup denoising; no image or timed sample completed",
+    "main_thread_stack": [
+      "miopen::EvaluateInvokers",
+      "miopen::FindCore",
+      "miopen::FindConvolution",
+      "miopenFindConvolutionForwardAlgorithm",
+      "at::native::miopen_convolution"
+    ],
+    "kernel_log": "12:21:17 CEST gfx_0.0.0 timeout (niri); 12:21:21 reset succeeded",
+    "causality": "TheNoise was inside convolution solver evaluation; this does not independently prove the reset cause."
+  },
+  "recovery": "GPU copy/readback regression and full scripts/test.sh --gpu passed after the reset",
+  "retry_plan": {
+    "MIOPEN_FIND_MODE": "FAST",
+    "meaning": "Use existing solver database or immediate fallback instead of benchmarking missing convolution configurations; solver choice may affect decode performance.",
+    "source": "https://rocm.docs.amd.com/projects/MIOpen/en/docs-7.0.0/how-to/find-and-immediate.html",
+    "additional_measurement": "Synchronize and measure before decode to establish a lower bound unaffected by the VAE solver selection."
+  },
+  "hrx_partial_events": [
+    {
+      "event": "ready",
+      "height": 512,
+      "steps": 8,
+      "warm_reserved_bytes": 21996333108,
+      "width": 512
+    },
+    {
+      "elapsed_ms": 5919.414524999999,
+      "event": "sample",
+      "height": 512,
+      "reserved_bytes": 21996333108,
+      "rgb_identical": true,
+      "sample": 1,
+      "width": 512
+    },
+    {
+      "elapsed_ms": 5934.9403330000005,
+      "event": "sample",
+      "height": 512,
+      "reserved_bytes": 21996333108,
+      "rgb_identical": true,
+      "sample": 2,
+      "width": 512
+    },
+    {
+      "elapsed_ms": 5915.7564999999995,
+      "event": "sample",
+      "height": 512,
+      "reserved_bytes": 21996333108,
+      "rgb_identical": true,
+      "sample": 3,
+      "width": 512
+    },
+    {
+      "height": 512,
+      "median_ms": 5919.414524999999,
+      "reserved_bytes_after_samples": [
+        21996333108,
+        21996333108,
+        21996333108
+      ],
+      "rgb_path": "/tmp/krea2-vs-thenoise-20260928/candidate.512x512.rgb",
+      "samples_ms": [
+        5919.414524999999,
+        5934.9403330000005,
+        5915.7564999999995
+      ],
+      "scope": "warm full generation",
+      "steps": 8,
+      "tracked_peak_bytes": 46485504,
+      "warm_reserved_bytes": 21996333108,
+      "warm_tracked_allocations": 0,
+      "width": 512
+    },
+    {
+      "event": "ready",
+      "height": 1024,
+      "steps": 8,
+      "warm_reserved_bytes": 22900591924,
+      "width": 1024
+    }
+  ],
+  "hrx_interruption": {
+    "phase": "first timed 1024x1024 image after successful warmup",
+    "action": "terminated owned benchmark after persistent stall and MES queue-removal failures; both queues exited",
+    "evidence": "GPU remained 100% busy with no /dev/kfd clients, queue removal failures and CPC page faults; no new benchmark launched",
+    "recovery_request": "user asked to reboot; no system reset attempted by this task"
+  },
+  "gpu_validation": {
+    "script": "scripts/test.sh --gpu",
+    "result": "passed",
+    "attention_cases": [
+      8191,
+      8192,
+      12301,
+      16403
+    ],
+    "attention_exact": true,
+    "full_image_parity": "not run; validation stopped before parity phase"
+  },
+  "rgb_sha256": {
+    "candidate.1024x1024.rgb": "0d3ba13c89b8a18e8cc286c33b6130e4ee1af4de0ddca371295754b18bac0994",
+    "candidate.512x512.rgb": "5feedfcf36b9cea0a56e13296badab9d154d7c6522c3ed457222487abf932df5"
+  },
+  "persistent_evidence_directory": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928",
+  "warm_1024_rgb_matches_previous_8step": true,
+  "cpu_checks_after_padding_fix": "passed",
+  "manual_recovery": {
+    "authorization": "user requested GPU driver reset; reboot declined",
+    "time": "2026-09-28 12:36:13 CEST",
+    "method": "read amdgpu_gpu_recover debugfs entry for PCI 0000:c5:00.0",
+    "result": "driver reported reset succeeded; busy returned to zero; copy/readback and attention CPU-oracle GPU tests passed",
+    "reboot": false
+  },
+  "high_resolution_quality": {
+    "resolution": [
+      1536,
+      2048
+    ],
+    "steps": 8,
+    "seed": 37,
+    "rgb_bytes": 9437184,
+    "sha256": "66b46dac8451cc2461142d5fc2f5af636c0b20af64cd2a0486ebb1a873e3f982",
+    "warm_image_identical_to_original_attention": true,
+    "timed_repeats": "pending"
+  },
+  "resumed_comparison": {
+    "status": "closed_on_user_acceptance",
+    "environment": {
+      "packages": {
+        "torch": "2.14.0",
+        "transformers": "5.7.0.dev0",
+        "tokenizers": "0.23.1",
+        "huggingface-hub": "1.33.0",
+        "comfy-kitchen": "0.2.35",
+        "accelerate": "1.15.0"
+      },
+      "MIOPEN_FIND_MODE": "FAST",
+      "checkout_commit": "7633bfda1e3701b781d023f7ad42fe20304b040a",
+      "reason": "default VAE solver search appeared in prior failure stack; separate pre-decode timing bounds the impact of solver choice",
+      "isolated_dependency_fix": "tokenizers 0.23.1 overrides incompatible inherited 0.23.2; no global packages changed",
+      "checkout_sha256": {
+        "thenoise/runtime.py": "9923ea9993b7b542d9df7413d177b3ec9cc2910b587810f4853cc044846f64a5",
+        "thenoise/pipeline.py": "2dd3ae308942f2e872c8d015938e5d4f4fd2e5cfa41bac799c7a306c30de1d9b",
+        "thenoise/models/krea2.py": "64fcfdc2553ed54855f158da4b3f15c10d56c7ea335d4cb5a03370f173575db4",
+        "thenoise/dit/krea2/mmdit.py": "0d541faf07b8b8bb066af97c3a612027968856924cc47ff92ff9f2d23f04df5d",
+        "thenoise/utils/attention.py": "f9f67e848d458be710011e9d6f8bba6d3b4554e1f2a27a26765df08e7a25a301",
+        "thenoise/vae/qwen_image.py": "eaad1da3b22d3407b0006998983332f8eeaee5df0a28c3b10ff41753f70458be"
+      },
+      "harness_sha256": "fa4775563a0d179971f23085774c1053e1f371899d6d209aad57243863fd9d53"
+    },
+    "quality_gate": {
+      "command": "bash scripts/parity.sh",
+      "status": "passed",
+      "fixture": "frozen official unquantized BF16 reference; unchanged accepted W8A8 baseline",
+      "fixture_size": [
+        1024,
+        1024
+      ],
+      "steps": 8,
+      "latent_cosine": 0.997044,
+      "relative_latent_rms": 0.076912,
+      "image_psnr_db": 31.777828,
+      "latent_loss_db": 0.0,
+      "image_loss_db": 0.0,
+      "log_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/parity-recovered.log",
+      "log_sha256": "a1ae19a093f34c9e226bf9b24e05db40c1fc0277144993fc2039b0d0120709e1",
+      "fixture_manifest_sha256": "c37cb5c77db05a60678c581414db9d3cbab8521fecb94a5009849383c9f993bb",
+      "limitation": "1024-square reference uses original attention tile; separate CPU-oracle and large-sequence exact-output checks cover q32."
+    },
+    "completed_comparisons": [
+      {
+        "width": 512,
+        "height": 512,
+        "coverage": "square size ladder",
+        "tokens_with_benchmark_prompt": 1037,
+        "status": "measured_pending_audit",
+        "hrx": {
+          "height": 512,
+          "median_ms": 7255.466341,
+          "reserved_bytes_after_samples": [
+            24903671924,
+            24903523764,
+            24903523764
+          ],
+          "rgb_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/recovered.512x512.rgb",
+          "samples_ms": [
+            6475.215856,
+            7255.466341,
+            7437.244491
+          ],
+          "scope": "warm full generation",
+          "steps": 8,
+          "tracked_peak_bytes": 1074438144,
+          "warm_reserved_bytes": 24903671924,
+          "warm_tracked_allocations": 0,
+          "width": 512,
+          "rgb_sha256": "5feedfcf36b9cea0a56e13296badab9d154d7c6522c3ed457222487abf932df5"
+        },
+        "thenoise": {
+          "event": "summary",
+          "width": 512,
+          "height": 512,
+          "steps": 8,
+          "samples_ms": [
+            8316.67646500864,
+            9891.407518007327,
+            9374.06805701903
+          ],
+          "median_ms": 9374.06805701903,
+          "pre_decode_samples_ms": [
+            8166.516509023495,
+            9713.672509009484,
+            9226.965889014537
+          ],
+          "pre_decode_median_ms": 9226.965889014537,
+          "rgb_sha256": "ba5352099d1fa73c39ae52df110e1bab22783e304b6f8d18ea00eb76109bdc54"
+        },
+        "thenoise_over_hrx": 1.2920007641751432,
+        "hrx_full_faster_than_thenoise_pre_decode": true
+      },
+      {
+        "width": 1024,
+        "height": 1024,
+        "coverage": "square size ladder",
+        "tokens_with_benchmark_prompt": 4109,
+        "status": "measured_pending_audit",
+        "hrx": {
+          "height": 1024,
+          "median_ms": 27085.976805000002,
+          "reserved_bytes_after_samples": [
+            23027968244,
+            23027928180,
+            23027952884
+          ],
+          "rgb_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/recovered.1024x1024.rgb",
+          "samples_ms": [
+            26354.410246,
+            27085.976805000002,
+            27126.836336
+          ],
+          "scope": "warm full generation",
+          "steps": 8,
+          "tracked_peak_bytes": 1074438144,
+          "warm_reserved_bytes": 23027910836,
+          "warm_tracked_allocations": 0,
+          "width": 1024,
+          "rgb_sha256": "0d3ba13c89b8a18e8cc286c33b6130e4ee1af4de0ddca371295754b18bac0994"
+        },
+        "thenoise": {
+          "event": "summary",
+          "width": 1024,
+          "height": 1024,
+          "steps": 8,
+          "samples_ms": [
+            35068.41981501202,
+            36361.71997501515,
+            36703.3383329981
+          ],
+          "median_ms": 36361.71997501515,
+          "pre_decode_samples_ms": [
+            34368.90778000816,
+            35642.53931900021,
+            36016.24627999263
+          ],
+          "pre_decode_median_ms": 35642.53931900021,
+          "rgb_sha256": "79b8dd7410fdad0762f586dbb1c57bf47c460af135ccc3662647abedc1647d1c"
+        },
+        "thenoise_over_hrx": 1.3424555531740272,
+        "hrx_full_faster_than_thenoise_pre_decode": true
+      },
+      {
+        "width": 1536,
+        "height": 2048,
+        "coverage": "requested high resolution and reverse orientation",
+        "tokens_with_benchmark_prompt": 12301,
+        "status": "measured_pending_audit",
+        "hrx": {
+          "height": 2048,
+          "median_ms": 96954.92878,
+          "reserved_bytes_after_samples": [
+            24101776308,
+            24101886900,
+            24101874612
+          ],
+          "rgb_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/recovered.1536x2048.rgb",
+          "samples_ms": [
+            95857.511416,
+            97606.79971199999,
+            96954.92878
+          ],
+          "scope": "warm full generation",
+          "steps": 8,
+          "tracked_peak_bytes": 461721600,
+          "warm_reserved_bytes": 24101851060,
+          "warm_tracked_allocations": 0,
+          "width": 1536,
+          "rgb_sha256": "66b46dac8451cc2461142d5fc2f5af636c0b20af64cd2a0486ebb1a873e3f982"
+        },
+        "thenoise": {
+          "event": "summary",
+          "width": 1536,
+          "height": 2048,
+          "steps": 8,
+          "samples_ms": [
+            186203.7244120147,
+            192040.20687600132,
+            185152.83573701163
+          ],
+          "median_ms": 186203.7244120147,
+          "pre_decode_samples_ms": [
+            168083.78363700467,
+            173023.8566909975,
+            167019.11640100298
+          ],
+          "pre_decode_median_ms": 168083.78363700467,
+          "rgb_sha256": "a6ffe071ed857d23008885c44e9f409577ea06767c30ddea497f23ca6b3ea591"
+        },
+        "thenoise_over_hrx": 1.920518397105203,
+        "hrx_full_faster_than_thenoise_pre_decode": true
+      }
+    ],
+    "driver_since_manual_reset": "No further driver errors observed through first two local comparisons.",
+    "decoder_probe": "FAST-mode VAE produced finite outputs twice each at 512-square, 1536x2048 and 2048-square. Diagnostic zero-latent checks, not generation timings.",
+    "log_path": "/home/zach/.local/state/krea2-hrx/benchmarks/2026-09-28/krea2-vs-thenoise-20260928/thenoise-fast.log"
+  },
+  "user_acceptance": {
+    "date": "2026-09-28",
+    "user_instruction": "that's pretty decent, let's call it a success",
+    "outcome": "User accepted the measured optimization and ended the remaining comparison work.",
+    "verified_scope": "Three local paired resolutions: 512x512, 1024x1024, 1536x2048; native-only 2048x2048; CPU/GPU numerical checks and frozen BF16 quality gate passed.",
+    "unverified_scope": "Remaining 28-case sweep and timing-drift rechecks were cancelled on acceptance. No claim of superiority at every resolution."
+  }
+}

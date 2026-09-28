@@ -733,8 +733,8 @@ impl Session {
             &rope,
         )?;
 
-        // fp16 QK and PV from the RoPE outputs and V transposed, 16 query rows
-        // per workgroup.
+        // fp16 QK and PV; the shape selects one or two groups of sixteen queries.
+        let attention_rows = crate::kernels::shape::attention_rows(tokens);
         let transposed = &self.v_transposed;
         let (kernel, (x, y)) = transposed.launch();
         let scalars = Scalars::new().index(tokens);
@@ -747,9 +747,9 @@ impl Session {
             sink,
             &self.kernels.attention,
             "f16 attention",
-            tokens.div_ceil(16),
+            tokens.div_ceil(attention_rows),
             KV_HEADS,
-            128,
+            (attention_rows * 8) as u32,
             &attention_scalars,
             &attention,
         )?;
