@@ -1,5 +1,5 @@
 // GEMM input preparation (plain), one workgroup of 256 lanes per token: form the
-// row with f32 arithmetic and f16 LDS storage, rotate it by the group-256 Hadamard
+// row with f32 arithmetic and f16 rounding, rotate it by the group-256 Hadamard
 // (H4 (x) H4 (x) H4 (x) H4 as four
 // radix-4 stages of strides 1, 4, 16, 64), take the
 // token's absmax, and write symmetric int8 (q = round(x / s), s = absmax / 127,
@@ -37,15 +37,10 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
   %rotation_scale = scalar.constant 16.0 : f32
   %tiny = scalar.constant 1.0000000000000001e-30 : f32
   %fifteen = scalar.constant 255 : i32
-  %sh4 = scalar.constant 4 : i32
   %sh8 = scalar.constant 8 : i32
-  %sh12 = scalar.constant 12 : i32
   %sh16 = scalar.constant 16 : i32
-  %sh20 = scalar.constant 20 : i32
   %sh24 = scalar.constant 24 : i32
-  %sh28 = scalar.constant 28 : i32
   %zero8 = vector.splat %zero : vector<8xf32>
-  %one8 = vector.splat %one : vector<8xf32>
   %seven8 = vector.splat %seven : vector<8xf32>
   %neg_seven8 = vector.splat %neg_seven : vector<8xf32>
   %fifteen8 = vector.splat %fifteen : vector<8xi32>
@@ -53,7 +48,6 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
   %token = kernel.workgroup.id<x> : index
   %row = index.assume %token [lt(%token, %tokens_b)] : index
   %lane = kernel.workitem.id<x> : index
-  %half_width = index.div %width, %c2 : index
   %chunk_count = index.div %width, %c8 : index
   %word_width = index.div %width, %c4 : index
   %word_last = index.sub %word_width, %c2 : index
@@ -62,7 +56,6 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
   %out_wlast = index.sub %out_words, %c2 : index
   %width_last = index.sub %width, %c8 : index
   %quads = index.div %width, %c4 : index
-  %width_per_lane = index.div %width, %c256 : index
   %quads_per_lane = index.div %quads, %c256 : index
   %chunks_per_lane = index.div %chunk_count, %c256 : index
   %h_global = buffer.assume.memory_space<global> %h : buffer
@@ -76,110 +69,121 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
   %lds = buffer.alloca<workgroup> align(16) %row_bytes : buffer
   %x_view = buffer.view %lds[%c0_offset] : buffer -> view<[%width]xf16>
 
-  // the row as produced (the gate|up GEMM's fused silu(g)*u output)
-  scf.for %m_j = [%c0 to %chunks_per_lane step %c1] {
-    %m_lane_step = index.mul %m_j, %c256 : index
-    %m_chunk = index.add %m_lane_step, %lane : index
-    %m_i0 = index.mul %m_chunk, %c8 : index
-    %m_i = index.assume %m_i0 [le(%m_i0, %width_last), mul(%m_i0, 8)] : index
-    %m_v16 = vector.load %h_view[%row, %m_i] : view<[%tokens_b]x[%width]xf16> -> vector<8xf16>
-    %m_out = vector.extf %m_v16 : vector<8xf16> to vector<8xf32>
-    %m_out_h = vector.fptrunc %m_out : vector<8xf32> to vector<8xf16>
-    vector.store %m_out_h, %x_view[%m_i] : vector<8xf16>, view<[%width]xf16>
-  }
-  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-
-  // Hadamard: four radix-4 stages; each lane owns whole quads, so no barrier inside a stage.
-  scf.for %t_j = [%c0 to %quads_per_lane step %c1] {
+  // Each lane loads 16 adjacent values and performs the stride-1 and stride-4
+  // stages in registers. Round to f16 after each stage, exactly as the former
+  // LDS round trips did. Only then publish to LDS for the cross-lane stages.
+  // The guarded tail also serves widths such as 2048 and 6144: half a workgroup
+  // handles the final 2048 elements, and all lanes join the following barrier.
+  %groups16 = index.div %width, %c16 : index
+  %groups16_last = index.sub %groups16, %c1 : index
+  %iterations0 = index.div %groups16_last, %c256 : index
+  %iterations = index.add %iterations0, %c1 : index
+  %last16 = index.sub %width, %c16 : index
+  scf.for %t_j = [%c0 to %iterations step %c1] {
     %t_lane_step = index.mul %t_j, %c256 : index
-    %t0 = index.add %t_lane_step, %lane : index
-    %t = index.assume %t0 [lt(%t0, %quads)] : index
-    %g = index.div %t, %c64 : index
-    %within = index.rem %t, %c64 : index
-    %lo = index.rem %within, %c1 : index
-    %hi = index.div %within, %c1 : index
-    %hi4 = index.mul %hi, %c4 : index
-    %hi4d = index.mul %hi4, %c1 : index
-    %g256 = index.mul %g, %c256 : index
-    %base0 = index.add %g256, %hi4d : index
-    %base = index.add %base0, %lo : index
-    %i1 = index.add %base, %c1 : index
-    %i2 = index.add %i1, %c1 : index
-    %i3 = index.add %i2, %c1 : index
-    %e0_h = view.load %x_view[%base] : view<[%width]xf16> -> f16
-    %e0 = scalar.extf %e0_h : f16 to f32
-    %e1_h = view.load %x_view[%i1] : view<[%width]xf16> -> f16
-    %e1 = scalar.extf %e1_h : f16 to f32
-    %e2_h = view.load %x_view[%i2] : view<[%width]xf16> -> f16
-    %e2 = scalar.extf %e2_h : f16 to f32
-    %e3_h = view.load %x_view[%i3] : view<[%width]xf16> -> f16
-    %e3 = scalar.extf %e3_h : f16 to f32
-    %s01 = scalar.addf %e0, %e1 : f32
-    %s23 = scalar.addf %e2, %e3 : f32
-    %d01 = scalar.subf %e0, %e1 : f32
-    %d23 = scalar.subf %e2, %e3 : f32
-    %o0 = scalar.addf %s01, %d23 : f32
-    %o1 = scalar.subf %s01, %d23 : f32
-    %o2 = scalar.addf %d01, %s23 : f32
-    %o3 = scalar.subf %s23, %d01 : f32
-    %o0_scaled = scalar.mulf %o0, %quarter : f32
-    %o0_scaled_h = scalar.fptrunc %o0_scaled : f32 to f16
-    view.store %o0_scaled_h, %x_view[%base] : f16, view<[%width]xf16>
-    %o1_scaled = scalar.mulf %o1, %quarter : f32
-    %o1_scaled_h = scalar.fptrunc %o1_scaled : f32 to f16
-    view.store %o1_scaled_h, %x_view[%i1] : f16, view<[%width]xf16>
-    %o2_scaled = scalar.mulf %o2, %quarter : f32
-    %o2_scaled_h = scalar.fptrunc %o2_scaled : f32 to f16
-    view.store %o2_scaled_h, %x_view[%i2] : f16, view<[%width]xf16>
-    %o3_scaled = scalar.mulf %o3, %quarter : f32
-    %o3_scaled_h = scalar.fptrunc %o3_scaled : f32 to f16
-    view.store %o3_scaled_h, %x_view[%i3] : f16, view<[%width]xf16>
-  }
-  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-  scf.for %t_j = [%c0 to %quads_per_lane step %c1] {
-    %t_lane_step = index.mul %t_j, %c256 : index
-    %t0 = index.add %t_lane_step, %lane : index
-    %t = index.assume %t0 [lt(%t0, %quads)] : index
-    %g = index.div %t, %c64 : index
-    %within = index.rem %t, %c64 : index
-    %lo = index.rem %within, %c4 : index
-    %hi = index.div %within, %c4 : index
-    %hi4 = index.mul %hi, %c4 : index
-    %hi4d = index.mul %hi4, %c4 : index
-    %g256 = index.mul %g, %c256 : index
-    %base0 = index.add %g256, %hi4d : index
-    %base = index.add %base0, %lo : index
-    %i1 = index.add %base, %c4 : index
-    %i2 = index.add %i1, %c4 : index
-    %i3 = index.add %i2, %c4 : index
-    %e0_h = view.load %x_view[%base] : view<[%width]xf16> -> f16
-    %e0 = scalar.extf %e0_h : f16 to f32
-    %e1_h = view.load %x_view[%i1] : view<[%width]xf16> -> f16
-    %e1 = scalar.extf %e1_h : f16 to f32
-    %e2_h = view.load %x_view[%i2] : view<[%width]xf16> -> f16
-    %e2 = scalar.extf %e2_h : f16 to f32
-    %e3_h = view.load %x_view[%i3] : view<[%width]xf16> -> f16
-    %e3 = scalar.extf %e3_h : f16 to f32
-    %s01 = scalar.addf %e0, %e1 : f32
-    %s23 = scalar.addf %e2, %e3 : f32
-    %d01 = scalar.subf %e0, %e1 : f32
-    %d23 = scalar.subf %e2, %e3 : f32
-    %o0 = scalar.addf %s01, %d23 : f32
-    %o1 = scalar.subf %s01, %d23 : f32
-    %o2 = scalar.addf %d01, %s23 : f32
-    %o3 = scalar.subf %s23, %d01 : f32
-    %o0_scaled = scalar.mulf %o0, %quarter : f32
-    %o0_scaled_h = scalar.fptrunc %o0_scaled : f32 to f16
-    view.store %o0_scaled_h, %x_view[%base] : f16, view<[%width]xf16>
-    %o1_scaled = scalar.mulf %o1, %quarter : f32
-    %o1_scaled_h = scalar.fptrunc %o1_scaled : f32 to f16
-    view.store %o1_scaled_h, %x_view[%i1] : f16, view<[%width]xf16>
-    %o2_scaled = scalar.mulf %o2, %quarter : f32
-    %o2_scaled_h = scalar.fptrunc %o2_scaled : f32 to f16
-    view.store %o2_scaled_h, %x_view[%i2] : f16, view<[%width]xf16>
-    %o3_scaled = scalar.mulf %o3, %quarter : f32
-    %o3_scaled_h = scalar.fptrunc %o3_scaled : f32 to f16
-    view.store %o3_scaled_h, %x_view[%i3] : f16, view<[%width]xf16>
+    %t_chunk = index.add %t_lane_step, %lane : index
+    %active = index.cmp ult, %t_chunk, %groups16 : index
+    scf.if %active {
+      %t_base = index.mul %t_chunk, %c16 : index
+      %base = index.assume %t_base [le(%t_base, %last16), mul(%t_base, 16)] : index
+      %input_half = vector.load %h_view[%row, %base] : view<[%tokens_b]x[%width]xf16> -> vector<16xf16>
+      %input = vector.extf %input_half : vector<16xf16> to vector<16xf32>
+      %quarter4 = vector.splat %quarter : vector<4xf32>
+      %v0_0_s0 = vector.extract %input[0] : vector<16xf32> -> f32
+      %v0_1_s0 = vector.extract %input[4] : vector<16xf32> -> f32
+      %v0_2_s0 = vector.extract %input[8] : vector<16xf32> -> f32
+      %v0_3_s0 = vector.extract %input[12] : vector<16xf32> -> f32
+      %e0_raw_s0 = vector.from_elements %v0_0_s0, %v0_1_s0, %v0_2_s0, %v0_3_s0 : vector<4xf32>
+      %v1_0_s0 = vector.extract %input[1] : vector<16xf32> -> f32
+      %v1_1_s0 = vector.extract %input[5] : vector<16xf32> -> f32
+      %v1_2_s0 = vector.extract %input[9] : vector<16xf32> -> f32
+      %v1_3_s0 = vector.extract %input[13] : vector<16xf32> -> f32
+      %e1_raw_s0 = vector.from_elements %v1_0_s0, %v1_1_s0, %v1_2_s0, %v1_3_s0 : vector<4xf32>
+      %v2_0_s0 = vector.extract %input[2] : vector<16xf32> -> f32
+      %v2_1_s0 = vector.extract %input[6] : vector<16xf32> -> f32
+      %v2_2_s0 = vector.extract %input[10] : vector<16xf32> -> f32
+      %v2_3_s0 = vector.extract %input[14] : vector<16xf32> -> f32
+      %e2_raw_s0 = vector.from_elements %v2_0_s0, %v2_1_s0, %v2_2_s0, %v2_3_s0 : vector<4xf32>
+      %v3_0_s0 = vector.extract %input[3] : vector<16xf32> -> f32
+      %v3_1_s0 = vector.extract %input[7] : vector<16xf32> -> f32
+      %v3_2_s0 = vector.extract %input[11] : vector<16xf32> -> f32
+      %v3_3_s0 = vector.extract %input[15] : vector<16xf32> -> f32
+      %e3_raw_s0 = vector.from_elements %v3_0_s0, %v3_1_s0, %v3_2_s0, %v3_3_s0 : vector<4xf32>
+      %s01_s0 = vector.addf %e0_raw_s0, %e1_raw_s0 : vector<4xf32>
+      %s23_s0 = vector.addf %e2_raw_s0, %e3_raw_s0 : vector<4xf32>
+      %d01_s0 = vector.subf %e0_raw_s0, %e1_raw_s0 : vector<4xf32>
+      %d23_s0 = vector.subf %e2_raw_s0, %e3_raw_s0 : vector<4xf32>
+      %o0_s0 = vector.addf %s01_s0, %d23_s0 : vector<4xf32>
+      %o1_s0 = vector.subf %s01_s0, %d23_s0 : vector<4xf32>
+      %o2_s0 = vector.addf %d01_s0, %s23_s0 : vector<4xf32>
+      %o3_s0 = vector.subf %s23_s0, %d01_s0 : vector<4xf32>
+      %o0_scaled_s0 = vector.mulf %o0_s0, %quarter4 : vector<4xf32>
+      %o0_h_s0 = vector.fptrunc %o0_scaled_s0 : vector<4xf32> to vector<4xf16>
+      %o1_scaled_s0 = vector.mulf %o1_s0, %quarter4 : vector<4xf32>
+      %o1_h_s0 = vector.fptrunc %o1_scaled_s0 : vector<4xf32> to vector<4xf16>
+      %o2_scaled_s0 = vector.mulf %o2_s0, %quarter4 : vector<4xf32>
+      %o2_h_s0 = vector.fptrunc %o2_scaled_s0 : vector<4xf32> to vector<4xf16>
+      %o3_scaled_s0 = vector.mulf %o3_s0, %quarter4 : vector<4xf32>
+      %o3_h_s0 = vector.fptrunc %o3_scaled_s0 : vector<4xf32> to vector<4xf16>
+      %v0_0_s1 = vector.extract %o0_h_s0[0] : vector<4xf16> -> f16
+      %v0_1_s1 = vector.extract %o1_h_s0[0] : vector<4xf16> -> f16
+      %v0_2_s1 = vector.extract %o2_h_s0[0] : vector<4xf16> -> f16
+      %v0_3_s1 = vector.extract %o3_h_s0[0] : vector<4xf16> -> f16
+      %e0_raw_s1 = vector.from_elements %v0_0_s1, %v0_1_s1, %v0_2_s1, %v0_3_s1 : vector<4xf16>
+      %e0_raw32_s1 = vector.extf %e0_raw_s1 : vector<4xf16> to vector<4xf32>
+      %v1_0_s1 = vector.extract %o0_h_s0[1] : vector<4xf16> -> f16
+      %v1_1_s1 = vector.extract %o1_h_s0[1] : vector<4xf16> -> f16
+      %v1_2_s1 = vector.extract %o2_h_s0[1] : vector<4xf16> -> f16
+      %v1_3_s1 = vector.extract %o3_h_s0[1] : vector<4xf16> -> f16
+      %e1_raw_s1 = vector.from_elements %v1_0_s1, %v1_1_s1, %v1_2_s1, %v1_3_s1 : vector<4xf16>
+      %e1_raw32_s1 = vector.extf %e1_raw_s1 : vector<4xf16> to vector<4xf32>
+      %v2_0_s1 = vector.extract %o0_h_s0[2] : vector<4xf16> -> f16
+      %v2_1_s1 = vector.extract %o1_h_s0[2] : vector<4xf16> -> f16
+      %v2_2_s1 = vector.extract %o2_h_s0[2] : vector<4xf16> -> f16
+      %v2_3_s1 = vector.extract %o3_h_s0[2] : vector<4xf16> -> f16
+      %e2_raw_s1 = vector.from_elements %v2_0_s1, %v2_1_s1, %v2_2_s1, %v2_3_s1 : vector<4xf16>
+      %e2_raw32_s1 = vector.extf %e2_raw_s1 : vector<4xf16> to vector<4xf32>
+      %v3_0_s1 = vector.extract %o0_h_s0[3] : vector<4xf16> -> f16
+      %v3_1_s1 = vector.extract %o1_h_s0[3] : vector<4xf16> -> f16
+      %v3_2_s1 = vector.extract %o2_h_s0[3] : vector<4xf16> -> f16
+      %v3_3_s1 = vector.extract %o3_h_s0[3] : vector<4xf16> -> f16
+      %e3_raw_s1 = vector.from_elements %v3_0_s1, %v3_1_s1, %v3_2_s1, %v3_3_s1 : vector<4xf16>
+      %e3_raw32_s1 = vector.extf %e3_raw_s1 : vector<4xf16> to vector<4xf32>
+      %s01_s1 = vector.addf %e0_raw32_s1, %e1_raw32_s1 : vector<4xf32>
+      %s23_s1 = vector.addf %e2_raw32_s1, %e3_raw32_s1 : vector<4xf32>
+      %d01_s1 = vector.subf %e0_raw32_s1, %e1_raw32_s1 : vector<4xf32>
+      %d23_s1 = vector.subf %e2_raw32_s1, %e3_raw32_s1 : vector<4xf32>
+      %o0_s1 = vector.addf %s01_s1, %d23_s1 : vector<4xf32>
+      %o1_s1 = vector.subf %s01_s1, %d23_s1 : vector<4xf32>
+      %o2_s1 = vector.addf %d01_s1, %s23_s1 : vector<4xf32>
+      %o3_s1 = vector.subf %s23_s1, %d01_s1 : vector<4xf32>
+      %o0_scaled_s1 = vector.mulf %o0_s1, %quarter4 : vector<4xf32>
+      %o0_h_s1 = vector.fptrunc %o0_scaled_s1 : vector<4xf32> to vector<4xf16>
+      %o1_scaled_s1 = vector.mulf %o1_s1, %quarter4 : vector<4xf32>
+      %o1_h_s1 = vector.fptrunc %o1_scaled_s1 : vector<4xf32> to vector<4xf16>
+      %o2_scaled_s1 = vector.mulf %o2_s1, %quarter4 : vector<4xf32>
+      %o2_h_s1 = vector.fptrunc %o2_scaled_s1 : vector<4xf32> to vector<4xf16>
+      %o3_scaled_s1 = vector.mulf %o3_s1, %quarter4 : vector<4xf32>
+      %o3_h_s1 = vector.fptrunc %o3_scaled_s1 : vector<4xf32> to vector<4xf16>
+      %out0_0 = vector.extract %o0_h_s1[0] : vector<4xf16> -> f16
+      %out0_1 = vector.extract %o0_h_s1[1] : vector<4xf16> -> f16
+      %out0_2 = vector.extract %o0_h_s1[2] : vector<4xf16> -> f16
+      %out0_3 = vector.extract %o0_h_s1[3] : vector<4xf16> -> f16
+      %out1_0 = vector.extract %o1_h_s1[0] : vector<4xf16> -> f16
+      %out1_1 = vector.extract %o1_h_s1[1] : vector<4xf16> -> f16
+      %out1_2 = vector.extract %o1_h_s1[2] : vector<4xf16> -> f16
+      %out1_3 = vector.extract %o1_h_s1[3] : vector<4xf16> -> f16
+      %out2_0 = vector.extract %o2_h_s1[0] : vector<4xf16> -> f16
+      %out2_1 = vector.extract %o2_h_s1[1] : vector<4xf16> -> f16
+      %out2_2 = vector.extract %o2_h_s1[2] : vector<4xf16> -> f16
+      %out2_3 = vector.extract %o2_h_s1[3] : vector<4xf16> -> f16
+      %out3_0 = vector.extract %o3_h_s1[0] : vector<4xf16> -> f16
+      %out3_1 = vector.extract %o3_h_s1[1] : vector<4xf16> -> f16
+      %out3_2 = vector.extract %o3_h_s1[2] : vector<4xf16> -> f16
+      %out3_3 = vector.extract %o3_h_s1[3] : vector<4xf16> -> f16
+      %first_group = vector.from_elements %out0_0, %out0_1, %out0_2, %out0_3, %out1_0, %out1_1, %out1_2, %out1_3, %out2_0, %out2_1, %out2_2, %out2_3, %out3_0, %out3_1, %out3_2, %out3_3 : vector<16xf16>
+      vector.store %first_group, %x_view[%base] : vector<16xf16>, view<[%width]xf16>
+    }
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
   scf.for %t_j = [%c0 to %quads_per_lane step %c1] {
@@ -275,7 +279,7 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
   }
   kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
 
-  // absmax with the remaining rotation scale, quantise, pack 8 nibbles per lane per step
+  // Absmax with the remaining rotation scale; quantise and pack 8 bytes per lane.
   %amax_v = scf.for %a_j = [%c0 to %chunks_per_lane step %c1](%a_acc = %zero8 : vector<8xf32>) -> (vector<8xf32>) {
     %a_lane_step = index.mul %a_j, %c256 : index
     %a_chunk = index.add %a_lane_step, %lane : index

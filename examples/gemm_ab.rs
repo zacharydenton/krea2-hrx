@@ -6,12 +6,16 @@
 //! cargo run --release --example gemm_ab -- kernels/gemm_i8_256.loom candidate.loom
 //! cargo run --release --example gemm_ab -- --shape 4115,16384,6144 --rounds 21 a.loom b.loom
 //! cargo run --release --example gemm_ab -- --m-group 2 kernels/gemm_i8_256.loom
+//! cargo run --release --example gemm_ab -- --residual --shape 4115,6144,6144 a.loom b.loom
 //! ```
 //!
-//! Every source must have the plain GEMM ABI of `kernels/gemm_i8_256.loom`
+//! Every source must have the five-buffer GEMM ABI of `kernels/gemm_i8_256.loom`
 //! (`m_size`; `a`, `w`, `scale`, `a_scale`, `c`) and its `k_size`, `k_stride`,
 //! `n_size` and `m_group` configuration; `--m-group` sets the raster group
 //! (default 4, production's).
+//! SwiGLU sources use that ABI too, with only the first half of C written.
+//! `--residual` appends the per-column f32 gate required by residual kernels.
+//! `--json PATH` appends raw GPU-clock samples as one JSON line per shape.
 //! A source launching 512-thread workgroups is taken to be the 256x256 tile
 //! (`gemm_i8_resid_256x256.loom`'s shape) and gets half as many column tiles. Outputs must match the first source
 //! byte for byte unless `--no-check` is given, for diagnostic variants that
@@ -22,6 +26,7 @@
 //! exports, as in hrx-rs 0.8.10's bundle; see `docs/graph-recording.md`.
 use anyhow::{Context, Result, bail, ensure};
 use hrx::{Constants, Kernel, Stream};
+use std::io::Write;
 
 /// The four transformer GEMMs at 1024x1024: qkv|gate, gate|up, wo, down.
 const SHAPES: [(usize, usize, usize); 4] =
@@ -35,6 +40,8 @@ struct Options {
     rounds: usize,
     m_group: usize,
     check: bool,
+    residual: bool,
+    json: Option<String>,
     sources: Vec<String>,
 }
 
@@ -44,6 +51,8 @@ fn options() -> Result<Options> {
         rounds: 11,
         m_group: 4,
         check: true,
+        residual: false,
+        json: None,
         sources: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -63,11 +72,14 @@ fn options() -> Result<Options> {
                 options.m_group = args.next().context("--m-group needs 1 to 4")?.parse()?
             }
             "--no-check" => options.check = false,
+            "--residual" => options.residual = true,
+            "--json" => options.json = Some(args.next().context("--json needs a path")?),
             flag if flag.starts_with("--") => bail!("unknown option {flag}"),
             _ => options.sources.push(arg),
         }
     }
     ensure!(!options.sources.is_empty(), "give at least one kernel source");
+    ensure!(options.rounds > 0, "rounds must be positive");
     if options.shapes.is_empty() {
         options.shapes = SHAPES.to_vec();
     }
@@ -154,8 +166,12 @@ fn main() -> Result<()> {
         let scale = upload(&mut stream, bytemuck::cast_slice(&vec![1e-3f32; n]))?;
         let a_scale = upload(&mut stream, bytemuck::cast_slice(&vec![1e-2f32; m]))?;
         let c = stream.allocate(m * n * 2)?;
-        let bindings =
-            [a.binding(), w.binding(), scale.binding(), a_scale.binding(), c.binding()];
+        let gate = upload(&mut stream, bytemuck::cast_slice(&vec![0.25f32; n]))?;
+        let mut bindings =
+            vec![a.binding(), w.binding(), scale.binding(), a_scale.binding(), c.binding()];
+        if options.residual {
+            bindings.push(gate.binding());
+        }
         let grid = [(n / 128) as u32, m.div_ceil(256) as u32, 1];
         let config =
             [("k_size", k), ("k_stride", stride), ("n_size", n), ("m_group", options.m_group)];
@@ -235,12 +251,27 @@ fn main() -> Result<()> {
             }
         }
         let medians: Vec<f64> = samples
-            .into_iter()
-            .map(|mut s| {
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
                 s.sort_by(f64::total_cmp);
                 s[s.len() / 2]
             })
             .collect();
+        if let Some(path) = &options.json {
+            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "m":m,"k":k,"n":n,"stride":stride,"m_group":options.m_group,
+                    "sources":options.sources,"residual":options.residual,
+                    "rounds":options.rounds,"repeats":REPEATS,"checked":options.check,
+                    "samples_ms":samples,"medians_ms":medians,
+                    "last_arm":"register-only WMMA peak"
+                })
+            )?;
+        }
         let peak_ops = (PEAK_WORKGROUPS * 8 * PEAK_ITERATIONS * 8 * 16 * 16 * 16 * 2) as f64;
         let peak_tops = peak_ops / medians[kernels.len()] / 1e9;
         println!("  register-only peak: {peak_tops:.1} TOPS");

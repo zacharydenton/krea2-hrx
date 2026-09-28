@@ -164,8 +164,14 @@ fn rotary_rounds_normalized_and_rotated_values_to_bf16() {
 fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
     let mut h = Harness::new();
     for mode in ["plain", "resid", "swiglu"] {
-        for pad in [0usize, 128] {
-            let (m, k, n) = (17usize, 128usize, 128usize);
+        // The larger cases cross both workgroup axes and three 128-byte K
+        // tiles, exercising the prefetch handoff and its final safe reload.
+        for (m, k, n, pad) in [
+            (17usize, 128usize, 128usize, 0usize),
+            (17, 128, 128, 128),
+            (257, 384, 256, 0),
+            (257, 384, 256, 128),
+        ] {
             let stride = k + pad;
             let a: Vec<i8> = (0..m * stride).map(|i| ((i * 3 % 15) as i8) - 7).collect();
             let w: Vec<i8> = (0..n * stride).map(|i| ((i * 7 % 15) as i8) - 7).collect();
@@ -229,8 +235,14 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
                 data.push(vec![0; m * n * 2]);
                 full.into_iter().map(|x| bf16::from_f64(x).to_f64()).collect()
             };
-            let out =
-                h.run(&stem, &config, [1, m.div_ceil(256) as u32, 1], 256, &[m as u64], &data);
+            let out = h.run(
+                &stem,
+                &config,
+                [(n / 128) as u32, m.div_ceil(256) as u32, 1],
+                256,
+                &[m as u64],
+                &data,
+            );
             let actual = halves(&out[4], mode == "resid");
             assert!(
                 actual.iter().all(|&v| bf16::from_f64(v).to_f64() == v),
@@ -461,6 +473,63 @@ fn quantized_preparation_matches_the_kronecker_hadamard_and_preserves_padding() 
             mismatches as f64 / ((tokens * width) as f64) < 0.02,
             "{kind}: {mismatches} rounding mismatches"
         );
+    }
+}
+
+#[test]
+#[ignore = "requires gfx1151 and provisioned HRX"]
+fn plain_preparation_preserves_each_half_rounding_boundary() {
+    let mut h = Harness::new();
+    let h4 = [[1., 1., 1., -1.], [1., 1., -1., 1.], [1., -1., 1., 1.], [-1., 1., 1., 1.]];
+    // 2048 and 6144 exercise the half-workgroup tail of the fused stages;
+    // 16384 is the production MLP width. Include zero and subnormal rows.
+    for width in [2048, 6144, 16384] {
+        let tokens = 3;
+        let stride = width + 64;
+        let input: Vec<_> = (0..tokens * width)
+            .map(|i| {
+                let scale = [0., 0.5, 0.00001][i / width];
+                f16::from_f32(((i * 37 % 101) as f32 - 50.) * scale / 50.)
+            })
+            .collect();
+        let out = h.run(
+            "prepare_plain_i8",
+            &cfg(&[("width", width), ("out_stride", stride)]),
+            [tokens as u32, 1, 1],
+            256,
+            &[tokens as u64],
+            &[bytes(&input), vec![0xa5; tokens * stride], vec![0; tokens * 4]],
+        );
+        for t in 0..tokens {
+            let mut row = input[t * width..(t + 1) * width].to_vec();
+            // Independent 4x4 matrix products with a half rounding after each
+            // radix. These small input ranges make every f32 sum exact, so the
+            // f64 oracle does not depend on the kernel's addition grouping.
+            for step in [1, 4, 16, 64] {
+                for block in (0..width).step_by(4 * step) {
+                    for col in 0..step {
+                        let x: Vec<_> = (0..4).map(|j| row[block + col + j * step]).collect();
+                        for i in 0..4 {
+                            let sum: f64 = (0..4).map(|j| h4[i][j] * x[j].to_f64()).sum();
+                            row[block + col + i * step] = f16::from_f64(sum * 0.25);
+                        }
+                    }
+                }
+            }
+            let max = row.iter().map(|v| v.to_f32().abs()).fold(0f32, f32::max);
+            let scale = (max * 16.).max(1e-30) / 127.;
+            assert_eq!(&out[2][t * 4..t * 4 + 4], &scale.to_le_bytes());
+            let inv = 16. / scale;
+            for (c, value) in row.iter().enumerate() {
+                let code = (value.to_f32() * inv).round_ties_even().clamp(-127., 127.) as i8;
+                assert_eq!(
+                    out[1][t * stride + c],
+                    code as u8,
+                    "width={width}, row={t}, col={c}"
+                );
+            }
+            assert!(out[1][t * stride + width..(t + 1) * stride].iter().all(|&v| v == 0xa5));
+        }
     }
 }
 

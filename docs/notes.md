@@ -32,6 +32,14 @@ per-token quantization, fused QKV/gate projection, QK normalization and RoPE,
 attention, output projection, and the SwiGLU MLP. Gated residual updates are
 fused into the output and down-projection GEMM epilogues.
 
+The plain MLP preparation kernel keeps the first two Hadamard stages in registers,
+preserving the FP16 rounding after each stage; see the
+[measurements and exact-output checks](prepare-performance.md).
+
+The QKV/gate, gate/up and attention-output GEMMs stage 128 K elements per
+iteration, halving their staging barriers while preserving their epilogues.
+See [GEMM measurements and validation](gemm-performance.md).
+
 The published int8 ConvRot checkpoints run with int8 weights and activations
 (W8A8). Loading concatenates Q/K/V/gate rows and interleaves MLP gate/up rows in
 16-row groups. Weights keep their checkpoint quantization and float32 norm
