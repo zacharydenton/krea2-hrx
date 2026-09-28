@@ -15,10 +15,20 @@ publish = false
 # Keep the CLI and Rust imports stable under the repository/package name.
 [lib]
 name = "krea2"
+bench = false
 
 [[bin]]
 name = "krea2"
 path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "generation"
+harness = false
+
+[[bench]]
+name = "kernels"
+harness = false
 
 [lints.rust]
 missing_docs = "warn"
@@ -50,6 +60,7 @@ thiserror = "2"
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 # An independent implementation of the same rounding, for the oracle tests only.
 half = { version = "2", features = ["bytemuck"] }
 tempfile = "3"

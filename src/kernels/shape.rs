@@ -17,8 +17,6 @@ pub const fn capacity(tokens: usize) -> usize {
 
 /// Query rows per attention workgroup. Two groups of sixteen rows share K/V
 /// staging for long sequences; shorter sequences retain the four-wave kernel.
-/// The crossover is conservative: the measured gain at 6163 tokens was only 3%,
-/// versus 11% at 8195 and 25% at 12301 on gfx1151.
 pub const fn attention_rows(tokens: usize) -> usize {
     if tokens >= 8192 { 32 } else { 16 }
 }
@@ -38,10 +36,8 @@ pub const fn attention_source(tokens: usize) -> &'static str {
 pub const GEMM_ROWS: usize = 256;
 
 /// Tile columns and workgroup threads of an int8 GEMM kernel. The 256x256 tile
-/// reads a third less operand data per product, which pays only where K is
-/// long: in the 1024x1024 pipeline it takes the down projection (K = 16384)
-/// from 825 to 538 ms per step on the GPU clock, while gate/up, qkvg and wo
-/// (K = 6144) gain nothing.
+/// reads a third less operand data per product and is used for the down
+/// projection, whose reduction dimension is 16384.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GemmTile {
     /// 256x128, eight waves.
@@ -96,12 +92,16 @@ pub fn gemm_source(family: &'static str, tile: GemmTile) -> &'static str {
 /// m-tiles per raster group of the int8 GEMMs.
 pub const GEMM_M_GROUP: usize = 4;
 
+/// Limit fragment lifetimes in the wide down projection once enough rows are
+/// available to benefit from the extra resident waves. Small shapes omit fences.
+pub const fn gemm_schedule_rows(tokens: usize) -> bool {
+    tokens >= 4096
+}
+
 /// Operand row pitch in int8 elements, which are also bytes.
 ///
 /// A row of a multiple of 8192 bytes makes the rows a GEMM step touches alias
-/// in the cache; one extra k step of padding took the down projection (K =
-/// 16384) from 61 to 77 TOPS. Rows of 6144 bytes showed no such effect, so they
-/// stay dense.
+/// in the cache; add one K step of padding to separate them.
 pub const fn gemm_pitch(k: usize) -> usize {
     if k.is_multiple_of(8192) { k + 64 } else { k }
 }

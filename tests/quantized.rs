@@ -163,7 +163,13 @@ fn rotary_rounds_normalized_and_rotated_values_to_bf16() {
 #[ignore = "requires gfx1151 and provisioned HRX"]
 fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
     let mut h = Harness::new();
-    for mode in ["plain", "resid", "swiglu"] {
+    for (mode, wide_schedule) in [
+        ("plain", None),
+        ("resid", None),
+        ("swiglu", None),
+        ("resid", Some(false)),
+        ("resid", Some(true)),
+    ] {
         // The larger cases cross both workgroup axes and three 128-byte K
         // tiles, exercising the prefetch handoff and its final safe reload.
         for (m, k, n, pad) in [
@@ -172,6 +178,9 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
             (257, 384, 256, 0),
             (257, 384, 256, 128),
         ] {
+            // Exercise both wide-kernel specializations against the same CPU
+            // oracle, including partial waves and two workgroups on each axis.
+            let n = if wide_schedule.is_some() { n * 2 } else { n };
             let stride = k + pad;
             let a: Vec<i8> = (0..m * stride).map(|i| ((i * 3 % 15) as i8) - 7).collect();
             let w: Vec<i8> = (0..n * stride).map(|i| ((i * 7 % 15) as i8) - 7).collect();
@@ -191,7 +200,7 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
                     dot as f64 * ws[c] as f64 * scales[r] as f64
                 })
                 .collect();
-            let stem = format!(
+            let mut stem = format!(
                 "gemm_i8{}_256",
                 if mode == "plain" {
                     ""
@@ -201,8 +210,12 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
                     "_swiglu"
                 },
             );
-            let config =
+            let mut config =
                 cfg(&[("k_size", k), ("n_size", n), ("k_stride", stride), ("m_group", 4)]);
+            if let Some(schedule) = wide_schedule {
+                stem.push_str("x256");
+                config.push(("schedule_rows", usize::from(schedule).to_string()));
+            }
             let mut data = vec![pack(&a), pack(&w), bytes(&ws), bytes(&scales)];
             let want = if mode == "resid" {
                 data.extend([bytes(&residual), bytes(&gates)]);
@@ -238,8 +251,12 @@ fn integer_gemms_preserve_pitches_bf16_residuals_and_swiglu_order() {
             let out = h.run(
                 &stem,
                 &config,
-                [(n / 128) as u32, m.div_ceil(256) as u32, 1],
-                256,
+                [
+                    (n / if wide_schedule.is_some() { 256 } else { 128 }) as u32,
+                    m.div_ceil(256) as u32,
+                    1,
+                ],
+                if wide_schedule.is_some() { 512 } else { 256 },
                 &[m as u64],
                 &data,
             );

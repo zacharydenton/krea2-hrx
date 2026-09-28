@@ -275,10 +275,6 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         Ok(value) if value == "1" => true,
         _ => panic!("KREA2_QUALITY_MINT must be unset or exactly 1"),
     };
-    assert!(
-        !minting || std::env::var_os("KREA2_QUALITY_RESULT").is_none(),
-        "qualification cannot replace the accepted baseline"
-    );
     validate_fixture(&fixture, &manifest, minting).unwrap_or_else(|e| panic!("{e}"));
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(fixture.join("job.json")).unwrap()).unwrap();
@@ -332,8 +328,6 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
         None,
     )
     .unwrap();
-    let evidence_path = std::env::var_os("KREA2_QUALITY_RESULT").map(PathBuf::from);
-    let noise = state.clone();
     for step in 0..steps {
         let sigma = krea2::pipeline::schedule::sigma(step, steps, shift);
         let next = krea2::pipeline::schedule::sigma(step + 1, steps, shift);
@@ -369,35 +363,6 @@ fn unquantized_bf16_reference_quality_does_not_regress() {
     eprintln!(
         "accepted: relative RMS {accepted_rms:.6}, PSNR {accepted_psnr:.6} dB, loss {loss_db:.6} dB"
     );
-    if let Some(path) = evidence_path {
-        assert!(!minting, "qualification cannot replace the accepted baseline");
-        let request = krea2::pipeline::Request {
-            prompt: meta["prompt"].as_str().expect("qualification fixture needs a prompt"),
-            negative_prompt: "",
-            width: size,
-            height: size,
-            steps: Some(steps),
-            guidance: Some(0.0),
-            seed: meta["seed"].as_u64().unwrap(),
-            initial_latents: Some(&noise),
-        };
-        // Measure the production path after one complete warmup, including text
-        // encoding, fusion, denoising, decoding and final device completion.
-        pipeline.generate(&request, None).unwrap();
-        let started = std::time::Instant::now();
-        pipeline.generate(&request, None).unwrap();
-        let elapsed = started.elapsed().as_secs_f64();
-        std::fs::write(
-            path,
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "seconds": elapsed, "relative_rms_loss_db": loss_db,
-                "image_psnr_loss_db": accepted_psnr - psnr,
-                "reference_files": manifest["files"],
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-    }
     assert!(
         loss_db <= 0.1,
         "quality regressed against the unquantized reference by {loss_db} dB"

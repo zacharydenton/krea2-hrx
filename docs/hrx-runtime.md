@@ -77,19 +77,6 @@ embedded source. HRX owns the key index and the artifact cache;
 different keys for the same artifact share one loaded executable. Failed
 requests remain retryable, and cache hits still check the device.
 
-On gfx1151 with HRX revision `cd64a45`, an optimized warm-lookup benchmark on
-2026-09-10 measured:
-
-| Kernel | HRX source lookup | Krea through HRX's key index |
-| --- | ---: | ---: |
-| Unary | 1,859 ns | 307 ns |
-| Wide GEMM | 37,547 ns | 532 ns |
-
-These are host lookup costs, not end-to-end inference timings. The source path
-already has its specialization constructed before timing; the keyed path
-includes Krea's request-key construction. Each figure is the median of nine
-samples after three warmups, with alternating measurement order. Reproduce with
-`cargo run --release --example kernel_lookup`.
 Both auxiliary and block compilation use the stream's target and `hrx::loom`.
 Compiler selection is cached by library and target. Its bounded module cache is
 kept across guidance shapes, avoiding repeated parsing and indexing. Prepared
@@ -127,45 +114,3 @@ returns contiguous RGB8 in HWC order. Progress is a per-call closure rather than
 a registered callback; returning false abandons the image. It runs on the calling
 thread while the pipeline's lock is held, so it must not call back into the same
 pipeline.
-
-## Integration checks, 2026-09-09
-
-Workspace CPU tests, clippy with warnings denied, and rustdoc passed. The 21
-selected native tests cover operation-cache lifetime, compiler targets, uploads
-crossing a 16 MiB boundary, gathered and padded weights, pooled storage, and
-numerical operations. Repeat them with:
-
-```sh
-HRX_OFFLINE=1 cargo test --test dispatch -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo test --test uploads -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo test -- --ignored --test-threads=1
-HRX_OFFLINE=1 cargo run --release --example dispatch_cost
-```
-
-On Ryzen AI MAX+ 395 / gfx1151 with Rust 1.95 nightly and hrx-rs 0.1.0, three
-release runs measured 127–137 ns of host time per direct dispatch and 227–243 ns
-including prepared-cache lookup, configuration construction and scalar packing.
-Each run takes the median of nine 2,048-launch batches after three warmups and
-checks the output. Completed batches averaged 2.1–2.25 µs per tiny kernel.
-These are wall-clock costs, not GPU timestamps or whole-model latency. Image
-quality, checkpoint-scale load time and peak memory were not remeasured.
-
-## HRX 0.8.5 qualification — 2026-09-23
-
-The bounded command reuse introduced in 0.8.4 improves the warm 256×256,
-two-step generation benchmark from 789.979 to 748.233 ms (5.3%) versus 0.8.3.
-Five alternating fresh-process pairs use Turbo int8 ConvRot, seed 37 and the
-red-ceramic-cup prompt. All captured RGB is exact; seven warm samples per process
-include text encoding, denoising and VAE. Warm residency stays constant and
-releases on teardown. No builds or other GPU jobs run during timing.
-
-Twenty-two selected GPU/compiler checks and five native NPU shapes (the
-since-retired text-fusion experiment, see `experiments/npu-fusion/`) pass.
-The full unquantized reference fixture remains absent; no new baseline is minted.
-
-The production attention oracle now tests query16 at all three token lengths.
-Experimental query32 has a separate test for the pinned compiler's documented
-`AMDGPU/041` layout rejection. No production kernel or precision policy changed.
-
-[Raw measurements and shared qualification](https://github.com/zacharydenton/hrx-rs/blob/main/docs/CLIENT-COMPOSITION.md)
-record the runtime and binary identities.

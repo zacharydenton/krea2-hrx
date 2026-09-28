@@ -26,22 +26,21 @@ The exhaustive CPU sweep and model-dependent checks remain explicit commands:
 ```sh
 cargo test --release --lib the_quieting_conversion_matches_half_over_every_f32 -- --ignored
 cargo test --release --lib checkpoint::plan::tests:: -- --ignored --test-threads=1
-cargo test --release --lib session::tests:: -- --ignored --test-threads=1 \
-  --skip two_independent_block_prefixes_are_priced_against_a_chain
+cargo test --release --lib session::tests:: -- --ignored --test-threads=1
 scripts/parity.sh
 ```
 
 The sweep checks all 2³² float32 encodings. The checkpoint and session tests need
 local Krea weights; `scripts/parity.sh` also needs the frozen unquantized BF16
-fixture described below. Run the timing experiments separately using the
-commands in [graph recording](graph-recording.md).
+fixture described below. Run Criterion benchmarks separately as described in
+[Contributing](../CONTRIBUTING.md#benchmarks).
 
 Integration tests share their comparison and fixture helpers through
 `tests/common`, and write fixtures only into `tempfile` directories.
 
 Checked-in Loom source is authoritative. The former Python generators, model
 wrappers, benchmark orchestration and reference implementations are retired.
-Historical measurements remain in the documentation and old tools remain in Git.
+Historical measurements and retired tools remain in Git history.
 The GPU oracles compute independent CPU arithmetic; they do not reproduce kernel
 implementations line for line. The scheduler fixture is captured from Diffusers,
 not generated from the Rust scheduler.

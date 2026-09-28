@@ -34,6 +34,3 @@ the supported GPU and link performance claims to the recorded methodology.
   the tested Rust/runtime versions and any known limitations in release notes.
 - Make the repository public when publication is intended, then tag the tested
   commit and create a GitHub release. Preparing docs does not publish a release.
-
-Historical benchmark logs retain the original checkout paths and project name
-as provenance; they are not current installation instructions.

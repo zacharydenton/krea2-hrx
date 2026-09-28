@@ -47,11 +47,18 @@ impl Shape {
             config: config.iter().map(|&(key, value)| (key.into(), value.into())).collect(),
         };
         let gemm = |family, stem, k: &str, stride: &str, n: &str| {
-            job(
+            let mut job = job(
                 shape::gemm_source(family, shape::gemm_tile(stem)),
                 stem,
                 &[("k_size", k), ("k_stride", stride), ("n_size", n), ("m_group", &group)],
-            )
+            );
+            if shape::gemm_tile(stem) == shape::GemmTile::Wide {
+                job.config.insert(
+                    "schedule_rows".into(),
+                    usize::from(shape::gemm_schedule_rows(self.tokens)).to_string(),
+                );
+            }
+            job
         };
         vec![
             job(
@@ -193,5 +200,17 @@ mod tests {
     fn a_sequence_the_kernels_cannot_serve_is_named() {
         assert!(Shape::new(15).unwrap_err().to_string().contains("tokens must be 16..16896"));
         assert!(Shape::new(16897).is_err());
+    }
+
+    #[test]
+    fn down_scheduling_is_specialized_at_the_sequence_boundary() {
+        for (tokens, schedule) in [(16, "0"), (4095, "0"), (4096, "1"), (16896, "1")] {
+            for job in Shape::new(tokens).unwrap().jobs() {
+                assert_eq!(
+                    job.config.get("schedule_rows").map(String::as_str),
+                    (job.stem == "gemm_down").then_some(schedule),
+                );
+            }
+        }
     }
 }

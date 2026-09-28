@@ -33,12 +33,10 @@ attention, output projection, and the SwiGLU MLP. Gated residual updates are
 fused into the output and down-projection GEMM epilogues.
 
 The plain MLP preparation kernel keeps the first two Hadamard stages in registers,
-preserving the FP16 rounding after each stage; see the
-[measurements and exact-output checks](prepare-performance.md).
+preserving the FP16 rounding after each stage.
 
 The QKV/gate, gate/up and attention-output GEMMs stage 128 K elements per
 iteration, halving their staging barriers while preserving their epilogues.
-See [GEMM measurements and validation](gemm-performance.md).
 
 The published int8 ConvRot checkpoints run with int8 weights and activations
 (W8A8). Loading concatenates Q/K/V/gate rows and interleaves MLP gate/up rows in
@@ -79,8 +77,9 @@ as a memory/performance change.
 
 ## Validation lessons
 
-- **Full trajectories matter.** Query32 attention passed block checks but lost
-  7.39 dB of image PSNR on the accepted fixture. It is kept in `experiments/`.
+- **Full trajectories matter.** An experimental accumulator repack passed block
+  checks but failed the image-quality gate. It is kept in `experiments/` and
+  is distinct from the production kernel that shares staging across query groups.
 - **Exercise the loader.** Kernel tests with manually packed weights cannot
   detect missing or inconsistent repacking in checkpoint loading.
 - **Repeat resident calls.** A softmax race appeared only after repeated VAE
@@ -89,7 +88,5 @@ as a memory/performance change.
   layout belongs to the weight; host and device session APIs share RoPE upload
   bookkeeping.
 
-See [attention](native-attention.md), [VAE measurements](vae-performance.md),
-[graph recording](graph-recording.md) and
-[contribution requirements](../CONTRIBUTING.md). Historical raw measurements
-remain under `docs/benchmarks/`; the chronological development log is in Git history.
+See [attention](native-attention.md), [graph recording](graph-recording.md)
+and [contribution requirements](../CONTRIBUTING.md).

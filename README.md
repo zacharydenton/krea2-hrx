@@ -16,15 +16,13 @@ GPU execution, memory management, and caching behind the native `krea2` CLI.
   W8A8 transformer GEMMs and fp16 attention.
 - **Local generation:** use existing model files or download them through the
   Hugging Face cache; generate PNGs from a prompt, seed, and image dimensions.
-- **Measured performance:** 27.30 s warm median for 1024×1024 Turbo at eight steps
-  on one idle 8060S. See [methodology and limitations](#performance-and-accuracy).
 
 This is an independent community implementation. Current kernels target the
 Radeon 8060S (gfx1151) in Strix Halo;
 other GPUs are unsupported. Model weights are separate downloads.
 
 [Quick start](#quick-start) · [Models](#models) · [Gallery](#gallery) ·
-[Performance](#performance-and-accuracy) · [Contributing](CONTRIBUTING.md)
+[Benchmarks](#benchmarks-and-accuracy) · [Contributing](CONTRIBUTING.md)
 
 ## Requirements
 
@@ -134,7 +132,7 @@ slower, so do not time them.
 
 ## Gallery
 
-Both images use Turbo at eight steps, about 28 s each on an idle 8060S. Seeds
+Both images use Turbo at eight steps. Seeds
 are repeatable within this backend; output can change with kernel or runtime
 revisions.
 
@@ -194,25 +192,20 @@ Elixir application wraps `krea2::pipeline::Pipeline` with Rustler, which needs n
 C boundary, no generated headers and no error-buffer protocol. See the
 [runtime and deployment guide](docs/hrx-runtime.md) for lifetimes and threading.
 
-## Performance and accuracy
+## Benchmarks and accuracy
 
-Local measurements on one idle Radeon 8060S, 2026-09-08: 1024×1024 Turbo,
-eight Euler steps, batch one, prompt `a red fox in the snow`.
+Run the Criterion benches on gfx1151:
 
-| Warm median | ComfyUI INT8 ConvRot | krea2-hrx W8A8 |
-| --- | ---: | ---: |
-| Generation | 36.31 s | 27.30 s |
-| VAE decode | 0.652 s | 0.586 s |
+```sh
+cargo bench --bench kernels
+cargo bench --bench generation -- generation/1024x1024
+```
 
-These small local samples are not hardware-wide guarantees. Timer boundaries,
-precision and initial noise differ between backends; speed measurements do not
-establish image equivalence. See [the comparison](docs/comfyui-performance.md)
-and [VAE measurements](docs/vae-performance.md) for methodology and limitations.
-
-Attention is fp16, which had the best measured trajectory agreement; the
-int4/int8 QK modes it replaced gave at most 3% for 2–3 dB, see the
-[attention documentation](docs/native-attention.md). Native seeds are repeatable within this backend; use identical
-initial latents for comparisons with Torch.
+Generation requires cached model weights. See [benchmark setup](CONTRIBUTING.md#benchmarks)
+for timing boundaries and requirements. Results stay outside version control.
+Attention uses fp16 products with fp32 softmax; the [parity gate](docs/testing.md)
+checks complete trajectories against the unquantized BF16 model. Use identical
+initial latents for comparisons with other backends.
 
 ## Development
 
@@ -223,8 +216,6 @@ Report bugs and feature requests through [GitHub Issues](https://github.com/zach
 - [Architecture and numerical contracts](docs/notes.md)
 - [Runtime, caches and deployment](docs/hrx-runtime.md)
 - [Attention kernels](docs/native-attention.md)
-- [VAE performance](docs/vae-performance.md)
-- [ComfyUI comparison](docs/comfyui-performance.md)
 
 ## License
 

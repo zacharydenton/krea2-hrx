@@ -8,9 +8,9 @@
 //! the device between blocks, in bf16, as ComfyUI keeps it.
 //!
 //! That chain is identical every forward, so it is recorded once as a graph and
-//! replayed. Measurements have not established an end-to-end speedup. See
+//! replayed. See
 //! [graph recording](https://github.com/zacharydenton/krea2-hrx/blob/master/docs/graph-recording.md)
-//! for the benchmark scope and replay constraints.
+//! for profiling and replay constraints.
 
 pub mod bundle;
 mod v_transpose;
@@ -973,16 +973,16 @@ mod tests {
     }
 
     /// Compare two independent two-block prefixes with a serial recording.
-    /// Inputs are initialized, reset before every sample, and outputs checked.
+    /// Inputs are initialized, reset before every replay, and outputs checked.
     #[test]
-    #[ignore = "requires Krea checkpoint and gfx1151; a benchmark, not a speed assertion"]
-    fn two_independent_block_prefixes_are_priced_against_a_chain() {
+    #[ignore = "requires Krea checkpoint and gfx1151"]
+    fn independent_block_prefixes_match_a_chain() {
         for tokens in [275usize, 1043, 4115] {
-            overlap_probe(tokens);
+            check_independent_prefixes(tokens);
         }
     }
 
-    fn overlap_probe(tokens: usize) {
+    fn check_independent_prefixes(tokens: usize) {
         let (checkpoint, _) = fixture();
         let mut stream = Stream::open().unwrap();
         let (file, plan) = Session::validate(&checkpoint, tokens, 2).unwrap();
@@ -1021,8 +1021,7 @@ mod tests {
             recording.graph.finish().unwrap()
         };
         let mut graphs = [record(false), record(true)];
-        let mut samples = [Vec::new(), Vec::new()];
-        for round in 0..12 {
+        for round in 0..3 {
             for arm in if round % 2 == 0 { [0, 1] } else { [1, 0] } {
                 for (session, initial) in [&first, &second].into_iter().zip(&starts) {
                     stream
@@ -1033,12 +1032,8 @@ mod tests {
                         .unwrap();
                 }
                 stream.synchronize().unwrap();
-                let began = std::time::Instant::now();
                 stream.launch(&mut graphs[arm]).unwrap();
                 stream.synchronize().unwrap();
-                if round >= 3 {
-                    samples[arm].push(began.elapsed().as_secs_f64() * 1e3);
-                }
                 for (session, expected) in [&first, &second].into_iter().zip(&expected) {
                     let mut actual = vec![0u16; expected.len()];
                     stream
@@ -1051,13 +1046,6 @@ mod tests {
                 }
             }
         }
-        for arm in &mut samples {
-            arm.sort_by(f64::total_cmp);
-        }
-        eprintln!(
-            "{tokens} tokens, two sessions with two blocks each: serial {:.3} ms, independent {:.3} ms",
-            samples[0][4], samples[1][4]
-        );
     }
 
     fn fixture() -> (std::path::PathBuf, usize) {

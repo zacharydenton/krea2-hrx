@@ -2,7 +2,7 @@
 //! then compare a changed build against them; recording never overwrites.
 use anyhow::{Context, Result, ensure};
 use krea2::pipeline::{Files, Pipeline, Request};
-use std::{io::Write, path::Path, time::Instant};
+use std::{io::Write, path::Path};
 
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
@@ -34,7 +34,6 @@ fn main() -> Result<()> {
         );
         Ok(())
     };
-    let start = Instant::now();
     let files = Files::of(Path::new("krea2_turbo_int8_convrot")).offline(true).resolve()?;
     let residency = hrx::residency::ResidencyManager::new(64 << 30)?;
     let context = hrx::inference::ModelContext::new(hrx::execution::RuntimeOptions {
@@ -42,7 +41,6 @@ fn main() -> Result<()> {
         ..Default::default()
     })?;
     let pipeline = Pipeline::open_in(files, &context, None)?;
-    eprintln!("opened pipeline in {:.3}s", start.elapsed().as_secs_f64());
     for (i, (width, height, tokens)) in
         [(64, 64, 3), (128, 64, 3), (64, 128, 3), (64, 64, 5), (64, 64, 3)]
             .into_iter()
@@ -53,14 +51,12 @@ fn main() -> Result<()> {
         let latents = (0..(width / 16) * (height / 16) * 64)
             .map(|i| ((i % 61) as f32 - 30.) / 31.)
             .collect::<Vec<_>>();
-        let start = Instant::now();
         let velocity = pipeline.transformer(&text, tokens, &latents, width, height, 0.75)?;
         ensure!(velocity.iter().all(|v| v.is_finite()), "nonfinite velocity");
         check(
             &format!("transformer-{i}-{width}x{height}-t{tokens}.f32"),
             bytemuck::cast_slice(&velocity),
         )?;
-        eprintln!("transformer case {i}: {:.3}s", start.elapsed().as_secs_f64());
     }
     let mut request = Request::new("a red ceramic cup on a wooden table");
     request.width = 64;
