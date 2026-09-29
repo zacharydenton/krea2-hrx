@@ -68,9 +68,8 @@ impl MemoryEstimate {
                 )?)
                 .ok_or_else(|| Error::invalid("checkpoint size overflow"))?;
         }
-        // Upload staging is bounded to 64 MiB by HRX, not the size of the file.
-        // The existing 2 GiB scratch allowance covers staging, conversion and
-        // the small final-projection transpose; dense dX never transposes weights.
+        // Upload staging is bounded by HRX, not the size of the file. Host
+        // conversion/checkpoint buffers are covered by the separate RAM reserve.
         let parameters: usize =
             c.targets.layers().iter().map(|(_, o, i)| (o + i) * c.rank).sum();
         let adapters = parameters * 18;
@@ -100,8 +99,15 @@ impl MemoryEstimate {
             // Layerwise towers have twelve rows per conditioning token.
             activations += text_tokens * 12 * 2560 * 2 * 96 + tokens * 6144 * 2 * 16;
         }
-        let scratch =
-            tokens * (6144 * 24 + 16384 * 10) * 2 + (2usize << 30) + (c.scratch_pool_mib << 20);
+        // Temporary activations/gradients and the small final projection's
+        // transpose are covered by the shape-dependent workspace below. The
+        // old 2 GiB allowance for dense weight transposes is no longer needed:
+        // dX consumes row-major weights directly. Bound cached + in-flight HRX
+        // staging (2 * 64 MiB), plus 128 MiB for dispatch/code/graph storage.
+        let runtime_overhead = 256usize << 20;
+        let scratch = tokens * (6144 * 24 + 16384 * 10) * 2
+            + runtime_overhead
+            + (c.scratch_pool_mib << 20);
         let total = frozen + adapters + activations + scratch;
         Ok(Self { frozen, adapters, activations, scratch, total })
     }
