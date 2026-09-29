@@ -9,6 +9,130 @@ use krea2::{
 };
 use std::{hint::black_box, path::Path, time::Duration};
 
+fn dense(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/dense");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (m, n, k) in [
+        (1043usize, 6144usize, 6144usize),
+        (1043, 16384, 6144),
+        (1043, 6144, 16384),
+        (4115, 6144, 16384),
+    ] {
+        for (name, tile_m, tile_n) in [
+            ("gemm_bf16_bf16_nt", 64usize, 64usize),
+            ("gemm_bf16_bf16_nt_wide", 128, 64),
+            ("train_gemm", 128, 64),
+            ("train_gemm_nn", 128, 64),
+        ] {
+            let mut prepared = None;
+            let label = format!("{name}/{m}x{n}x{k}");
+            group.bench_function(&label, |b| {
+                let (stream, kernel, constants, a, w, out, grid) =
+                    prepared.get_or_insert_with(|| {
+                        let mut stream = Stream::open().unwrap();
+                        let ops = Ops::new(BufferPool::new());
+                        let a = tensor(&ops, &mut stream, m, k);
+                        let w = tensor(&ops, &mut stream, n, k);
+                        let out = ops.tensor(&stream, m, n).unwrap();
+                        let grid = [n.div_ceil(tile_n) as u32, m.div_ceil(tile_m) as u32, 1];
+                        let mut request =
+                            hrx::loom::Specialization::new(format!("krea2_{name}"));
+                        for (key, value) in [
+                            ("m", m),
+                            ("n", n),
+                            ("k", k),
+                            ("asize", m * k),
+                            ("bsize", n * k),
+                            ("csize", m * n),
+                            ("astride", m * k),
+                            ("bstride", n * k),
+                            ("grid_x", grid[0] as usize),
+                            ("grid_y", grid[1] as usize),
+                        ] {
+                            request
+                                .set_config(format!("krea2.{name}.{key}"), value.to_string());
+                        }
+                        let reports = std::env::var_os("KREA2_BENCH_REPORT_DIR");
+                        if reports.is_some() {
+                            request.set_report(hrx::loom::ReportMode::Details);
+                        }
+                        let compiler = krea2::kernels::compiler(None).unwrap();
+                        let artifact = compiler
+                            .module(krea2::kernels::sources::auxiliary(name).unwrap())
+                            .compile(&request)
+                            .unwrap();
+                        // SAFETY: this benchmark uses each kernel's declared matrix layout and tile geometry.
+                        let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
+                        let constants = krea2::kernels::Scalars::new()
+                            .index(m)
+                            .float(1.0)
+                            .pack(name, &kernel)
+                            .unwrap();
+                        if let Some(directory) = reports {
+                            let directory = std::path::PathBuf::from(directory);
+                            std::fs::create_dir_all(&directory).unwrap();
+                            let stem = label.replace('/', "-");
+                            std::fs::write(
+                                directory.join(format!("{stem}-compiler.json")),
+                                artifact.report().unwrap().json().to_string(),
+                            )
+                            .unwrap();
+                            let mut graph = stream.graph().unwrap();
+                            // SAFETY: resident matrices have the configured extents; the graph writes only out.
+                            unsafe {
+                                graph
+                                    .dispatch(
+                                        &[],
+                                        &kernel,
+                                        grid,
+                                        [256, 1, 1],
+                                        &constants,
+                                        &[
+                                            a.binding().unwrap(),
+                                            w.binding().unwrap(),
+                                            out.binding().unwrap(),
+                                        ],
+                                    )
+                                    .unwrap();
+                            }
+                            let mut graph =
+                                graph.finish_profiled(std::slice::from_ref(&label)).unwrap();
+                            for sample in 0..4 {
+                                let profile = stream.launch_profiled(&mut graph).unwrap();
+                                std::fs::write(
+                                    directory.join(format!("{stem}-gpu-{sample}.json")),
+                                    serde_json::to_vec(&profile).unwrap(),
+                                )
+                                .unwrap();
+                            }
+                        }
+                        (stream, kernel, constants, a, w, out, grid)
+                    });
+                b.iter(|| {
+                    // SAFETY: bindings and constants are the same validated resident matrices as above.
+                    unsafe {
+                        stream
+                            .dispatch(
+                                kernel,
+                                *grid,
+                                [256, 1, 1],
+                                constants,
+                                &[
+                                    a.binding().unwrap(),
+                                    w.binding().unwrap(),
+                                    out.binding().unwrap(),
+                                ],
+                            )
+                            .unwrap();
+                    }
+                    stream.synchronize().unwrap();
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
 fn tensor(ops: &Ops, stream: &mut Stream, rows: usize, cols: usize) -> Tensor {
     let values = (0..rows * cols)
         .map(|i| from_f32(((i % 113) as f32 - 56.0) * 0.01))
@@ -92,28 +216,40 @@ fn attention(c: &mut Criterion) {
 fn frozen_backward(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/frozen_backward");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
-    for (tokens, inputs, outputs) in
-        [(1043, 6144, 6144), (4115, 16384, 6144), (4115, 6144, 16384)]
-    {
-        let mut prepared = None;
-        group.bench_function(format!("{tokens}x{inputs}x{outputs}"), |b| {
-            let (mut stream, ops, gradient, weight) = prepared.take().unwrap_or_else(|| {
-                let mut stream = Stream::open().unwrap();
-                let ops = Ops::new(BufferPool::new());
-                let gradient = tensor(&ops, &mut stream, tokens, outputs);
-                let weight = tensor(&ops, &mut stream, outputs, inputs);
-                (stream, ops, gradient, weight)
+    for (tokens, inputs, outputs) in [
+        (1043, 6144, 6144),
+        (1043, 16384, 6144),
+        (1043, 6144, 16384),
+        (4115, 16384, 6144),
+        (4115, 6144, 16384),
+    ] {
+        for direct in [false, true] {
+            let mut prepared = None;
+            let method = if direct { "direct" } else { "transpose" };
+            group.bench_function(format!("{method}/{tokens}x{inputs}x{outputs}"), |b| {
+                let (mut stream, ops, gradient, weight) =
+                    prepared.take().unwrap_or_else(|| {
+                        let mut stream = Stream::open().unwrap();
+                        let ops = Ops::new(BufferPool::new());
+                        let gradient = tensor(&ops, &mut stream, tokens, outputs);
+                        let weight = tensor(&ops, &mut stream, outputs, inputs);
+                        (stream, ops, gradient, weight)
+                    });
+                let mut run = || {
+                    let dx = if direct {
+                        train::matmul_nn(&ops, &stream, &gradient, &weight, 1.0).unwrap()
+                    } else {
+                        let transpose = train::transpose(&ops, &stream, &weight).unwrap();
+                        train::matmul(&ops, &stream, &gradient, &transpose, 1.0).unwrap()
+                    };
+                    stream.synchronize().unwrap();
+                    black_box(dx);
+                };
+                run();
+                b.iter(run);
+                prepared = Some((stream, ops, gradient, weight));
             });
-            let mut run = || {
-                let transpose = train::transpose(&ops, &stream, &weight).unwrap();
-                let dx = train::matmul(&ops, &stream, &gradient, &transpose, 1.0).unwrap();
-                stream.synchronize().unwrap();
-                black_box(dx);
-            };
-            run();
-            b.iter(run);
-            prepared = Some((stream, ops, gradient, weight));
-        });
+        }
     }
     group.finish();
 }
@@ -180,5 +316,5 @@ fn full_step(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, projections, attention, frozen_backward, adamw, full_step);
+criterion_group!(benches, dense, projections, attention, frozen_backward, adamw, full_step);
 criterion_main!(benches);

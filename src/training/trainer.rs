@@ -41,7 +41,7 @@ pub struct MemoryEstimate {
     pub frozen: usize,
     /// FP32 masters, gradients and two moments, plus BF16 factors.
     pub adapters: usize,
-    /// Saved residual input at every block boundary.
+    /// Saved block boundaries or complete activation tapes.
     pub activations: usize,
     /// Recomputed block, transpose buffers, temporary gradients and pool headroom.
     pub scratch: usize,
@@ -70,8 +70,16 @@ impl MemoryEstimate {
             let text = f.get("conditioning")?.shape[0];
             tokens = tokens.max(sample.width / 16 * (sample.height / 16) + text);
         }
-        let activations = 29 * tokens * 6144 * 2;
-        let scratch = tokens * (6144 * 24 + 16384 * 10) * 2 + (4usize << 30);
+        let activations = if c.gradient_checkpointing {
+            29 * tokens * 6144 * 2
+        } else {
+            // Every BlockTape field, including FP32 attention output and LSE.
+            // The boundary vector aliases these tensors, allocating no storage.
+            // Adjacent blocks' shared input/output is still counted twice here.
+            28 * tokens * (137728 * 2 + 6144 * 4 + 48 * 4)
+        };
+        let scratch =
+            tokens * (6144 * 24 + 16384 * 10) * 2 + (2usize << 30) + (c.scratch_pool_mib << 20);
         let total = frozen + adapters + activations + scratch;
         Ok(Self { frozen, adapters, activations, scratch, total })
     }
@@ -175,7 +183,11 @@ impl Trainer {
             }
             None => Adapter::initialize(config.rank, config.alpha, config.seed)?,
         };
-        let models = Models::load_parts(&mut stream, &config.model, None, None, None, None)?;
+        let mut models =
+            Models::load_parts(&mut stream, &config.model, None, None, None, None)?;
+        models.ops = crate::ops::Ops::new(std::sync::Arc::new(hrx::BufferPool::with_limit(
+            config.scratch_pool_mib << 20,
+        )));
         let model = Transformer::load(&models.ops, &mut stream, &config.model, Some(&adapter))?;
         drop(adapter);
         if let Some((path, _)) = &resume {
@@ -253,6 +265,7 @@ impl Trainer {
             self.state.cursor += 1;
         }
         let next = self.state.step + 1;
+        let optimizer_started = Instant::now();
         let norm = optimizer::update(
             &self.models.ops,
             &mut self.stream,
@@ -261,6 +274,12 @@ impl Trainer {
             next,
         )?;
         self.stream.synchronize()?;
+        if crate::kernels::native_profile() {
+            eprintln!(
+                "training stage optimizer: {:.3} ms",
+                optimizer_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         self.state.step = next;
         self.state.rng_word = self.rng.get_word_pos().to_string();
         self.failed = false;
@@ -325,6 +344,9 @@ impl Trainer {
         let cos = FloatTensor::from_slice(stream, tokens, 128, &cos)?;
         let sin = FloatTensor::from_slice(stream, tokens, 128, &sin)?;
         let mut boundaries = vec![initial];
+        let mut tapes = Vec::with_capacity(28);
+        let profile = crate::kernels::native_profile();
+        let forward_started = Instant::now();
         for block in 0..28 {
             let m = mods.view(6, 6144, block * 6 * 6144)?;
             let tape = self.model.block(
@@ -337,10 +359,19 @@ impl Trainer {
                 &sin,
                 1.0,
             )?;
-            boundaries.push(tape.output);
+            boundaries.push(tape.output.clone());
+            if !self.config.gradient_checkpointing {
+                tapes.push(Some(tape));
+            }
             // Limit pending buffer ownership to one block. Dropping a host tensor
             // does not release storage still referenced by queued dispatches.
             stream.synchronize()?;
+        }
+        if profile {
+            eprintln!(
+                "training stage forward: {:.3} ms",
+                forward_started.elapsed().as_secs_f64() * 1000.0
+            );
         }
         let last = boundaries.last().expect("output").view(image.rows(), 6144, text.size())?;
         let prediction = self.models.last(stream, &last, &embedding)?;
@@ -353,13 +384,33 @@ impl Trainer {
             grad.binding()?.slice(text.size() * 2, image.size() * 2)?,
             image_grad.binding()?,
         )?;
+        let mut recompute_ms = 0.0;
+        let mut backward_ms = 0.0;
         for block in (0..28).rev() {
             boundaries.pop();
             let input = boundaries.last().expect("saved block input");
             let m = mods.view(6, 6144, block * 6 * 6144)?;
-            let tape = self.model.block(ops, stream, block, input, &m, &cos, &sin, 1.0)?;
+            let started = Instant::now();
+            let tape = if self.config.gradient_checkpointing {
+                self.model.block(ops, stream, block, input, &m, &cos, &sin, 1.0)?
+            } else {
+                tapes[block].take().expect("saved block tape")
+            };
+            if profile {
+                stream.synchronize()?;
+                recompute_ms += started.elapsed().as_secs_f64() * 1000.0;
+            }
+            let started = Instant::now();
             grad = self.model.backward(ops, stream, block, tape, &m, &cos, &sin, &grad)?;
             stream.synchronize()?;
+            if profile {
+                backward_ms += started.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+        if profile {
+            eprintln!(
+                "training stage recompute: {recompute_ms:.3} ms; backward: {backward_ms:.3} ms"
+            );
         }
         Ok(loss)
     }

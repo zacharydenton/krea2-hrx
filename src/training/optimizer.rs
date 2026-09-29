@@ -23,10 +23,11 @@ pub fn update(
     }
     let parameters: Vec<&Parameter> =
         model.adapters.values().flat_map(|p| [&p.a, &p.b]).collect();
-    let mut partials = Vec::with_capacity(parameters.len());
+    let parts_total = parameters.iter().map(|p| p.grad.size().div_ceil(1024)).sum();
+    let partials = FloatTensor::scratch(ops, stream, 1, parts_total)?;
+    let mut offset = 0;
     for p in &parameters {
         let parts = p.grad.size().div_ceil(1024);
-        let out = FloatTensor::zero(stream, 1, parts)?;
         // SAFETY: each wave reduces at most 1024 input floats and writes one partial.
         unsafe {
             ops.launch(
@@ -34,24 +35,22 @@ pub fn update(
                 "train_grad_norm",
                 crate::ops::config(&[("parts", parts)]),
                 &Scalars::new().index(p.grad.size()),
-                &[p.grad.binding(), out.binding()],
+                &[p.grad.binding(), partials.binding().slice(offset * 4, parts * 4)?],
                 parts,
                 1,
                 32,
             )?;
         }
-        partials.push(out);
+        offset += parts;
     }
     let mut sum = 0.0f64;
-    for partial in partials {
-        for value in partial.download(stream)? {
-            if !value.is_finite() || value < 0.0 {
-                return Err(Error::invalid(
-                    "nonfinite adapter gradient; optimizer update cancelled",
-                ));
-            }
-            sum += f64::from(value);
+    for value in partials.download(stream)? {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::invalid(
+                "nonfinite adapter gradient; optimizer update cancelled",
+            ));
         }
+        sum += f64::from(value);
     }
     let norm = sum.sqrt() / config.accumulation as f64;
     let clip = if norm > f64::from(config.max_grad_norm) {

@@ -1,7 +1,7 @@
 //! Device operations used by the model-specific reverse pass.
 use std::sync::Arc;
 
-use hrx::{Buffer, Stream, View};
+use hrx::{Buffer, PooledBuffer, Stream, View};
 
 use crate::kernels::Scalars;
 use crate::ops::{Ops, Tensor, config};
@@ -12,7 +12,12 @@ use crate::{Error, Result};
 pub struct FloatTensor {
     rows: usize,
     cols: usize,
-    buffer: Arc<Buffer>,
+    buffer: Arc<FloatStorage>,
+}
+
+enum FloatStorage {
+    Owned(Buffer),
+    Pooled(PooledBuffer),
 }
 
 impl FloatTensor {
@@ -33,9 +38,28 @@ impl FloatTensor {
             .and_then(|n| n.checked_mul(4))
             .filter(|n| *n > 0 && *n <= 4 * 1073741824usize)
             .ok_or_else(|| Error::invalid("FP32 tensor dimensions"))?;
-        let buffer = Arc::new(stream.allocate(bytes)?);
+        let buffer = stream.allocate(bytes)?;
         stream.fill(buffer.binding(), 0)?;
-        Ok(Self { rows, cols, buffer })
+        Ok(Self { rows, cols, buffer: Arc::new(FloatStorage::Owned(buffer)) })
+    }
+
+    /// Uninitialized scratch: callers must write every logical element before reading.
+    pub(crate) fn scratch(
+        ops: &Ops,
+        stream: &Stream,
+        rows: usize,
+        cols: usize,
+    ) -> Result<Self> {
+        let bytes = rows
+            .checked_mul(cols)
+            .and_then(|n| n.checked_mul(4))
+            .filter(|n| *n > 0 && *n <= 4 * 1073741824usize)
+            .ok_or_else(|| Error::invalid("FP32 tensor dimensions"))?;
+        Ok(Self {
+            rows,
+            cols,
+            buffer: Arc::new(FloatStorage::Pooled(ops.pool().acquire(stream, bytes)?)),
+        })
     }
 
     /// Upload row-major FP32 values.
@@ -55,7 +79,12 @@ impl FloatTensor {
 
     /// The checked allocation view.
     pub fn binding(&self) -> View<'_> {
-        self.buffer.binding()
+        let buffer = match &*self.buffer {
+            FloatStorage::Owned(buffer) => buffer,
+            FloatStorage::Pooled(buffer) => buffer.buffer(),
+        };
+        // The pool can return excess capacity; consumers see only the logical matrix.
+        buffer.try_slice(0, self.size() * 4).expect("validated FP32 storage")
     }
 
     /// Number of elements.
@@ -88,6 +117,32 @@ pub fn matmul(
         return Err(Error::invalid("training GEMM dimensions"));
     }
     let out = ops.tensor(stream, a.rows(), b.rows())?;
+    if a.rows() >= 512 && b.rows().is_multiple_of(64) && a.cols().is_multiple_of(64) {
+        // SAFETY: this kernel permits a ragged M, with full 64-column N/K tiles.
+        // Both operands are contiguous row-major BF16 matrices; the output is M x N.
+        unsafe {
+            ops.launch(
+                stream,
+                "train_gemm",
+                config(&[
+                    ("m", a.rows()),
+                    ("n", b.rows()),
+                    ("k", a.cols()),
+                    ("asize", a.size()),
+                    ("bsize", b.size()),
+                    ("csize", out.size()),
+                    ("astride", a.size()),
+                    ("bstride", b.size()),
+                ]),
+                &Scalars::new().index(a.rows()).float(alpha),
+                &[a.binding()?, b.binding()?, out.binding()?],
+                b.rows() / 64,
+                a.rows().div_ceil(128),
+                256,
+            )?;
+        }
+        return Ok(out);
+    }
     ops.matmul(
         stream,
         "gemm_bf16_bf16_nt",
@@ -104,6 +159,61 @@ pub fn matmul(
     Ok(out)
 }
 
+/// BF16 matrix product with an ordinary row-major right operand.
+/// The frozen-weight reverse pass uses this to avoid transposing the whole model.
+pub fn matmul_nn(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    alpha: f32,
+) -> Result<Tensor> {
+    if a.cols() != b.rows() || !alpha.is_finite() {
+        return Err(Error::invalid("training NN GEMM dimensions"));
+    }
+    let (m, n, k) = (a.rows(), b.cols(), a.cols());
+    let out = ops.tensor(stream, m, n)?;
+    if m >= 512 && n.is_multiple_of(64) && k.is_multiple_of(64) {
+        // SAFETY: the matrices are M x K, K x N and M x N; N/K have full 64-wide tiles.
+        unsafe {
+            ops.launch(
+                stream,
+                "train_gemm_nn",
+                config(&[
+                    ("m", m),
+                    ("n", n),
+                    ("k", k),
+                    ("asize", a.size()),
+                    ("bsize", b.size()),
+                    ("csize", out.size()),
+                    ("astride", a.size()),
+                    ("bstride", b.size()),
+                ]),
+                &Scalars::new().index(m).float(alpha),
+                &[a.binding()?, b.binding()?, out.binding()?],
+                n / 64,
+                m.div_ceil(128),
+                256,
+            )?;
+        }
+    } else {
+        ops.matmul(
+            stream,
+            "gemm_bf16_bf16_nn",
+            a.binding()?,
+            b.binding()?,
+            out.binding()?,
+            m,
+            n,
+            k,
+            1,
+            alpha,
+            None,
+        )?;
+    }
+    Ok(out)
+}
+
 /// FP32 result for an adapter parameter gradient.
 pub fn matmul_float(
     ops: &Ops,
@@ -115,7 +225,7 @@ pub fn matmul_float(
     if a.cols() != b.cols() || !alpha.is_finite() {
         return Err(Error::invalid("gradient GEMM dimensions"));
     }
-    let out = FloatTensor::zero(stream, a.rows(), b.rows())?;
+    let out = FloatTensor::scratch(ops, stream, a.rows(), b.rows())?;
     ops.matmul(
         stream,
         "gemm_bf16_f32_nt",
@@ -143,7 +253,7 @@ pub fn flow_loss(
         return Err(Error::invalid("flow loss dimensions"));
     }
     let parts = prediction.size().div_ceil(1024);
-    let partials = FloatTensor::zero(stream, 1, parts)?;
+    let partials = FloatTensor::scratch(ops, stream, 1, parts)?;
     let gradient = ops.tensor(stream, prediction.rows(), prediction.cols())?;
     // SAFETY: each wave owns at most 1024 elements and one FP32 partial; both inputs
     // and the gradient have the checked matrix shape.
@@ -422,8 +532,8 @@ pub fn attention(
         return Err(Error::invalid("training attention dimensions"));
     }
     let output = ops.tensor(stream, q.rows(), q.cols())?;
-    let exact = FloatTensor::zero(stream, q.rows(), q.cols())?;
-    let lse = FloatTensor::zero(stream, q.rows(), heads)?;
+    let exact = FloatTensor::scratch(ops, stream, q.rows(), q.cols())?;
+    let lse = FloatTensor::scratch(ops, stream, q.rows(), heads)?;
     // SAFETY: dimensions above match the configured GQA layout; a wave owns one query/head.
     unsafe {
         ops.launch(
@@ -472,7 +582,7 @@ pub fn attention_backward(
     {
         return Err(Error::invalid("attention backward dimensions"));
     }
-    let delta = FloatTensor::zero(stream, q.rows(), heads)?;
+    let delta = FloatTensor::scratch(ops, stream, q.rows(), heads)?;
     let dq = ops.tensor(stream, q.rows(), q.cols())?;
     let dk = ops.tensor(stream, k.rows(), k.cols())?;
     let dv = ops.tensor(stream, v.rows(), v.cols())?;

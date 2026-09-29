@@ -12,8 +12,8 @@ rotary gradients, grouped attention and original-basis adapters on ConvRot
 projections. A two-update RAW run with prepared 1024-area inputs passed exact
 checkpoint/resume equivalence, and its exported adapter loaded into native Turbo
 inference. These checks do not establish character quality or full-model reference
-parity. Attention currently uses a streaming
-correctness implementation; its speed has not been measured. Adapter-enabled
+parity. Attention currently uses a streaming implementation with FP32
+softmax and gradient reductions. Adapter-enabled
 INT8 inference also uses separate projections and has not been performance tuned.
 
 ## Configuration
@@ -87,14 +87,35 @@ Training freezes the base model and text encoder. Each of the 28 main transforme
 blocks has adapters on `attn.wq`, `attn.wk`, `attn.wv`, `attn.gate`, `attn.wo`,
 `mlp.gate`, `mlp.up` and `mlp.down`. Factors execute in BF16 with FP32 master
 weights, parameter gradients and optimizer moments. Intermediate activation
-gradients use BF16. Block inputs are retained and each block is recomputed during
-backpropagation. Each block completes before advancing, bounding temporary
-storage retained by queued dispatches. Grouped-query attention stores linear-sized
-statistics and computes gradients without floating-point atomics.
+gradients use BF16. By default, block inputs are retained and each block is
+recomputed during backpropagation. Set `gradient_checkpointing` to `false` to
+retain block activations and skip recomputation when the memory estimate fits
+your budget. `scratch_pool_mib` controls the free device storage retained for
+reuse (default 2048 MiB, maximum 16384 MiB). A larger pool can avoid repeatedly
+allocating activation tapes when checkpointing is disabled; its full capacity
+is included in the allocation estimate. Each block completes before advancing,
+bounding temporary storage retained by queued dispatches. Grouped-query attention
+retains linear-sized statistics and computes gradients without floating-point
+atomics.
 
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
+
+Use `KREA2_NATIVE_PROFILE=1` for synchronized forward, recomputation, backward,
+and optimizer stage timings. For individual dense kernels, the runnable Criterion
+bench exports detailed Loom compiler reports and HRX GPU-clock intervals when
+`KREA2_BENCH_REPORT_DIR` points outside the checkout:
+
+```sh
+KREA2_BENCH_REPORT_DIR=~/.local/state/krea2-hrx/training-reports \
+  cargo bench --locked --bench training -- 'training/dense/.*1043'
+```
+
+GPU-clock probes run during benchmark setup. Criterion measures ordinary,
+uninstrumented dispatches afterward; profiling markers serialize execution and
+must not be treated as end-to-end timing. Realistic token counts include text
+tokens, so the benches cover ragged shapes such as 1043 and 4115.
 
 Caches bind image bytes, captions, buckets, model contents, tokenizer,
 preprocessing source, dependency lockfile and compiler identity. Changed data or

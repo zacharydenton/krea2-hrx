@@ -1,0 +1,454 @@
+// Dense training GEMM: 128x64 output tile, 64-wide K staging, BF16 operands and FP32 accumulation.
+// Right operand is row-major K x N; transpose each 64x64 tile inside LDS.
+// Eight waves each own a 32x32 tile. Only M may be ragged; N and K are multiples of 64.
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_gemm_nn.m : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.n : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.k : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.asize : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.bsize : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.csize : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.astride : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.bstride : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_nn.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@target) export("krea2_train_gemm_nn") @krea2_train_gemm_nn(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 256 : index
+ %grid_x = config.get @krea2.train_gemm_nn.grid_x : index
+ %grid_y = config.get @krea2.train_gemm_nn.grid_y : index
+ kernel.launch.config workgroups(%grid_x, %grid_y, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %alpha: f32, %a: buffer, %b: buffer, %out: buffer) {
+ %c0 = index.constant 0 : index
+ %c1 = index.constant 1 : index
+ %c2 = index.constant 2 : index
+ %c4 = index.constant 4 : index
+ %c8 = index.constant 8 : index
+ %c16 = index.constant 16 : index
+ %c32 = index.constant 32 : index
+ %c48 = index.constant 48 : index
+ %c64 = index.constant 64 : index
+ %c72 = index.constant 72 : index
+ %c96 = index.constant 96 : index
+ %c128 = index.constant 128 : index
+ %c256 = index.constant 256 : index
+ %m = config.get @krea2.train_gemm_nn.m : index
+ %n = config.get @krea2.train_gemm_nn.n : index
+ %k = config.get @krea2.train_gemm_nn.k : index
+ %asize = config.get @krea2.train_gemm_nn.asize : index
+ %bsize = config.get @krea2.train_gemm_nn.bsize : index
+ %csize = config.get @krea2.train_gemm_nn.csize : index
+ %astride = config.get @krea2.train_gemm_nn.astride : index
+ %bstride = config.get @krea2.train_gemm_nn.bstride : index
+
+ %zero_offset = index.constant 0 : offset
+ %bytes = index.constant 27648 : offset
+ %boff = index.constant 18432 : offset
+ %rbytes = index.constant 1024 : offset
+ %tid = kernel.workitem.id<x> : index
+ %wave = kernel.subgroup.id : index
+ %lane = kernel.subgroup.lane.id : index
+ %gx = kernel.workgroup.id<x> : index
+ %gy = kernel.workgroup.id<y> : index
+ %mtiles0 = index.add %m, %c128 : index
+ %mtiles1 = index.sub %mtiles0, %c1 : index
+ %mtiles = index.div %mtiles1, %c128 : index
+ %batch = index.div %gy, %mtiles : index
+ // Raster four row tiles together to reuse each frozen-weight tile.
+ %linear_m = index.rem %gy, %mtiles : index
+ %ntiles = index.div %n, %c64 : index
+ %flat0 = index.mul %linear_m, %ntiles : index
+ %flat = index.add %flat0, %gx : index
+ %group_size = index.mul %ntiles, %c4 : index
+ %group_id = index.div %flat, %group_size : index
+ %first_m = index.mul %group_id, %c4 : index
+ %remaining_m = index.sub %mtiles, %first_m : index
+ %short_group = index.cmp ult, %remaining_m, %c4 : index
+ %group_rows0 = scf.select %short_group, %remaining_m, %c4 : index
+ %group_rows = index.assume %group_rows0 [range(%group_rows0, 1, 4)] : index
+ %position = index.rem %flat, %group_size : index
+ %group_three = index.constant 3 : index
+ %is_one = index.cmp eq, %group_rows, %c1 : index
+ %is_two = index.cmp eq, %group_rows, %c2 : index
+ %is_three = index.cmp eq, %group_rows, %group_three : index
+ %q2 = index.div %position, %c2 : index
+ %q3 = index.div %position, %group_three : index
+ %q4 = index.div %position, %c4 : index
+ %q34 = scf.select %is_three, %q3, %q4 : index
+ %q234 = scf.select %is_two, %q2, %q34 : index
+ %ntile0 = scf.select %is_one, %position, %q234 : index
+ %ntile = index.assume %ntile0 [range(%ntile0, 0, 1073741824), lt(%ntile0, %ntiles)] : index
+ %col_offset = index.mul %ntile, %group_rows : index
+ %local_m0 = index.sub %position, %col_offset : index
+ %local_m = index.assume %local_m0 [range(%local_m0, 0, 3)] : index
+ %mtile0 = index.add %first_m, %local_m : index
+ %mtile = index.assume %mtile0 [range(%mtile0, 0, 1073741824), lt(%mtile0, %mtiles)] : index
+ %mbase = index.mul %mtile, %c128 : index
+ %nbase = index.mul %ntile, %c64 : index
+ %abatch = index.mul %batch, %astride : index
+ %bbatch = index.mul %batch, %bstride : index
+ %cm0 = index.mul %batch, %m : index
+ %cbatch = index.mul %cm0, %n : index
+ %wm = index.div %wave, %c2 : index
+ %wn = index.rem %wave, %c2 : index
+ %wr0 = index.mul %wm, %c32 : index
+ %wc0 = index.mul %wn, %c32 : index
+ %wr1 = index.add %wr0, %c16 : index
+ %wc1 = index.add %wc0, %c16 : index
+ %lrow = index.rem %lane, %c16 : index
+ %ar0 = index.add %wr0, %lrow : index
+ %ar1 = index.add %wr1, %lrow : index
+ %br0 = index.add %wc0, %lrow : index
+ %br1 = index.add %wc1, %lrow : index
+ %strow = index.div %tid, %c8 : index
+ %stc0 = index.rem %tid, %c8 : index
+ %stcol = index.mul %stc0, %c8 : index
+ %ag = buffer.assume.memory_space<global> %a : buffer
+ %av = buffer.view %ag[%zero_offset] : buffer -> view<[%asize]xbf16>
+ %bg = buffer.assume.memory_space<global> %b : buffer
+ %bv = buffer.view %bg[%zero_offset] : buffer -> view<[%bsize]xbf16>
+ %og = buffer.assume.memory_space<global> %out : buffer
+ %ov = buffer.view %og[%zero_offset] : buffer -> view<[%csize]xbf16>
+ %lds = buffer.alloca<workgroup> align(16) %bytes : buffer
+ %aa = buffer.view %lds[%zero_offset] : buffer -> view<128x72xbf16>
+ %bb = buffer.view %lds[%boff] : buffer -> view<64x72xbf16>
+ %roff = index.scale %wave, %rbytes : index, offset -> offset
+ %rv = buffer.view %lds[%roff] : buffer -> view<16x16xf32>
+ %z = vector.constant 0.0 : vector<8xf32>
+ %init = vector.fragment<init> %z shape [%c16, %c16] : vector<8xf32>
+ %o00, %o01, %o10, %o11 = scf.for %kk = [%c0 to %k step %c64](%r00 = %init, %r01 = %init, %r10 = %init, %r11 = %init : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+ %kc = index.add %kk, %stcol : index
+ %a0row = index.add %strow, %c0 : index
+ %a0global = index.add %mbase, %a0row : index
+ %a0ok = index.cmp ult, %a0global, %m : index
+ %a0safe = scf.select %a0ok, %a0global, %c0 : index
+ %a0off0 = index.mul %a0safe, %k : index
+ %a0off1 = index.add %a0off0, %kc : index
+ %a0off2 = index.add %a0off1, %abatch : index
+ %a0limit = index.sub %asize, %c8 : index
+ %a0off = index.assume %a0off2 [range(%a0off2, 0, 1073741823), le(%a0off2, %a0limit), mul(%a0off2, 8)] : index
+ %a0data = vector.load %av[%a0off] : view<[%asize]xbf16> -> vector<8xbf16>
+ vector.store %a0data, %aa[%a0row, %stcol] : vector<8xbf16>, view<128x72xbf16>
+ %a32row = index.add %strow, %c32 : index
+ %a32global = index.add %mbase, %a32row : index
+ %a32ok = index.cmp ult, %a32global, %m : index
+ %a32safe = scf.select %a32ok, %a32global, %c0 : index
+ %a32off0 = index.mul %a32safe, %k : index
+ %a32off1 = index.add %a32off0, %kc : index
+ %a32off2 = index.add %a32off1, %abatch : index
+ %a32limit = index.sub %asize, %c8 : index
+ %a32off = index.assume %a32off2 [range(%a32off2, 0, 1073741823), le(%a32off2, %a32limit), mul(%a32off2, 8)] : index
+ %a32data = vector.load %av[%a32off] : view<[%asize]xbf16> -> vector<8xbf16>
+ vector.store %a32data, %aa[%a32row, %stcol] : vector<8xbf16>, view<128x72xbf16>
+ %a64row = index.add %strow, %c64 : index
+ %a64global = index.add %mbase, %a64row : index
+ %a64ok = index.cmp ult, %a64global, %m : index
+ %a64safe = scf.select %a64ok, %a64global, %c0 : index
+ %a64off0 = index.mul %a64safe, %k : index
+ %a64off1 = index.add %a64off0, %kc : index
+ %a64off2 = index.add %a64off1, %abatch : index
+ %a64limit = index.sub %asize, %c8 : index
+ %a64off = index.assume %a64off2 [range(%a64off2, 0, 1073741823), le(%a64off2, %a64limit), mul(%a64off2, 8)] : index
+ %a64data = vector.load %av[%a64off] : view<[%asize]xbf16> -> vector<8xbf16>
+ vector.store %a64data, %aa[%a64row, %stcol] : vector<8xbf16>, view<128x72xbf16>
+ %a96row = index.add %strow, %c96 : index
+ %a96global = index.add %mbase, %a96row : index
+ %a96ok = index.cmp ult, %a96global, %m : index
+ %a96safe = scf.select %a96ok, %a96global, %c0 : index
+ %a96off0 = index.mul %a96safe, %k : index
+ %a96off1 = index.add %a96off0, %kc : index
+ %a96off2 = index.add %a96off1, %abatch : index
+ %a96limit = index.sub %asize, %c8 : index
+ %a96off = index.assume %a96off2 [range(%a96off2, 0, 1073741823), le(%a96off2, %a96limit), mul(%a96off2, 8)] : index
+ %a96data = vector.load %av[%a96off] : view<[%asize]xbf16> -> vector<8xbf16>
+ vector.store %a96data, %aa[%a96row, %stcol] : vector<8xbf16>, view<128x72xbf16>
+ %b0row = index.add %strow, %c0 : index
+ %b0global = index.add %kk, %b0row : index
+ %b0col = index.add %nbase, %stcol : index
+ %b0off0 = index.mul %b0global, %n : index
+ %b0off1 = index.add %b0off0, %b0col : index
+ %b0off2 = index.add %b0off1, %bbatch : index
+ %b0limit = index.sub %bsize, %c8 : index
+ %b0off = index.assume %b0off2 [range(%b0off2, 0, 1073741823), le(%b0off2, %b0limit), mul(%b0off2, 8)] : index
+ %b0data = vector.load %bv[%b0off] : view<[%bsize]xbf16> -> vector<8xbf16>
+ %b0c0 = index.constant 0 : index
+ %b0n0 = index.add %stcol, %b0c0 : index
+ %b0v0 = vector.extract %b0data[0] : vector<8xbf16> -> bf16
+ view.store %b0v0, %bb[%b0n0, %b0row] : bf16, view<64x72xbf16>
+%b0c1 = index.constant 1 : index
+ %b0n1 = index.add %stcol, %b0c1 : index
+ %b0v1 = vector.extract %b0data[1] : vector<8xbf16> -> bf16
+ view.store %b0v1, %bb[%b0n1, %b0row] : bf16, view<64x72xbf16>
+%b0c2 = index.constant 2 : index
+ %b0n2 = index.add %stcol, %b0c2 : index
+ %b0v2 = vector.extract %b0data[2] : vector<8xbf16> -> bf16
+ view.store %b0v2, %bb[%b0n2, %b0row] : bf16, view<64x72xbf16>
+%b0c3 = index.constant 3 : index
+ %b0n3 = index.add %stcol, %b0c3 : index
+ %b0v3 = vector.extract %b0data[3] : vector<8xbf16> -> bf16
+ view.store %b0v3, %bb[%b0n3, %b0row] : bf16, view<64x72xbf16>
+%b0c4 = index.constant 4 : index
+ %b0n4 = index.add %stcol, %b0c4 : index
+ %b0v4 = vector.extract %b0data[4] : vector<8xbf16> -> bf16
+ view.store %b0v4, %bb[%b0n4, %b0row] : bf16, view<64x72xbf16>
+%b0c5 = index.constant 5 : index
+ %b0n5 = index.add %stcol, %b0c5 : index
+ %b0v5 = vector.extract %b0data[5] : vector<8xbf16> -> bf16
+ view.store %b0v5, %bb[%b0n5, %b0row] : bf16, view<64x72xbf16>
+%b0c6 = index.constant 6 : index
+ %b0n6 = index.add %stcol, %b0c6 : index
+ %b0v6 = vector.extract %b0data[6] : vector<8xbf16> -> bf16
+ view.store %b0v6, %bb[%b0n6, %b0row] : bf16, view<64x72xbf16>
+%b0c7 = index.constant 7 : index
+ %b0n7 = index.add %stcol, %b0c7 : index
+ %b0v7 = vector.extract %b0data[7] : vector<8xbf16> -> bf16
+ view.store %b0v7, %bb[%b0n7, %b0row] : bf16, view<64x72xbf16>
+
+ %b32row = index.add %strow, %c32 : index
+ %b32global = index.add %kk, %b32row : index
+ %b32col = index.add %nbase, %stcol : index
+ %b32off0 = index.mul %b32global, %n : index
+ %b32off1 = index.add %b32off0, %b32col : index
+ %b32off2 = index.add %b32off1, %bbatch : index
+ %b32limit = index.sub %bsize, %c8 : index
+ %b32off = index.assume %b32off2 [range(%b32off2, 0, 1073741823), le(%b32off2, %b32limit), mul(%b32off2, 8)] : index
+ %b32data = vector.load %bv[%b32off] : view<[%bsize]xbf16> -> vector<8xbf16>
+ %b32c0 = index.constant 0 : index
+ %b32n0 = index.add %stcol, %b32c0 : index
+ %b32v0 = vector.extract %b32data[0] : vector<8xbf16> -> bf16
+ view.store %b32v0, %bb[%b32n0, %b32row] : bf16, view<64x72xbf16>
+%b32c1 = index.constant 1 : index
+ %b32n1 = index.add %stcol, %b32c1 : index
+ %b32v1 = vector.extract %b32data[1] : vector<8xbf16> -> bf16
+ view.store %b32v1, %bb[%b32n1, %b32row] : bf16, view<64x72xbf16>
+%b32c2 = index.constant 2 : index
+ %b32n2 = index.add %stcol, %b32c2 : index
+ %b32v2 = vector.extract %b32data[2] : vector<8xbf16> -> bf16
+ view.store %b32v2, %bb[%b32n2, %b32row] : bf16, view<64x72xbf16>
+%b32c3 = index.constant 3 : index
+ %b32n3 = index.add %stcol, %b32c3 : index
+ %b32v3 = vector.extract %b32data[3] : vector<8xbf16> -> bf16
+ view.store %b32v3, %bb[%b32n3, %b32row] : bf16, view<64x72xbf16>
+%b32c4 = index.constant 4 : index
+ %b32n4 = index.add %stcol, %b32c4 : index
+ %b32v4 = vector.extract %b32data[4] : vector<8xbf16> -> bf16
+ view.store %b32v4, %bb[%b32n4, %b32row] : bf16, view<64x72xbf16>
+%b32c5 = index.constant 5 : index
+ %b32n5 = index.add %stcol, %b32c5 : index
+ %b32v5 = vector.extract %b32data[5] : vector<8xbf16> -> bf16
+ view.store %b32v5, %bb[%b32n5, %b32row] : bf16, view<64x72xbf16>
+%b32c6 = index.constant 6 : index
+ %b32n6 = index.add %stcol, %b32c6 : index
+ %b32v6 = vector.extract %b32data[6] : vector<8xbf16> -> bf16
+ view.store %b32v6, %bb[%b32n6, %b32row] : bf16, view<64x72xbf16>
+%b32c7 = index.constant 7 : index
+ %b32n7 = index.add %stcol, %b32c7 : index
+ %b32v7 = vector.extract %b32data[7] : vector<8xbf16> -> bf16
+ view.store %b32v7, %bb[%b32n7, %b32row] : bf16, view<64x72xbf16>
+
+ kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+ %a0d0 = vector.load %aa[%ar0, %c0] : view<128x72xbf16> -> vector<16xbf16>
+ %a0f0 = vector.fragment<lhs> %a0d0 shape [%c16, %c16] : vector<16xbf16>
+ %a1d0 = vector.load %aa[%ar1, %c0] : view<128x72xbf16> -> vector<16xbf16>
+ %a1f0 = vector.fragment<lhs> %a1d0 shape [%c16, %c16] : vector<16xbf16>
+ %b0d0 = vector.load %bb[%br0, %c0] : view<64x72xbf16> -> vector<16xbf16>
+ %b0f0 = vector.fragment<rhs> %b0d0 shape [%c16, %c16] : vector<16xbf16>
+ %b1d0 = vector.load %bb[%br1, %c0] : view<64x72xbf16> -> vector<16xbf16>
+ %b1f0 = vector.fragment<rhs> %b1d0 shape [%c16, %c16] : vector<16xbf16>
+ %acc00_0 = vector.mma %a0f0, %b0f0, %r00 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc01_0 = vector.mma %a0f0, %b1f0, %r01 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc10_0 = vector.mma %a1f0, %b0f0, %r10 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc11_0 = vector.mma %a1f0, %b1f0, %r11 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %a0d1 = vector.load %aa[%ar0, %c16] : view<128x72xbf16> -> vector<16xbf16>
+ %a0f1 = vector.fragment<lhs> %a0d1 shape [%c16, %c16] : vector<16xbf16>
+ %a1d1 = vector.load %aa[%ar1, %c16] : view<128x72xbf16> -> vector<16xbf16>
+ %a1f1 = vector.fragment<lhs> %a1d1 shape [%c16, %c16] : vector<16xbf16>
+ %b0d1 = vector.load %bb[%br0, %c16] : view<64x72xbf16> -> vector<16xbf16>
+ %b0f1 = vector.fragment<rhs> %b0d1 shape [%c16, %c16] : vector<16xbf16>
+ %b1d1 = vector.load %bb[%br1, %c16] : view<64x72xbf16> -> vector<16xbf16>
+ %b1f1 = vector.fragment<rhs> %b1d1 shape [%c16, %c16] : vector<16xbf16>
+ %acc00_1 = vector.mma %a0f1, %b0f1, %acc00_0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc01_1 = vector.mma %a0f1, %b1f1, %acc01_0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc10_1 = vector.mma %a1f1, %b0f1, %acc10_0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc11_1 = vector.mma %a1f1, %b1f1, %acc11_0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %a0d2 = vector.load %aa[%ar0, %c32] : view<128x72xbf16> -> vector<16xbf16>
+ %a0f2 = vector.fragment<lhs> %a0d2 shape [%c16, %c16] : vector<16xbf16>
+ %a1d2 = vector.load %aa[%ar1, %c32] : view<128x72xbf16> -> vector<16xbf16>
+ %a1f2 = vector.fragment<lhs> %a1d2 shape [%c16, %c16] : vector<16xbf16>
+ %b0d2 = vector.load %bb[%br0, %c32] : view<64x72xbf16> -> vector<16xbf16>
+ %b0f2 = vector.fragment<rhs> %b0d2 shape [%c16, %c16] : vector<16xbf16>
+ %b1d2 = vector.load %bb[%br1, %c32] : view<64x72xbf16> -> vector<16xbf16>
+ %b1f2 = vector.fragment<rhs> %b1d2 shape [%c16, %c16] : vector<16xbf16>
+ %acc00_2 = vector.mma %a0f2, %b0f2, %acc00_1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc01_2 = vector.mma %a0f2, %b1f2, %acc01_1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc10_2 = vector.mma %a1f2, %b0f2, %acc10_1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc11_2 = vector.mma %a1f2, %b1f2, %acc11_1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %a0d3 = vector.load %aa[%ar0, %c48] : view<128x72xbf16> -> vector<16xbf16>
+ %a0f3 = vector.fragment<lhs> %a0d3 shape [%c16, %c16] : vector<16xbf16>
+ %a1d3 = vector.load %aa[%ar1, %c48] : view<128x72xbf16> -> vector<16xbf16>
+ %a1f3 = vector.fragment<lhs> %a1d3 shape [%c16, %c16] : vector<16xbf16>
+ %b0d3 = vector.load %bb[%br0, %c48] : view<64x72xbf16> -> vector<16xbf16>
+ %b0f3 = vector.fragment<rhs> %b0d3 shape [%c16, %c16] : vector<16xbf16>
+ %b1d3 = vector.load %bb[%br1, %c48] : view<64x72xbf16> -> vector<16xbf16>
+ %b1f3 = vector.fragment<rhs> %b1d3 shape [%c16, %c16] : vector<16xbf16>
+ %acc00_3 = vector.mma %a0f3, %b0f3, %acc00_2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc01_3 = vector.mma %a0f3, %b1f3, %acc01_2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc10_3 = vector.mma %a1f3, %b0f3, %acc10_2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %acc11_3 = vector.mma %a1f3, %b1f3, %acc11_2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+ scf.yield %acc00_3, %acc01_3, %acc10_3, %acc11_3 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+ }
+ %pr = index.div %lane, %c4 : index
+ %pc0 = index.rem %lane, %c4 : index
+ %pc = index.mul %pc0, %c4 : index
+ %alphav = vector.splat %alpha : vector<4xf32>
+ vector.fragment.store<result> %o00, %rv[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p00_0lr = index.add %pr, %c0 : index
+ %p00_0r0 = index.add %wr0, %p00_0lr : index
+ %p00_0r = index.add %mbase, %p00_0r0 : index
+ %p00_0ok = index.cmp ult, %p00_0r, %m : index
+ scf.if %p00_0ok {
+ %p00_0c0 = index.add %wc0, %pc : index
+ %p00_0c = index.add %nbase, %p00_0c0 : index
+ %p00_0v = vector.load %rv[%p00_0lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p00_0scaled = vector.mulf %p00_0v, %alphav : vector<4xf32>
+ %p00_0bf = vector.fptrunc %p00_0scaled : vector<4xf32> to vector<4xbf16>
+ %p00_0off0 = index.mul %p00_0r, %n : index
+ %p00_0off1 = index.add %p00_0off0, %p00_0c : index
+ %p00_0off2 = index.add %p00_0off1, %cbatch : index
+ %p00_0limit = index.sub %csize, %c4 : index
+ %p00_0off = index.assume %p00_0off2 [range(%p00_0off2, 0, 1073741823), le(%p00_0off2, %p00_0limit), mul(%p00_0off2, 4)] : index
+ vector.store %p00_0bf, %ov[%p00_0off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ %p00_8lr = index.add %pr, %c8 : index
+ %p00_8r0 = index.add %wr0, %p00_8lr : index
+ %p00_8r = index.add %mbase, %p00_8r0 : index
+ %p00_8ok = index.cmp ult, %p00_8r, %m : index
+ scf.if %p00_8ok {
+ %p00_8c0 = index.add %wc0, %pc : index
+ %p00_8c = index.add %nbase, %p00_8c0 : index
+ %p00_8v = vector.load %rv[%p00_8lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p00_8scaled = vector.mulf %p00_8v, %alphav : vector<4xf32>
+ %p00_8bf = vector.fptrunc %p00_8scaled : vector<4xf32> to vector<4xbf16>
+ %p00_8off0 = index.mul %p00_8r, %n : index
+ %p00_8off1 = index.add %p00_8off0, %p00_8c : index
+ %p00_8off2 = index.add %p00_8off1, %cbatch : index
+ %p00_8limit = index.sub %csize, %c4 : index
+ %p00_8off = index.assume %p00_8off2 [range(%p00_8off2, 0, 1073741823), le(%p00_8off2, %p00_8limit), mul(%p00_8off2, 4)] : index
+ vector.store %p00_8bf, %ov[%p00_8off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ vector.fragment.store<result> %o01, %rv[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p01_0lr = index.add %pr, %c0 : index
+ %p01_0r0 = index.add %wr0, %p01_0lr : index
+ %p01_0r = index.add %mbase, %p01_0r0 : index
+ %p01_0ok = index.cmp ult, %p01_0r, %m : index
+ scf.if %p01_0ok {
+ %p01_0c0 = index.add %wc1, %pc : index
+ %p01_0c = index.add %nbase, %p01_0c0 : index
+ %p01_0v = vector.load %rv[%p01_0lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p01_0scaled = vector.mulf %p01_0v, %alphav : vector<4xf32>
+ %p01_0bf = vector.fptrunc %p01_0scaled : vector<4xf32> to vector<4xbf16>
+ %p01_0off0 = index.mul %p01_0r, %n : index
+ %p01_0off1 = index.add %p01_0off0, %p01_0c : index
+ %p01_0off2 = index.add %p01_0off1, %cbatch : index
+ %p01_0limit = index.sub %csize, %c4 : index
+ %p01_0off = index.assume %p01_0off2 [range(%p01_0off2, 0, 1073741823), le(%p01_0off2, %p01_0limit), mul(%p01_0off2, 4)] : index
+ vector.store %p01_0bf, %ov[%p01_0off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ %p01_8lr = index.add %pr, %c8 : index
+ %p01_8r0 = index.add %wr0, %p01_8lr : index
+ %p01_8r = index.add %mbase, %p01_8r0 : index
+ %p01_8ok = index.cmp ult, %p01_8r, %m : index
+ scf.if %p01_8ok {
+ %p01_8c0 = index.add %wc1, %pc : index
+ %p01_8c = index.add %nbase, %p01_8c0 : index
+ %p01_8v = vector.load %rv[%p01_8lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p01_8scaled = vector.mulf %p01_8v, %alphav : vector<4xf32>
+ %p01_8bf = vector.fptrunc %p01_8scaled : vector<4xf32> to vector<4xbf16>
+ %p01_8off0 = index.mul %p01_8r, %n : index
+ %p01_8off1 = index.add %p01_8off0, %p01_8c : index
+ %p01_8off2 = index.add %p01_8off1, %cbatch : index
+ %p01_8limit = index.sub %csize, %c4 : index
+ %p01_8off = index.assume %p01_8off2 [range(%p01_8off2, 0, 1073741823), le(%p01_8off2, %p01_8limit), mul(%p01_8off2, 4)] : index
+ vector.store %p01_8bf, %ov[%p01_8off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ vector.fragment.store<result> %o10, %rv[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p10_0lr = index.add %pr, %c0 : index
+ %p10_0r0 = index.add %wr1, %p10_0lr : index
+ %p10_0r = index.add %mbase, %p10_0r0 : index
+ %p10_0ok = index.cmp ult, %p10_0r, %m : index
+ scf.if %p10_0ok {
+ %p10_0c0 = index.add %wc0, %pc : index
+ %p10_0c = index.add %nbase, %p10_0c0 : index
+ %p10_0v = vector.load %rv[%p10_0lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p10_0scaled = vector.mulf %p10_0v, %alphav : vector<4xf32>
+ %p10_0bf = vector.fptrunc %p10_0scaled : vector<4xf32> to vector<4xbf16>
+ %p10_0off0 = index.mul %p10_0r, %n : index
+ %p10_0off1 = index.add %p10_0off0, %p10_0c : index
+ %p10_0off2 = index.add %p10_0off1, %cbatch : index
+ %p10_0limit = index.sub %csize, %c4 : index
+ %p10_0off = index.assume %p10_0off2 [range(%p10_0off2, 0, 1073741823), le(%p10_0off2, %p10_0limit), mul(%p10_0off2, 4)] : index
+ vector.store %p10_0bf, %ov[%p10_0off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ %p10_8lr = index.add %pr, %c8 : index
+ %p10_8r0 = index.add %wr1, %p10_8lr : index
+ %p10_8r = index.add %mbase, %p10_8r0 : index
+ %p10_8ok = index.cmp ult, %p10_8r, %m : index
+ scf.if %p10_8ok {
+ %p10_8c0 = index.add %wc0, %pc : index
+ %p10_8c = index.add %nbase, %p10_8c0 : index
+ %p10_8v = vector.load %rv[%p10_8lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p10_8scaled = vector.mulf %p10_8v, %alphav : vector<4xf32>
+ %p10_8bf = vector.fptrunc %p10_8scaled : vector<4xf32> to vector<4xbf16>
+ %p10_8off0 = index.mul %p10_8r, %n : index
+ %p10_8off1 = index.add %p10_8off0, %p10_8c : index
+ %p10_8off2 = index.add %p10_8off1, %cbatch : index
+ %p10_8limit = index.sub %csize, %c4 : index
+ %p10_8off = index.assume %p10_8off2 [range(%p10_8off2, 0, 1073741823), le(%p10_8off2, %p10_8limit), mul(%p10_8off2, 4)] : index
+ vector.store %p10_8bf, %ov[%p10_8off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ vector.fragment.store<result> %o11, %rv[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p11_0lr = index.add %pr, %c0 : index
+ %p11_0r0 = index.add %wr1, %p11_0lr : index
+ %p11_0r = index.add %mbase, %p11_0r0 : index
+ %p11_0ok = index.cmp ult, %p11_0r, %m : index
+ scf.if %p11_0ok {
+ %p11_0c0 = index.add %wc1, %pc : index
+ %p11_0c = index.add %nbase, %p11_0c0 : index
+ %p11_0v = vector.load %rv[%p11_0lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p11_0scaled = vector.mulf %p11_0v, %alphav : vector<4xf32>
+ %p11_0bf = vector.fptrunc %p11_0scaled : vector<4xf32> to vector<4xbf16>
+ %p11_0off0 = index.mul %p11_0r, %n : index
+ %p11_0off1 = index.add %p11_0off0, %p11_0c : index
+ %p11_0off2 = index.add %p11_0off1, %cbatch : index
+ %p11_0limit = index.sub %csize, %c4 : index
+ %p11_0off = index.assume %p11_0off2 [range(%p11_0off2, 0, 1073741823), le(%p11_0off2, %p11_0limit), mul(%p11_0off2, 4)] : index
+ vector.store %p11_0bf, %ov[%p11_0off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ %p11_8lr = index.add %pr, %c8 : index
+ %p11_8r0 = index.add %wr1, %p11_8lr : index
+ %p11_8r = index.add %mbase, %p11_8r0 : index
+ %p11_8ok = index.cmp ult, %p11_8r, %m : index
+ scf.if %p11_8ok {
+ %p11_8c0 = index.add %wc1, %pc : index
+ %p11_8c = index.add %nbase, %p11_8c0 : index
+ %p11_8v = vector.load %rv[%p11_8lr, %pc] : view<16x16xf32> -> vector<4xf32>
+ %p11_8scaled = vector.mulf %p11_8v, %alphav : vector<4xf32>
+ %p11_8bf = vector.fptrunc %p11_8scaled : vector<4xf32> to vector<4xbf16>
+ %p11_8off0 = index.mul %p11_8r, %n : index
+ %p11_8off1 = index.add %p11_8off0, %p11_8c : index
+ %p11_8off2 = index.add %p11_8off1, %cbatch : index
+ %p11_8limit = index.sub %csize, %c4 : index
+ %p11_8off = index.assume %p11_8off2 [range(%p11_8off2, 0, 1073741823), le(%p11_8off2, %p11_8limit), mul(%p11_8off2, 4)] : index
+ vector.store %p11_8bf, %ov[%p11_8off] : vector<4xbf16>, view<[%csize]xbf16>
+ }
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ kernel.return
+}

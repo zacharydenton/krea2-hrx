@@ -255,7 +255,16 @@ impl Transformer {
     ) -> Result<Tensor> {
         let base = match self.quantized.get(name) {
             Some(weight) => weight.forward(ops, stream, x)?,
-            None => ops.linear(stream, x, self.weight(name)?, None)?,
+            None => {
+                let weight = self.weight(name)?;
+                train::matmul(
+                    ops,
+                    stream,
+                    x,
+                    &weight.tensor(weight.shape[0], weight.shape[1])?,
+                    1.0,
+                )?
+            }
         };
         match self.adapters.get(name) {
             Some(adapter) if strength != 0.0 => {
@@ -274,8 +283,8 @@ impl Transformer {
         name: &str,
     ) -> Result<Tensor> {
         let w = self.weight(name)?;
-        let wt = train::transpose(ops, stream, &w.tensor(w.shape[0], w.shape[1])?)?;
-        let base_grad = train::matmul(ops, stream, grad, &wt, 1.0)?;
+        let base_grad =
+            train::matmul_nn(ops, stream, grad, &w.tensor(w.shape[0], w.shape[1])?, 1.0)?;
         match self.adapters.get(name) {
             Some(adapter) => adapter.backward(ops, stream, x, grad, &base_grad),
             None => Ok(base_grad),

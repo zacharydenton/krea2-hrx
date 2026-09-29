@@ -29,6 +29,9 @@ pub struct TrainConfig {
     pub steps: usize,
     /// Microbatches per optimizer update; physical batch size is one.
     pub accumulation: usize,
+    /// Recompute block activations during backward to reduce memory use.
+    /// Disable to retain tapes when the allocation budget permits it.
+    pub gradient_checkpointing: bool,
     /// Constant AdamW learning rate.
     pub learning_rate: f32,
     /// AdamW decay on adapter parameters only.
@@ -49,6 +52,8 @@ pub struct TrainConfig {
     pub seed: u64,
     /// Maximum planned GPU allocation in GiB.
     pub memory_gib: usize,
+    /// Maximum free device scratch retained between operations, in MiB.
+    pub scratch_pool_mib: usize,
     /// Prevent model downloads on a cache miss.
     pub offline: bool,
     /// Fixed prompts for Turbo checkpoint evaluation.
@@ -69,6 +74,7 @@ impl Default for TrainConfig {
             alpha: 32.0,
             steps: 1500,
             accumulation: 1,
+            gradient_checkpointing: true,
             learning_rate: 1e-4,
             weight_decay: 0.01,
             beta1: 0.9,
@@ -79,6 +85,7 @@ impl Default for TrainConfig {
             keep_checkpoints: 4,
             seed: 37,
             memory_gib: 96,
+            scratch_pool_mib: 2048,
             offline: false,
             validation_prompts: Vec::new(),
         }
@@ -126,6 +133,7 @@ impl TrainConfig {
             || self.keep_checkpoints == 0
             || self.memory_gib == 0
             || self.memory_gib > 128
+            || self.scratch_pool_mib > 16384
         {
             return Err(Error::invalid(
                 "invalid resolution, rank, step count, checkpoint interval or memory budget",

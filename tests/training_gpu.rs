@@ -45,6 +45,43 @@ fn close(got: &[f32], expected: &[f32], relative: f64, absolute: f64) {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (m, n, k) in [
+        (511, 64, 64),
+        (512, 64, 64),
+        (513, 128, 192),
+        (641, 192, 128),
+        (769, 192, 64),
+        (1043, 64, 128),
+        (4115, 64, 64),
+        (513, 65, 63),
+    ] {
+        let a = values(m * k, 3);
+        let b = values(n * k, 11);
+        let x = upload(&ops, &mut stream, m, k, &a);
+        let w = upload(&ops, &mut stream, n, k, &b);
+        let out = ops::matmul(&ops, &stream, &x, &w, -0.75).unwrap();
+        let mut expected = vec![0.0; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                expected[row * n + col] =
+                    (0..k).map(|j| a[row * k + j] * b[col * k + j]).sum::<f32>() * -0.75;
+            }
+        }
+        close(&read(&out, &mut stream), &expected, 0.004, 1e-6);
+        let wt = ops::transpose(&ops, &stream, &w).unwrap();
+        let nn = ops::matmul_nn(&ops, &stream, &x, &wt, -0.75).unwrap();
+        close(&read(&nn, &mut stream), &expected, 0.004, 1e-6);
+        if m >= 512 && n % 64 == 0 && k % 64 == 0 {
+            assert_eq!(out.download(&mut stream).unwrap(), nn.download(&mut stream).unwrap());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn float_cast_uses_logical_dimensions_with_extra_allocation_capacity() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
@@ -264,17 +301,22 @@ fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
 #[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
-    for (tokens, heads, kv) in [(1, 1, 1), (3, 3, 1), (9, 8, 2), (33, 4, 1)] {
-        check_attention(tokens, heads, kv);
+    for (tokens, heads, kv) in
+        [(1, 1, 1), (3, 3, 1), (9, 8, 2), (33, 4, 1), (128, 4, 1), (129, 8, 2)]
+    {
+        check_attention(tokens, heads, kv, 1.0);
+    }
+    for gain in [8.0, 32.0] {
+        check_attention(129, 8, 2, gain);
     }
 }
 
-fn check_attention(t: usize, heads: usize, kv: usize) {
+fn check_attention(t: usize, heads: usize, kv: usize, gain: f32) {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
     let d = 128;
-    let q = values(t * heads * d, 3);
-    let k = values(t * kv * d, 5);
+    let q: Vec<f32> = values(t * heads * d, 3).into_iter().map(|v| v * gain).collect();
+    let k: Vec<f32> = values(t * kv * d, 5).into_iter().map(|v| v * gain).collect();
     let v = values(t * kv * d, 7);
     let g = values(q.len(), 13);
     let qt = upload(&ops, &mut stream, t, heads * d, &q);
