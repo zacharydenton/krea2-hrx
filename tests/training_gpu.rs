@@ -297,6 +297,128 @@ fn lora_backward_and_adam_match_independent_dense_algebra() {
 
 #[test]
 #[ignore = "requires an idle gfx1151 GPU"]
+fn prepared_optimizer_matches_updates_and_rejects_nonfinite_gradients_atomically() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    let factors = [
+        Factors {
+            inputs: 19,
+            outputs: 11,
+            rank: 3,
+            alpha: 1.5,
+            a: values(57, 2),
+            b: values(33, 3),
+        },
+        Factors {
+            inputs: 65,
+            outputs: 33,
+            rank: 32,
+            alpha: 16.0,
+            a: values(2080, 5),
+            b: values(1056, 7),
+        },
+    ];
+    let direct: Vec<_> =
+        factors.iter().map(|f| Projection::new(&ops, &mut stream, f).unwrap()).collect();
+    let replay: Vec<_> =
+        factors.iter().map(|f| Projection::new(&ops, &mut stream, f).unwrap()).collect();
+    let dp: Vec<_> = direct.iter().flat_map(|p| [&p.a, &p.b]).collect();
+    let rp: Vec<_> = replay.iter().flat_map(|p| [&p.a, &p.b]).collect();
+    let mut prepared = optimizer::PreparedOptimizer::new(&stream, &rp).unwrap();
+    assert!(optimizer::PreparedOptimizer::new(&stream, &[]).is_err());
+    assert!(optimizer::PreparedOptimizer::new(&stream, &[rp[0], rp[0]]).is_err());
+    let mut config = TrainConfig::default();
+    for step in 1..=4 {
+        config.accumulation = if step % 2 == 0 { 3 } else { 1 };
+        config.max_grad_norm = if step % 2 == 0 { 0.05 } else { 100.0 };
+        config.learning_rate = 1e-4 * step as f32;
+        let mut norm_squared = 0.0f64;
+        for (index, (a, b)) in dp.iter().zip(&rp).enumerate() {
+            let g = values(a.grad.size(), index + step);
+            norm_squared += g.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>();
+            for p in [a, b] {
+                stream.upload(p.grad.binding(), bytemuck::cast_slice(&g)).unwrap();
+            }
+        }
+        let a = optimizer::update_parameters(&ops, &mut stream, &dp, &config, step).unwrap();
+        let b = prepared.update(&mut stream, &config, step).unwrap();
+        assert_eq!(a, b);
+        assert!((b - norm_squared.sqrt() / config.accumulation as f64).abs() < 1e-5);
+        for (a, b) in dp.iter().zip(&rp) {
+            for (x, y) in [
+                (&a.master, &b.master),
+                (&a.first, &b.first),
+                (&a.second, &b.second),
+                (&a.grad, &b.grad),
+            ] {
+                assert_eq!(x.download(&mut stream).unwrap(), y.download(&mut stream).unwrap());
+            }
+            assert_eq!(
+                a.value.download(&mut stream).unwrap(),
+                b.value.download(&mut stream).unwrap()
+            );
+            assert!(b.grad.download(&mut stream).unwrap().iter().all(|v| *v == 0.0));
+        }
+    }
+    // A late invalid gradient must not partially update earlier parameters.
+    for invalid in [f32::NAN, f32::INFINITY, f32::MAX] {
+        for (i, p) in rp.iter().enumerate() {
+            let mut g = values(p.grad.size(), i + 1);
+            if i == rp.len() - 1 {
+                *g.last_mut().unwrap() = invalid;
+            }
+            stream.upload(p.grad.binding(), bytemuck::cast_slice(&g)).unwrap();
+        }
+        let snapshot = |stream: &mut Stream| -> Vec<u32> {
+            rp.iter()
+                .flat_map(|p| {
+                    let mut bits = [&p.master, &p.first, &p.second, &p.grad]
+                        .into_iter()
+                        .flat_map(|t| t.download(stream).unwrap().into_iter().map(f32::to_bits))
+                        .collect::<Vec<_>>();
+                    bits.extend(p.value.download(stream).unwrap().into_iter().map(u32::from));
+                    bits
+                })
+                .collect()
+        };
+        let before = snapshot(&mut stream);
+        assert!(prepared.update(&mut stream, &config, 5).is_err());
+        assert_eq!(before, snapshot(&mut stream));
+    }
+    // A validation failure leaves the graph reusable after correcting gradients.
+    for p in dp.iter().chain(&rp) {
+        p.grad.clear(&stream).unwrap();
+    }
+    assert_eq!(optimizer::update_parameters(&ops, &mut stream, &dp, &config, 5).unwrap(), 0.0);
+    assert_eq!(prepared.update(&mut stream, &config, 5).unwrap(), 0.0);
+    for (a, b) in dp.iter().zip(&rp) {
+        assert_eq!(
+            a.master.download(&mut stream).unwrap(),
+            b.master.download(&mut stream).unwrap()
+        );
+    }
+    assert!(prepared.update(&mut stream, &config, 0).is_err());
+    config.accumulation = 0;
+    assert!(prepared.update(&mut stream, &config, 5).is_err());
+    // Reject aliases within a parameter, not only duplicate parameter references.
+    let mut aliased = Projection::new(&ops, &mut stream, &factors[0]).unwrap();
+    aliased.a.first = aliased.a.master.clone();
+    assert!(optimizer::PreparedOptimizer::new(&stream, &[&aliased.a]).is_err());
+
+    // Graph ownership must retain pooled leases as well as native allocations.
+    // Otherwise dropping the projection lets an unrelated tensor reuse its value.
+    let (mut orphan, gradient) = {
+        let p = Projection::new(&ops, &mut stream, &factors[0]).unwrap();
+        (optimizer::PreparedOptimizer::new(&stream, &[&p.a]).unwrap(), p.a.grad.clone())
+    };
+    let unrelated = upload(&ops, &mut stream, 3, 19, &vec![7.0; 57]);
+    gradient.clear(&stream).unwrap();
+    orphan.update(&mut stream, &TrainConfig::default(), 1).unwrap();
+    assert_eq!(read(&unrelated, &mut stream), vec![7.0; 57]);
+}
+
+#[test]
+#[ignore = "requires an idle gfx1151 GPU"]
 fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());

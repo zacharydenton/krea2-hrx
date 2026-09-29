@@ -107,6 +107,10 @@ bounding temporary storage retained by queued dispatches. Grouped-query attentio
 retains linear-sized statistics and computes gradients without floating-point
 atomics.
 
+Optimizer updates replay prepared HRX graphs for all parameter norms and AdamW
+operations. The complete global norm is read and checked before any parameter
+update; a nonfinite gradient cancels the update without changing optimizer state.
+
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
@@ -194,6 +198,7 @@ cargo bench --locked --bench training -- training/projection
 cargo bench --locked --bench training -- training/attention
 cargo bench --locked --bench training -- training/frozen_backward
 cargo bench --locked --bench training -- training/adamw
+cargo bench --locked --bench training -- training/optimizer
 KREA2_TRAIN_BENCH_CONFIG=~/training/character.json \
   cargo bench --locked --bench training -- training/prepared
 ```
@@ -203,3 +208,5 @@ keeps the model resident, advances temporary in-memory optimizer state, and
 excludes checkpoint serialization. It writes no training checkpoints. All
 benchmarks in this feature are runnable Criterion benches; measurements remain
 under the ignored Cargo target directory.
+The optimizer comparison uses all 448 rank-32 parameter tensors, including
+gradient norm readback and clipping, and needs roughly 2 GiB of device storage.

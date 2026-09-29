@@ -91,6 +91,7 @@ pub struct Trainer {
     data: PreparedDataset,
     models: Models,
     model: Transformer,
+    optimizer: optimizer::PreparedOptimizer,
     stream: Stream,
     state: State,
     rng: ChaCha8Rng,
@@ -216,6 +217,8 @@ impl Trainer {
                 }
             }
         }
+        let parameters: Vec<_> = model.adapters.values().flat_map(|p| [&p.a, &p.b]).collect();
+        let optimizer = optimizer::PreparedOptimizer::new(&stream, &parameters)?;
         let mut rng = ChaCha8Rng::seed_from_u64(config.seed ^ 0x1234_5678_abcd_ef01);
         rng.set_word_pos(state.rng_word.parse().map_err(io)?);
         let order = order(data.samples.len(), config.seed, state.epoch);
@@ -224,6 +227,7 @@ impl Trainer {
             data,
             models,
             model,
+            optimizer,
             stream,
             state,
             rng,
@@ -271,13 +275,7 @@ impl Trainer {
         }
         let next = self.state.step + 1;
         let optimizer_started = Instant::now();
-        let norm = optimizer::update(
-            &self.models.ops,
-            &mut self.stream,
-            &self.model,
-            &self.config,
-            next,
-        )?;
+        let norm = self.optimizer.update(&mut self.stream, &self.config, next)?;
         self.stream.synchronize()?;
         if crate::kernels::native_profile() {
             eprintln!(

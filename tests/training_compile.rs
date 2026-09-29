@@ -230,3 +230,35 @@ fn adapter_direct_gradients_compile_without_spills() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
+fn optimizer_kernels_compile_without_spills() {
+    let compiler = compiler(None).unwrap();
+    for name in ["train_grad_norm", "train_adamw", "train_adamw_graph"] {
+        for count in [57usize, 32 * 6144, 64 * 16384] {
+            let parts = count.div_ceil(1024);
+            let grid = if name == "train_grad_norm" { parts } else { count.div_ceil(256) };
+            let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+            for (key, value) in [("parts", parts), ("grid_x", grid), ("grid_y", 1)] {
+                request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+            }
+            request.set_report(hrx::loom::ReportMode::Details);
+            let artifact =
+                compiler.module(sources::auxiliary(name).unwrap()).compile(&request).unwrap();
+            assert!(
+                artifact.diagnostics().iter().all(|d| d.code != "BACKEND/009"),
+                "{name}/{count}: unexpected spill"
+            );
+            if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join(format!("{name}-{count}-compiler.json")),
+                    artifact.report().unwrap().json().to_string(),
+                )
+                .unwrap();
+            }
+        }
+    }
+}

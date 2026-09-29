@@ -340,6 +340,69 @@ fn adamw(c: &mut Criterion) {
     });
 }
 
+fn optimizer_update(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/optimizer");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for prepared_graph in [false, true] {
+        let mut prepared = None;
+        let name =
+            if prepared_graph { "graph_448_parameters" } else { "individual_448_parameters" };
+        group.bench_function(name, |b| {
+            let (mut stream, ops, projections, mut optimizer, mut reset, config) =
+                prepared.take().unwrap_or_else(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let projections: Vec<_> = (0..28)
+                        .flat_map(|_| krea2::lora::PROJECTIONS)
+                        .map(|(_, outputs, inputs)| {
+                            Projection::new(
+                                &ops,
+                                &mut stream,
+                                &Factors {
+                                    rank: 32,
+                                    inputs,
+                                    outputs,
+                                    alpha: 32.0,
+                                    a: vec![0.01; 32 * inputs],
+                                    b: vec![0.01; outputs * 32],
+                                },
+                            )
+                            .unwrap()
+                        })
+                        .collect();
+                    let parameters: Vec<_> =
+                        projections.iter().flat_map(|p| [&p.a, &p.b]).collect();
+                    let optimizer =
+                        optimizer::PreparedOptimizer::new(&stream, &parameters).unwrap();
+                    let mut reset = stream.graph().unwrap();
+                    for p in parameters {
+                        reset.fill(&[], p.grad.binding(), 0x38).unwrap();
+                    }
+                    let reset = reset.finish().unwrap();
+                    (stream, ops, projections, optimizer, reset, TrainConfig::default())
+                });
+            let parameters: Vec<_> = projections.iter().flat_map(|p| [&p.a, &p.b]).collect();
+            let mut step = 0;
+            let mut run = || {
+                step += 1;
+                stream.launch(&mut reset).unwrap();
+                let norm = if prepared_graph {
+                    optimizer.update(&mut stream, &config, step).unwrap()
+                } else {
+                    optimizer::update_parameters(&ops, &mut stream, &parameters, &config, step)
+                        .unwrap()
+                };
+                stream.synchronize().unwrap();
+                black_box(norm);
+            };
+            run();
+            b.iter(run);
+            prepared = Some((stream, ops, projections, optimizer, reset, config));
+        });
+    }
+    group.finish();
+}
+
 fn full_step(c: &mut Criterion) {
     let Some(path) = std::env::var_os("KREA2_TRAIN_BENCH_CONFIG") else { return };
     let mut trainer = None;
@@ -361,5 +424,14 @@ fn full_step(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, dense, projections, attention, frozen_backward, adamw, full_step);
+criterion_group!(
+    benches,
+    dense,
+    projections,
+    attention,
+    frozen_backward,
+    adamw,
+    optimizer_update,
+    full_step
+);
 criterion_main!(benches);
