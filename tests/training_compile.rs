@@ -150,6 +150,9 @@ fn training_dense_tiles_compile_without_spills() {
     for name in ["train_gemm", "train_gemm_nn"] {
         for (m, n, k) in [
             (513usize, 64usize, 192usize),
+            (513, 192, 64),
+            (1070, 64, 6144),
+            (1070, 6144, 1536),
             (1043, 6144, 6144),
             (1043, 16384, 6144),
             (1043, 6144, 16384),
