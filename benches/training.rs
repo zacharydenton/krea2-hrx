@@ -145,42 +145,83 @@ fn projections(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/projection");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
     for (tokens, inputs, outputs) in [(1024, 6144, 6144), (4096, 6144, 16384)] {
-        let mut prepared = None;
-        group.bench_function(format!("forward_backward/{tokens}x{inputs}x{outputs}"), |b| {
-            let (mut stream, ops, projection, x, grad, base, dx) =
-                prepared.take().unwrap_or_else(|| {
-                    let mut stream = Stream::open().unwrap();
-                    let ops = Ops::new(BufferPool::new());
-                    let rank = 32;
-                    let factors = Factors {
-                        rank,
-                        inputs,
-                        outputs,
-                        alpha: 32.0,
-                        a: vec![0.01; rank * inputs],
-                        b: vec![0.01; outputs * rank],
+        for transposed in [true, false] {
+            let mut prepared = None;
+            let pass =
+                if transposed { "forward_backward_transposed" } else { "forward_backward" };
+            group.bench_function(format!("{pass}/{tokens}x{inputs}x{outputs}"), |b| {
+                let (mut stream, ops, projection, x, grad, base, dx) =
+                    prepared.take().unwrap_or_else(|| {
+                        let mut stream = Stream::open().unwrap();
+                        let ops = Ops::new(BufferPool::new());
+                        let rank = 32;
+                        let factors = Factors {
+                            rank,
+                            inputs,
+                            outputs,
+                            alpha: 32.0,
+                            a: vec![0.01; rank * inputs],
+                            b: vec![0.01; outputs * rank],
+                        };
+                        let projection = Projection::new(&ops, &mut stream, &factors).unwrap();
+                        let x = tensor(&ops, &mut stream, tokens, inputs);
+                        let grad = tensor(&ops, &mut stream, tokens, outputs);
+                        let base = tensor(&ops, &mut stream, tokens, outputs);
+                        let dx = tensor(&ops, &mut stream, tokens, inputs);
+                        (stream, ops, projection, x, grad, base, dx)
+                    });
+                let mut run = || {
+                    projection.a.grad.clear(&stream).unwrap();
+                    projection.b.grad.clear(&stream).unwrap();
+                    let y = projection.forward(&ops, &stream, &x, &base, 1.0).unwrap();
+                    let g = if transposed {
+                        projection_backward_transposed(
+                            &projection,
+                            &ops,
+                            &stream,
+                            &x,
+                            &grad,
+                            &dx,
+                        )
+                    } else {
+                        projection.backward(&ops, &stream, &x, &grad, &dx).unwrap()
                     };
-                    let projection = Projection::new(&ops, &mut stream, &factors).unwrap();
-                    let x = tensor(&ops, &mut stream, tokens, inputs);
-                    let grad = tensor(&ops, &mut stream, tokens, outputs);
-                    let base = tensor(&ops, &mut stream, tokens, outputs);
-                    let dx = tensor(&ops, &mut stream, tokens, inputs);
-                    (stream, ops, projection, x, grad, base, dx)
-                });
-            let mut run = || {
-                projection.a.grad.clear(&stream).unwrap();
-                projection.b.grad.clear(&stream).unwrap();
-                let y = projection.forward(&ops, &stream, &x, &base, 1.0).unwrap();
-                let g = projection.backward(&ops, &stream, &x, &grad, &dx).unwrap();
-                stream.synchronize().unwrap();
-                black_box((y, g));
-            };
-            run();
-            b.iter(run);
-            prepared = Some((stream, ops, projection, x, grad, base, dx));
-        });
+                    stream.synchronize().unwrap();
+                    black_box((y, g));
+                };
+                run();
+                b.iter(run);
+                prepared = Some((stream, ops, projection, x, grad, base, dx));
+            });
+        }
     }
     group.finish();
+}
+
+// Retain the unfused algebra as a runnable baseline for projection optimizations.
+fn projection_backward_transposed(
+    projection: &Projection,
+    ops: &Ops,
+    stream: &Stream,
+    x: &Tensor,
+    grad: &Tensor,
+    base_grad: &Tensor,
+) -> Tensor {
+    let scale = projection.alpha / projection.a.master.rows() as f32;
+    let low = train::matmul(ops, stream, x, &projection.a.value, 1.0).unwrap();
+    let gt = train::transpose(ops, stream, grad).unwrap();
+    let lt = train::transpose(ops, stream, &low).unwrap();
+    let db = train::matmul_float(ops, stream, &gt, &lt, scale).unwrap();
+    train::accumulate(ops, stream, &projection.b.grad, &db).unwrap();
+    let bt = train::transpose(ops, stream, &projection.b.value).unwrap();
+    let dl = train::matmul(ops, stream, grad, &bt, scale).unwrap();
+    let dlt = train::transpose(ops, stream, &dl).unwrap();
+    let xt = train::transpose(ops, stream, x).unwrap();
+    let da = train::matmul_float(ops, stream, &dlt, &xt, 1.0).unwrap();
+    train::accumulate(ops, stream, &projection.a.grad, &da).unwrap();
+    let at = train::transpose(ops, stream, &projection.a.value).unwrap();
+    let dx = train::matmul(ops, stream, &dl, &at, 1.0).unwrap();
+    train::add_scaled(ops, stream, base_grad, &dx, 1.0).unwrap()
 }
 
 fn attention(c: &mut Criterion) {

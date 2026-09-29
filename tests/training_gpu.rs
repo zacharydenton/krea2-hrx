@@ -82,6 +82,36 @@ fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn adapter_gradient_accumulation_matches_cpu_across_ragged_tiles() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (k, m, n) in
+        [(1, 1, 1), (7, 3, 19), (31, 33, 65), (33, 65, 32), (1070, 32, 64), (4115, 64, 32)]
+    {
+        let a = values(k * m, 5);
+        let b = values(k * n, 11);
+        let av = upload(&ops, &mut stream, k, m, &a);
+        let bv = upload(&ops, &mut stream, k, n, &b);
+        let mut expected = values(m * n, 13);
+        let dst = FloatTensor::from_slice(&mut stream, m, n, &expected).unwrap();
+        for alpha in [-0.75, 0.25, 0.0] {
+            ops::matmul_tn_accumulate(&ops, &stream, &av, &bv, &dst, alpha).unwrap();
+            for row in 0..m {
+                for col in 0..n {
+                    let dot = (0..k)
+                        .map(|j| f64::from(a[j * m + row]) * f64::from(b[j * n + col]))
+                        .sum::<f64>() as f32;
+                    expected[row * n + col] += alpha * dot;
+                }
+            }
+            close(&dst.download(&mut stream).unwrap(), &expected, 2e-5, 1e-6);
+        }
+        assert!(ops::matmul_tn_accumulate(&ops, &stream, &av, &bv, &dst, f32::NAN).is_err());
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn float_cast_uses_logical_dimensions_with_extra_allocation_capacity() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
@@ -186,75 +216,83 @@ fn zero_b_preserves_base_output_and_accumulates_only_b_gradients() {
 fn lora_backward_and_adam_match_independent_dense_algebra() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
-    let (m, k, n, r) = (7, 19, 11, 3);
-    let x = values(m * k, 2);
-    let g = values(m * n, 7);
-    let a = values(r * k, 5);
-    let b = values(n * r, 11);
-    let factors =
-        Factors { inputs: k, outputs: n, rank: r, alpha: 1.5, a: a.clone(), b: b.clone() };
-    let p = Projection::new(&ops, &mut stream, &factors).unwrap();
-    let xt = upload(&ops, &mut stream, m, k, &x);
-    let gt = upload(&ops, &mut stream, m, n, &g);
-    let zero = upload(&ops, &mut stream, m, k, &vec![0.0; m * k]);
-    let dx = p.backward(&ops, &stream, &xt, &gt, &zero).unwrap();
-    let mut low = vec![0.0; m * r];
-    let mut dl = vec![0.0; m * r];
-    for i in 0..m {
-        for j in 0..r {
-            low[i * r + j] = (0..k).map(|c| x[i * k + c] * a[j * k + c]).sum::<f32>();
-            dl[i * r + j] = 0.5 * (0..n).map(|c| g[i * n + c] * b[c * r + j]).sum::<f32>();
+    for (m, k, n, r) in [(7, 19, 11, 3), (65, 128, 64, 32), (513, 64, 128, 64)] {
+        let x = values(m * k, 2);
+        let g = values(m * n, 7);
+        let a = values(r * k, 5);
+        let b = values(n * r, 11);
+        let factors = Factors {
+            inputs: k,
+            outputs: n,
+            rank: r,
+            alpha: r as f32 * 0.5,
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let p = Projection::new(&ops, &mut stream, &factors).unwrap();
+        let xt = upload(&ops, &mut stream, m, k, &x);
+        let gt = upload(&ops, &mut stream, m, n, &g);
+        let zero = upload(&ops, &mut stream, m, k, &vec![0.0; m * k]);
+        let dx = p.backward(&ops, &stream, &xt, &gt, &zero).unwrap();
+        let mut low = vec![0.0; m * r];
+        let mut dl = vec![0.0; m * r];
+        for i in 0..m {
+            for j in 0..r {
+                low[i * r + j] = (0..k).map(|c| x[i * k + c] * a[j * k + c]).sum::<f32>();
+                dl[i * r + j] = 0.5 * (0..n).map(|c| g[i * n + c] * b[c * r + j]).sum::<f32>();
+            }
         }
-    }
-    let base_values = values(m * n, 13);
-    let base = upload(&ops, &mut stream, m, n, &base_values);
-    for strength in [-0.5, 0.0, 1.0, 1.1] {
-        let y = p.forward(&ops, &stream, &xt, &base, strength).unwrap();
-        let expected: Vec<f32> = (0..m * n)
-            .map(|index| {
-                let (row, col) = (index / n, index % n);
-                base_values[index]
-                    + 0.5
-                        * strength
-                        * (0..r).map(|j| low[row * r + j] * b[col * r + j]).sum::<f32>()
+        let base_values = values(m * n, 13);
+        let base = upload(&ops, &mut stream, m, n, &base_values);
+        for strength in [-0.5, 0.0, 1.0, 1.1] {
+            let y = p.forward(&ops, &stream, &xt, &base, strength).unwrap();
+            let expected: Vec<f32> = (0..m * n)
+                .map(|index| {
+                    let (row, col) = (index / n, index % n);
+                    base_values[index]
+                        + 0.5
+                            * strength
+                            * (0..r).map(|j| low[row * r + j] * b[col * r + j]).sum::<f32>()
+                })
+                .collect();
+            close(&read(&y, &mut stream), &expected, 0.02, 2e-4);
+        }
+        let mut da = vec![0.0; r * k];
+        let mut db = vec![0.0; n * r];
+        let mut dx_ref = vec![0.0; m * k];
+        for j in 0..r {
+            for c in 0..k {
+                da[j * k + c] = (0..m).map(|i| dl[i * r + j] * x[i * k + c]).sum();
+            }
+        }
+        for o in 0..n {
+            for j in 0..r {
+                db[o * r + j] =
+                    0.5 * (0..m).map(|i| g[i * n + o] * low[i * r + j]).sum::<f32>();
+            }
+        }
+        for i in 0..m {
+            for c in 0..k {
+                dx_ref[i * k + c] = (0..r).map(|j| dl[i * r + j] * a[j * k + c]).sum();
+            }
+        }
+        close(&read(&dx, &mut stream), &dx_ref, 0.02, 2e-4);
+        close(&p.a.grad.download(&mut stream).unwrap(), &da, 0.02, 2e-4);
+        close(&p.b.grad.download(&mut stream).unwrap(), &db, 0.02, 2e-4);
+        let gradient = p.a.grad.download(&mut stream).unwrap();
+        let c = TrainConfig::default();
+        optimizer::adamw(&ops, &stream, &p.a, &c, 1.0, 1.0 - c.beta1, 1.0 - c.beta2).unwrap();
+        let expected: Vec<f32> = a
+            .iter()
+            .zip(&gradient)
+            .map(|(&w, &g)| {
+                w * (1.0 - c.learning_rate * c.weight_decay)
+                    - c.learning_rate * g / (g.abs() + c.epsilon)
             })
             .collect();
-        close(&read(&y, &mut stream), &expected, 0.02, 2e-4);
+        close(&p.a.master.download(&mut stream).unwrap(), &expected, 1e-5, 1e-7);
+        assert!(p.a.grad.download(&mut stream).unwrap().iter().all(|v| *v == 0.0));
     }
-    let mut da = vec![0.0; r * k];
-    let mut db = vec![0.0; n * r];
-    let mut dx_ref = vec![0.0; m * k];
-    for j in 0..r {
-        for c in 0..k {
-            da[j * k + c] = (0..m).map(|i| dl[i * r + j] * x[i * k + c]).sum();
-        }
-    }
-    for o in 0..n {
-        for j in 0..r {
-            db[o * r + j] = 0.5 * (0..m).map(|i| g[i * n + o] * low[i * r + j]).sum::<f32>();
-        }
-    }
-    for i in 0..m {
-        for c in 0..k {
-            dx_ref[i * k + c] = (0..r).map(|j| dl[i * r + j] * a[j * k + c]).sum();
-        }
-    }
-    close(&read(&dx, &mut stream), &dx_ref, 0.02, 2e-4);
-    close(&p.a.grad.download(&mut stream).unwrap(), &da, 0.02, 2e-4);
-    close(&p.b.grad.download(&mut stream).unwrap(), &db, 0.02, 2e-4);
-    let gradient = p.a.grad.download(&mut stream).unwrap();
-    let c = TrainConfig::default();
-    optimizer::adamw(&ops, &stream, &p.a, &c, 1.0, 1.0 - c.beta1, 1.0 - c.beta2).unwrap();
-    let expected: Vec<f32> = a
-        .iter()
-        .zip(&gradient)
-        .map(|(&w, &g)| {
-            w * (1.0 - c.learning_rate * c.weight_decay)
-                - c.learning_rate * g / (g.abs() + c.epsilon)
-        })
-        .collect();
-    close(&p.a.master.download(&mut stream).unwrap(), &expected, 1e-5, 1e-7);
-    assert!(p.a.grad.download(&mut stream).unwrap().iter().all(|v| *v == 0.0));
 }
 
 #[test]

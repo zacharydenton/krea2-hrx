@@ -1,0 +1,120 @@
+// C += alpha * A^T B, for row-major BF16 A[K,M], B[K,N] and FP32 C[M,N].
+// Four waves own a 32x32 output tile. Coalesced input tiles are transposed in
+// LDS, avoiding whole-activation transposes and a temporary gradient buffer.
+amdgpu.target<gfx11-generic> @krea2_train_gemm_tn_accumulate_target {subgroup_size = 32}
+config.decl @krea2.train_gemm_tn_accumulate.m : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_tn_accumulate.n : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_tn_accumulate.k : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_tn_accumulate.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_tn_accumulate.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_gemm_tn_accumulate_target) export("krea2_train_gemm_tn_accumulate") @krea2_train_gemm_tn_accumulate(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 128 : index
+  %gx = config.get @krea2.train_gemm_tn_accumulate.grid_x : index
+  %gy = config.get @krea2.train_gemm_tn_accumulate.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %alpha: f32, %a: buffer, %b: buffer, %out: buffer) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c16 = index.constant 16 : index
+  %c32 = index.constant 32 : index
+  %c40 = index.constant 40 : index
+  %m = config.get @krea2.train_gemm_tn_accumulate.m : index
+  %n = config.get @krea2.train_gemm_tn_accumulate.n : index
+  %k = config.get @krea2.train_gemm_tn_accumulate.k : index
+  %offset = index.constant 0 : offset
+  %bytes = index.constant 5120 : offset
+  %boffset = index.constant 2560 : offset
+  %wavebytes = index.constant 1024 : offset
+  %tid = kernel.workitem.id<x> : index
+  %wave = kernel.subgroup.id : index
+  %lane = kernel.subgroup.lane.id : index
+  %gx = kernel.workgroup.id<x> : index
+  %gy = kernel.workgroup.id<y> : index
+  %mb = index.mul %gy, %c32 : index
+  %nb = index.mul %gx, %c32 : index
+  %wm = index.div %wave, %c2 : index
+  %wn = index.rem %wave, %c2 : index
+  %mr = index.mul %wm, %c16 : index
+  %nc = index.mul %wn, %c16 : index
+  %load_row = index.div %tid, %c32 : index
+  %load_col = index.rem %tid, %c32 : index
+  %ag = buffer.assume.memory_space<global> %a : buffer
+  %av = buffer.view %ag[%offset] : buffer -> view<[%k]x[%m]xbf16>
+  %bg = buffer.assume.memory_space<global> %b : buffer
+  %bv = buffer.view %bg[%offset] : buffer -> view<[%k]x[%n]xbf16>
+  %og = buffer.assume.memory_space<global> %out : buffer
+  %ov = buffer.view %og[%offset] : buffer -> view<[%m]x[%n]xf32>
+  %stage = buffer.alloca<workgroup> align(16) %bytes : buffer
+  %aa = buffer.view %stage[%offset] : buffer -> view<32x40xbf16>
+  %bb = buffer.view %stage[%boffset] : buffer -> view<32x40xbf16>
+  %at_layout = encoding.layout.strided [1, %c40] : encoding<layout>
+  %at = buffer.view %stage[%offset] : buffer -> view<32x32xbf16, %at_layout>
+  %result_offset = index.scale %wave, %wavebytes : index, offset -> offset
+  %result = buffer.view %stage[%result_offset] : buffer -> view<16x16xf32>
+  %zero = scalar.constant 0.0 : bf16
+  %zv = vector.constant 0.0 : vector<8xf32>
+  %init = vector.fragment<init> %zv shape [%c16, %c16] : vector<8xf32>
+  %sum = scf.for %kb = [%c0 to %k step %c32](%acc = %init : vector<8xf32>) -> (vector<8xf32>) {
+    scf.for %i = [%c0 to %c32 step %c4] {
+      %r = index.add %i, %load_row : index
+      %kr = index.add %kb, %r : index
+      %ac = index.add %mb, %load_col : index
+      %bc = index.add %nb, %load_col : index
+      %validk = index.cmp ult, %kr, %k : index
+      %validm = index.cmp ult, %ac, %m : index
+      %validn = index.cmp ult, %bc, %n : index
+      %valida = scalar.andi %validk, %validm : i1
+      %validb = scalar.andi %validk, %validn : i1
+      %a_value = scf.if %valida -> (bf16) {
+        %ar = index.assume %kr [lt(%kr, %k)] : index
+        %aj = index.assume %ac [lt(%ac, %m)] : index
+        %v = view.load %av[%ar, %aj] : view<[%k]x[%m]xbf16> -> bf16
+        scf.yield %v : bf16
+      } else { scf.yield %zero : bf16 }
+      %b_value = scf.if %validb -> (bf16) {
+        %br = index.assume %kr [lt(%kr, %k)] : index
+        %bj = index.assume %bc [lt(%bc, %n)] : index
+        %v = view.load %bv[%br, %bj] : view<[%k]x[%n]xbf16> -> bf16
+        scf.yield %v : bf16
+      } else { scf.yield %zero : bf16 }
+      view.store %a_value, %aa[%r, %load_col] : bf16, view<32x40xbf16>
+      view.store %b_value, %bb[%r, %load_col] : bf16, view<32x40xbf16>
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %a0 = vector.fragment.load<lhs> %at[%mr, %c0] shape [%c16, %c16] : view<32x32xbf16, %at_layout> -> vector<16xbf16>
+    %b0 = vector.fragment.load<rhs> %bb[%c0, %nc] shape [%c16, %c16] : view<32x40xbf16> -> vector<16xbf16>
+    %s0 = vector.mma %a0, %b0, %acc : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+    %a1 = vector.fragment.load<lhs> %at[%mr, %c16] shape [%c16, %c16] : view<32x32xbf16, %at_layout> -> vector<16xbf16>
+    %b1 = vector.fragment.load<rhs> %bb[%c16, %nc] shape [%c16, %c16] : view<32x40xbf16> -> vector<16xbf16>
+    %s1 = vector.mma %a1, %b1, %s0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %s1 : vector<8xf32>
+  }
+  vector.fragment.store<result> %sum, %result[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
+  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+  %half = index.div %lane, %c16 : index
+  %col = index.rem %lane, %c16 : index
+  scf.for %i = [%c0 to %c16 step %c2] {
+    %r = index.add %i, %half : index
+    %wr = index.add %mr, %r : index
+    %wc = index.add %nc, %col : index
+    %row = index.add %mb, %wr : index
+    %column = index.add %nb, %wc : index
+    %validm = index.cmp ult, %row, %m : index
+    %validn = index.cmp ult, %column, %n : index
+    %valid = scalar.andi %validm, %validn : i1
+    scf.if %valid {
+      %rr = index.assume %row [lt(%row, %m)] : index
+      %cc = index.assume %column [lt(%column, %n)] : index
+      %v = view.load %result[%r, %col] : view<16x16xf32> -> f32
+      %scaled = scalar.mulf %v, %alpha : f32
+      %old = view.load %ov[%rr, %cc] : view<[%m]x[%n]xf32> -> f32
+      %updated = scalar.addf %old, %scaled : f32
+      view.store %updated, %ov[%rr, %cc] : f32, view<[%m]x[%n]xf32>
+    }
+  }
+  kernel.return
+}

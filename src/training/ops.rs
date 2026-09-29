@@ -319,6 +319,41 @@ fn matmul_float_inner(
     Ok(out)
 }
 
+/// Accumulate `alpha * a^T * b` directly into an FP32 parameter gradient.
+/// Inputs stay in their original row-major activation layouts.
+pub fn matmul_tn_accumulate(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    dst: &FloatTensor,
+    alpha: f32,
+) -> Result<()> {
+    if a.rows() != b.rows()
+        || dst.rows != a.cols()
+        || dst.cols != b.cols()
+        || !alpha.is_finite()
+    {
+        return Err(Error::invalid("gradient TN GEMM dimensions"));
+    }
+    profile("matmul_tn_accumulate", || {
+        // SAFETY: A is K x M, B is K x N, and dst is M x N. Each group
+        // exclusively owns a 32x32 output tile; all ragged edges are guarded.
+        unsafe {
+            ops.launch(
+                stream,
+                "train_gemm_tn_accumulate",
+                config(&[("m", a.cols()), ("n", b.cols()), ("k", a.rows())]),
+                &Scalars::new().index(dst.size()).float(alpha),
+                &[a.binding()?, b.binding()?, dst.binding()],
+                b.cols().div_ceil(32),
+                a.cols().div_ceil(32),
+                128,
+            )
+        }
+    })
+}
+
 /// FP32 flow MSE and its BF16 activation gradient. Only reduction partials read back.
 pub fn flow_loss(
     ops: &Ops,

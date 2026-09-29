@@ -90,18 +90,10 @@ impl Projection {
         base_grad: &Tensor,
     ) -> Result<Tensor> {
         let low = train::matmul(ops, stream, x, &self.a.value, 1.0)?;
-        let gt = train::transpose(ops, stream, grad)?;
-        let lt = train::transpose(ops, stream, &low)?;
-        let db = train::matmul_float(ops, stream, &gt, &lt, self.scale())?;
-        train::accumulate(ops, stream, &self.b.grad, &db)?;
-        let bt = train::transpose(ops, stream, &self.b.value)?;
-        let dl = train::matmul(ops, stream, grad, &bt, self.scale())?;
-        let dlt = train::transpose(ops, stream, &dl)?;
-        let xt = train::transpose(ops, stream, x)?;
-        let da = train::matmul_float(ops, stream, &dlt, &xt, 1.0)?;
-        train::accumulate(ops, stream, &self.a.grad, &da)?;
-        let at = train::transpose(ops, stream, &self.a.value)?;
-        let dx = train::matmul(ops, stream, &dl, &at, 1.0)?;
+        train::matmul_tn_accumulate(ops, stream, grad, &low, &self.b.grad, self.scale())?;
+        let dl = train::matmul_nn(ops, stream, grad, &self.b.value, self.scale())?;
+        train::matmul_tn_accumulate(ops, stream, &dl, x, &self.a.grad, 1.0)?;
+        let dx = train::matmul_nn(ops, stream, &dl, &self.a.value, 1.0)?;
         train::add_scaled(ops, stream, base_grad, &dx, 1.0)
     }
 }
