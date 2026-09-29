@@ -228,13 +228,7 @@ pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
             if valid_cache(&path, "conditioning", 6144, None) {
                 continue;
             }
-            let ids = models.tokenizer.prompt(&s.caption)?;
-            if ids.len() > 512 {
-                return Err(Error::invalid(format!(
-                    "{}: caption exceeds 512 tokens",
-                    s.image.display()
-                )));
-            }
+            let ids = models.tokenizer.training_prompt(&s.caption)?;
             eprintln!("encoding caption {}/{}", index + 1, data.samples.len());
             let taps = models.encode(&mut stream, &ids)?;
             let conditioning = models.text_fusion(&mut stream, &taps)?;

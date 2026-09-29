@@ -635,7 +635,6 @@ impl Models {
     }
 }
 
-/// A linear layer's weight and optional bias, named by its prefix.
 fn timestep_features(timestep: f32) -> [u16; 256] {
     let mut values = [0u16; 256];
     for index in 0..128 {
@@ -646,6 +645,7 @@ fn timestep_features(timestep: f32) -> [u16; 256] {
     values
 }
 
+/// A linear layer's weight and optional bias, named by its prefix.
 fn linear_layer<'w>(w: &'w Weights, prefix: &str) -> Result<(&'w Weight, Option<View<'w>>)> {
     let weight = w.get(&format!("{prefix}.weight"))?;
     let bias = w.find(&format!("{prefix}.bias")).map(Weight::values).transpose()?;

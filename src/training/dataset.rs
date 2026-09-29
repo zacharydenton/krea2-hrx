@@ -137,6 +137,7 @@ impl PreparedDataset {
         }
         let mut seen = BTreeMap::new();
         let mut samples = Vec::new();
+        let tokenizer = crate::tokenizer::Tokenizer::embedded()?;
         let choices = buckets(config.resolution);
         for path in paths {
             let caption_path = path.with_extension("txt");
@@ -151,6 +152,9 @@ impl PreparedDataset {
                     config.trigger
                 )));
             }
+            tokenizer.training_prompt(&caption).map_err(|error| {
+                Error::invalid(format!("{}: {error}", caption_path.display()))
+            })?;
             let image_hash = file_hash(&path)?;
             if let Some(other) = seen.insert(image_hash.clone(), path.clone()) {
                 return Err(Error::invalid(format!(
@@ -248,5 +252,25 @@ mod tests {
         std::fs::copy(&path, temp.path().join("two.png")).unwrap();
         std::fs::write(temp.path().join("two.txt"), "bluej").unwrap();
         assert!(PreparedDataset::scan(&c).unwrap_err().to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn oversized_captions_fail_during_cpu_inspection() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("character.png");
+        RgbImage::new(32, 32).save(&path).unwrap();
+        std::fs::write(path.with_extension("txt"), format!("bluej {}", "word ".repeat(600)))
+            .unwrap();
+        let config = TrainConfig {
+            model: "missing-model.safetensors".into(),
+            dataset: temp.path().into(),
+            output: temp.path().join("run"),
+            trigger: "bluej".into(),
+            ..Default::default()
+        };
+        let error = PreparedDataset::scan(&config).unwrap_err().to_string();
+        assert!(error.contains("character.txt"));
+        assert!(error.contains("conditioning tokens"));
+        assert!(!config.output.exists());
     }
 }

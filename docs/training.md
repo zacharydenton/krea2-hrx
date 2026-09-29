@@ -62,6 +62,9 @@ Every JPEG or PNG needs a same-stem `.txt` caption containing the trigger.
 The scanner checks for missing captions and byte-identical duplicate images.
 It applies EXIF orientation, chooses among seven aspect buckets at the requested
 512, 768 or 1024 target area, then resizes and center-crops without flips.
+CPU inspection rejects captions exceeding 512 conditioning tokens, including
+the assistant suffix but excluding the 34-token system prefix. Training never
+silently truncates captions.
 Keep held-out references outside the image directory. Preparation writes
 `crops.png` for inspecting the actual crops.
 
@@ -70,6 +73,12 @@ microbatches per update. Defaults are rank/alpha 32/32, constant learning rate
 1e-4, AdamW betas 0.9/0.999, epsilon 1e-8, weight decay 0.01 and global gradient
 norm cap 1. These are starting settings, not established character-quality
 recommendations. Training steps count optimizer updates, not epochs.
+
+Timesteps follow a logit-normal distribution with Krea's resolution-dependent
+shift, matching Musubi's `krea2_shift` with sigmoid scale 1. This differs from
+AI Toolkit's unshifted `timestep_type: sigmoid`. The sampled FP32 flow time is
+retained through sinusoidal embedding; only the resulting features are rounded
+to BF16. Inference keeps its existing timestep rounding for trajectory parity.
 
 ## Workflow
 
@@ -94,7 +103,10 @@ cargo run --release --locked --bin krea2-train -- run \
 
 Training freezes the base model and text encoder. Each of the 28 main transformer
 blocks has adapters on `attn.wq`, `attn.wk`, `attn.wv`, `attn.gate`, `attn.wo`,
-`mlp.gate`, `mlp.up` and `mlp.down`. Factors execute in BF16 with FP32 master
+`mlp.gate`, `mlp.up` and `mlp.down`. These 224 projections exclude input/output,
+time and text-fusion linears; trainers that adapt all 264 linears have a different
+training scope. Freezing text fusion lets preparation cache its final output.
+Factors execute in BF16 with FP32 master
 weights, parameter gradients and optimizer moments. Intermediate activation
 gradients use BF16. By default, block inputs are retained and each block is
 recomputed during backpropagation. Set `gradient_checkpointing` to `false` to

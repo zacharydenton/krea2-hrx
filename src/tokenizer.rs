@@ -73,6 +73,17 @@ impl Tokenizer {
         Ok(ids)
     }
 
+    /// Training captions must fit without dropping their trigger or description.
+    pub(crate) fn training_prompt(&self, text: &str) -> Result<Vec<i32>> {
+        check_length(text)?;
+        let mut ids = self.ids(&format!("{PREFIX}{text}"))?;
+        if ids.len() > MAX_TEMPLATED {
+            return Err(Error::invalid("training caption exceeds 512 conditioning tokens"));
+        }
+        ids.extend(self.ids(SUFFIX)?);
+        Ok(ids)
+    }
+
     /// Token ids, as the `i32` the text encoder's embedding lookup reads.
     fn ids(&self, text: &str) -> Result<Vec<i32>> {
         let encoding = self
@@ -147,6 +158,19 @@ mod tests {
         let ids = tokenizer.prompt(&"word ".repeat(2000)).expect("a long prompt");
         assert_eq!(ids.len(), MAX_TEMPLATED + 5);
         assert_eq!(&ids[MAX_TEMPLATED..], &[151645, 198, 151644, 77091, 198]);
+    }
+
+    #[test]
+    fn training_counts_conditioning_tokens_without_the_system_prefix() {
+        let tokenizer = tokenizer();
+        let text = "word ".repeat(480);
+        let ids = tokenizer.training_prompt(&text).unwrap();
+        assert!(ids.len() > 512, "system prefix must not consume the conditioning budget");
+        assert!(ids.len() <= 546);
+        assert_eq!(ids, tokenizer.prompt(&text).unwrap());
+        let too_long = "word ".repeat(600);
+        assert!(tokenizer.training_prompt(&too_long).is_err());
+        assert!(tokenizer.prompt(&too_long).is_ok());
     }
 
     #[test]
