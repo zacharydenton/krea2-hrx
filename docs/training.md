@@ -141,11 +141,16 @@ conservative training estimate is checked before opening its stream. The
 estimate counts BF16 weights once and includes the additional execution copies
 of F32 weights, saved activations, adapter state and scratch capacity. Checkpoint
 file size is not doubled to account for upload staging; HRX bounds staging
-independently. The initial
+independently. Temporary host buffers are estimated separately from the largest
+weight conversion and adapter checkpoint serialization, taking the larger of
+those phases rather than adding them. They do not count against the HRX device
+budget, but do count toward required system RAM. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
-The trainer also requires available system RAM to cover that estimate plus
-16 GiB of headroom, and aborts between blocks if available RAM falls below
-8 GiB. Swap is not counted as GPU capacity. These checks cannot reserve RAM
+The trainer requires available system RAM to cover device allocations, temporary
+host buffers and one 8 GiB system reserve. It aborts between blocks if available
+RAM falls below the same 8 GiB floor. That reserve is a policy allowance for the
+desktop and other processes, not a measured model requirement. Swap is not
+counted as GPU capacity. These checks cannot reserve RAM
 against other processes; the `run` and `prepare` commands also mark themselves
 as preferred OOM victims so system pressure targets training before the desktop.
 Builds and full-model trials should run separately on a shared machine.

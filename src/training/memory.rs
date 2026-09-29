@@ -2,8 +2,10 @@
 use crate::{Error, Result};
 
 const GIB: usize = 1 << 30;
-const START_HEADROOM: usize = 16 * GIB;
-const RUN_HEADROOM: usize = 8 * GIB;
+// One system reserve at startup and during execution. Allocation estimates
+// account for training's temporary host buffers separately; this is a policy
+// floor for the desktop/other processes, not a measured model requirement.
+const SYSTEM_RESERVE: usize = 8 * GIB;
 
 fn available_bytes(meminfo: &str) -> Result<usize> {
     let value = meminfo.lines().find_map(|line| {
@@ -33,11 +35,11 @@ fn available() -> Result<usize> {
 }
 
 pub(super) fn before_load(planned: usize) -> Result<()> {
-    require(available()?, planned, START_HEADROOM)
+    require(available()?, planned, SYSTEM_RESERVE)
 }
 
 pub(super) fn during_run() -> Result<()> {
-    require(available()?, 0, RUN_HEADROOM)
+    require(available()?, 0, SYSTEM_RESERVE)
 }
 
 #[cfg(test)]
@@ -56,11 +58,14 @@ mod tests {
 
     #[test]
     fn leaves_headroom_and_rejects_low_memory_without_overflow() {
-        assert!(require(80 * GIB, 64 * GIB, START_HEADROOM).is_ok());
-        assert!(require(80 * GIB - 1, 64 * GIB, START_HEADROOM).is_err());
-        assert!(require(RUN_HEADROOM, 0, RUN_HEADROOM).is_ok());
-        assert!(require(RUN_HEADROOM - 1, 0, RUN_HEADROOM).is_err());
-        assert!(require(0, 0, RUN_HEADROOM).is_err());
-        assert!(require(usize::MAX, usize::MAX, START_HEADROOM).is_err());
+        let planned = 64 * GIB;
+        let available = planned + SYSTEM_RESERVE;
+        assert!(require(available, planned, SYSTEM_RESERVE).is_ok());
+        assert!(require(available - 1, planned, SYSTEM_RESERVE).is_err());
+        // Allocating the complete plan leaves exactly the runtime floor.
+        assert!(require(available - planned, 0, SYSTEM_RESERVE).is_ok());
+        assert!(require(available - planned - 1, 0, SYSTEM_RESERVE).is_err());
+        assert!(require(0, 0, SYSTEM_RESERVE).is_err());
+        assert!(require(usize::MAX, usize::MAX, SYSTEM_RESERVE).is_err());
     }
 }

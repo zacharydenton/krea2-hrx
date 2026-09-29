@@ -44,8 +44,10 @@ pub struct MemoryEstimate {
     pub adapters: usize,
     /// Saved block boundaries or complete activation tapes.
     pub activations: usize,
-    /// Recomputed block, transpose buffers, temporary gradients and pool headroom.
+    /// Recomputed block, temporary gradients, bounded staging and scratch pool.
     pub scratch: usize,
+    /// Peak temporary host buffers for weight loading or checkpoint serialization.
+    pub host_transient: usize,
     /// Sum of the planned device allocations.
     pub total: usize,
 }
@@ -58,8 +60,10 @@ impl MemoryEstimate {
         // retain two copies of every weight. F32 tensors additionally retain
         // their BF16 execution copy, and BF16 norms gain a lazy F32 scale copy.
         let mut frozen: usize = 28 * 6 * 6144 * 2 + 2 * 4096;
+        let mut conversion = 0;
         for name in file.names() {
             let t = file.get(name)?;
+            conversion = conversion.max(host_weight_bytes(t.dtype, t.bytes.len(), t.shape)?);
             frozen = frozen
                 .checked_add(resident_weight_bytes(
                     t.dtype,
@@ -68,11 +72,18 @@ impl MemoryEstimate {
                 )?)
                 .ok_or_else(|| Error::invalid("checkpoint size overflow"))?;
         }
-        // Upload staging is bounded by HRX, not the size of the file. Host
-        // conversion/checkpoint buffers are covered by the separate RAM reserve.
+        // Upload staging is bounded by HRX, not the size of the file.
         let parameters: usize =
             c.targets.layers().iter().map(|(_, o, i)| (o + i) * c.rank).sum();
         let adapters = parameters * 18;
+        let largest_factor =
+            c.targets.layers().iter().map(|(_, o, i)| o.max(i) * c.rank).max().unwrap_or(0);
+        // Loading holds FP32 adapter values and one weight conversion. Saving
+        // holds the FP32 adapter (4P), serialized masters/moments (12P), and
+        // transient download/byte-conversion buffers for one factor (8F).
+        // These phases do not overlap; neither needs another fixed GiB reserve.
+        let host_transient =
+            (parameters * 4 + conversion).max(parameters * 16 + largest_factor * 8);
         let mut tokens = 0;
         let mut text_tokens = 0;
         for sample in &data.samples {
@@ -109,8 +120,27 @@ impl MemoryEstimate {
             + runtime_overhead
             + (c.scratch_pool_mib << 20);
         let total = frozen + adapters + activations + scratch;
-        Ok(Self { frozen, adapters, activations, scratch, total })
+        Ok(Self { frozen, adapters, activations, scratch, host_transient, total })
     }
+}
+
+fn host_weight_bytes(
+    dtype: crate::checkpoint::DType,
+    bytes: usize,
+    shape: &[usize],
+) -> Result<usize> {
+    // Ordinary BF16 weights upload directly from mmap. F32 conversion owns
+    // the decoded source and BF16 result. Convolutions can additionally retain
+    // a reduced causal tap and a channels-last copy; bound each by source size.
+    let conversion = if dtype == crate::checkpoint::DType::F32 {
+        bytes.checked_add(bytes / 2)
+    } else {
+        Some(0)
+    };
+    let packing = if shape.len() >= 4 { bytes.checked_mul(2) } else { Some(0) };
+    conversion
+        .and_then(|c| packing.and_then(|p| c.checked_add(p)))
+        .ok_or_else(|| Error::invalid("host conversion size overflow"))
 }
 
 fn resident_weight_bytes(
@@ -196,14 +226,20 @@ impl Trainer {
         let data = prepare::load(&config)?;
         let memory = MemoryEstimate::for_run(&config, &data)?;
         eprintln!(
-            "planned training allocations: {:.2} GiB (budget {} GiB)",
+            "planned training allocations: {:.2} GiB device (budget {} GiB), {:.2} GiB temporary host buffers",
             memory.total as f64 / (1u64 << 30) as f64,
-            config.memory_gib
+            config.memory_gib,
+            memory.host_transient as f64 / (1u64 << 30) as f64,
         );
         if memory.total > config.memory_gib * (1usize << 30) {
             return Err(Error::invalid("training allocation estimate exceeds memory_gib"));
         }
-        super::memory::before_load(memory.total)?;
+        super::memory::before_load(
+            memory
+                .total
+                .checked_add(memory.host_transient)
+                .ok_or_else(|| Error::invalid("system memory estimate overflow"))?,
+        )?;
         let budget = hrx::residency::ResidencyManager::new(config.memory_gib * (1usize << 30))?;
         let mut stream = Stream::open()?.with_memory_budget(budget.budget());
         let target = stream.target().as_str().to_owned();
@@ -755,6 +791,16 @@ fn loss_gradient(prediction: &[u16], target: &[f32]) -> Result<(f64, Vec<u16>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_weight_estimate_distinguishes_mapped_weights_from_conversion_buffers() {
+        use crate::checkpoint::DType;
+        let bytes = 256 << 20;
+        assert_eq!(host_weight_bytes(DType::BF16, bytes, &[8192, 16384]).unwrap(), 0);
+        assert_eq!(host_weight_bytes(DType::F32, bytes, &[8192, 8192]).unwrap(), 384 << 20);
+        assert!(host_weight_bytes(DType::F32, bytes, &[256, 256, 3, 3]).unwrap() > bytes);
+        assert!(host_weight_bytes(DType::F32, usize::MAX, &[1]).is_err());
+        assert!(host_weight_bytes(DType::BF16, usize::MAX, &[1, 1, 1, 1]).is_err());
+    }
     #[test]
     fn resident_memory_counts_execution_copies_without_duplicating_bf16_weights() {
         use crate::checkpoint::DType;
