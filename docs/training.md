@@ -144,6 +144,9 @@ cargo test --locked --test training_gpu -- --ignored --test-threads=1
 # Full-model update/checkpoint/resume equivalence, using external prepared caches:
 KREA2_TRAIN_TEST_CONFIG=~/training/character.json \
   cargo test --release --locked --test training_resume -- --ignored --test-threads=1 --nocapture
+# Re-encode cached samples and inspect reconstructions in the run's validation/vae directory:
+KREA2_TRAIN_TEST_CONFIG=~/training/character.json \
+  cargo test --release --locked --test training_vae -- --ignored --test-threads=1 --nocapture
 
 cargo bench --locked --bench training -- training/projection
 cargo bench --locked --bench training -- training/attention
