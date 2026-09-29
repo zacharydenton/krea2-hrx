@@ -68,6 +68,49 @@ fn flow_loss_matches_cpu_mse_and_rejects_nonfinite_inputs() {
 
 #[test]
 #[ignore = "requires an idle gfx1151 GPU"]
+fn zero_b_preserves_base_output_and_accumulates_only_b_gradients() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    let (m, k, n, rank) = (7, 19, 11, 3);
+    let p = Projection::new(
+        &ops,
+        &mut stream,
+        &Factors {
+            inputs: k,
+            outputs: n,
+            rank,
+            alpha: 1.5,
+            a: values(rank * k, 5),
+            b: vec![0.0; n * rank],
+        },
+    )
+    .unwrap();
+    let x = upload(&ops, &mut stream, m, k, &values(m * k, 2));
+    let base_values = values(m * n, 11);
+    let base = upload(&ops, &mut stream, m, n, &base_values);
+    for strength in [-0.5, 0.0, 0.9, 1.1] {
+        let y = p.forward(&ops, &stream, &x, &base, strength).unwrap();
+        assert_eq!(read(&y, &mut stream), base_values);
+    }
+    let grad = upload(&ops, &mut stream, m, n, &values(m * n, 7));
+    let base_gradient = values(m * k, 13);
+    let dx = upload(&ops, &mut stream, m, k, &base_gradient);
+    let first = p.backward(&ops, &stream, &x, &grad, &dx).unwrap();
+    assert_eq!(read(&first, &mut stream), base_gradient);
+    assert!(p.a.grad.download(&mut stream).unwrap().iter().all(|v| *v == 0.0));
+    let db = p.b.grad.download(&mut stream).unwrap();
+    assert!(db.iter().any(|v| v.abs() > 1e-3));
+    p.backward(&ops, &stream, &x, &grad, &dx).unwrap();
+    close(
+        &p.b.grad.download(&mut stream).unwrap(),
+        &db.iter().map(|v| v * 2.0).collect::<Vec<_>>(),
+        1e-6,
+        1e-7,
+    );
+}
+
+#[test]
+#[ignore = "requires an idle gfx1151 GPU"]
 fn lora_backward_and_adam_match_independent_dense_algebra() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
@@ -90,6 +133,21 @@ fn lora_backward_and_adam_match_independent_dense_algebra() {
             low[i * r + j] = (0..k).map(|c| x[i * k + c] * a[j * k + c]).sum::<f32>();
             dl[i * r + j] = 0.5 * (0..n).map(|c| g[i * n + c] * b[c * r + j]).sum::<f32>();
         }
+    }
+    let base_values = values(m * n, 13);
+    let base = upload(&ops, &mut stream, m, n, &base_values);
+    for strength in [-0.5, 0.0, 1.0, 1.1] {
+        let y = p.forward(&ops, &stream, &xt, &base, strength).unwrap();
+        let expected: Vec<f32> = (0..m * n)
+            .map(|index| {
+                let (row, col) = (index / n, index % n);
+                base_values[index]
+                    + 0.5
+                        * strength
+                        * (0..r).map(|j| low[row * r + j] * b[col * r + j]).sum::<f32>()
+            })
+            .collect();
+        close(&read(&y, &mut stream), &expected, 0.02, 2e-4);
     }
     let mut da = vec![0.0; r * k];
     let mut db = vec![0.0; n * r];
@@ -182,7 +240,7 @@ fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
     let kt = upload(&ops, &mut stream, t, kv * d, &k);
     let vt = upload(&ops, &mut stream, t, kv * d, &v);
     let gt = upload(&ops, &mut stream, t, heads * d, &g);
-    let f = ops::attention(&ops, &stream, &qt, &kt, &vt).unwrap();
+    let mut f = ops::attention(&ops, &stream, &qt, &kt, &vt).unwrap();
     let (dq, dk, dv) = ops::attention_backward(&ops, &stream, &qt, &kt, &vt, &f, &gt).unwrap();
     let mut output = vec![0.0; q.len()];
     let mut eq = vec![0.0f64; q.len()];
@@ -236,4 +294,14 @@ fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
             1e-5,
         );
     }
+    // Public output replacement cannot disguise smaller private forward statistics.
+    let larger_q = upload(&ops, &mut stream, t + 1, heads * d, &values((t + 1) * heads * d, 3));
+    let larger_kv = upload(&ops, &mut stream, t + 1, kv * d, &values((t + 1) * kv * d, 5));
+    f.output = larger_q.clone();
+    assert!(
+        ops::attention_backward(
+            &ops, &stream, &larger_q, &larger_kv, &larger_kv, &f, &larger_q
+        )
+        .is_err()
+    );
 }

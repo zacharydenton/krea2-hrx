@@ -56,7 +56,7 @@ pub struct Projection {
 
 impl Projection {
     fn scale(&self) -> f32 {
-        self.alpha / self.a.master.rows as f32
+        self.alpha / self.a.master.rows() as f32
     }
     /// Upload validated factors and initialize zero optimizer state.
     pub fn new(ops: &Ops, stream: &mut Stream, f: &Factors) -> Result<Self> {
@@ -485,9 +485,9 @@ impl Transformer {
                 Ok((
                     name.clone(),
                     Factors {
-                        inputs: p.a.master.cols,
-                        outputs: p.b.master.rows,
-                        rank: p.a.master.rows,
+                        inputs: p.a.master.cols(),
+                        outputs: p.b.master.rows(),
+                        rank: p.a.master.rows(),
                         alpha: p.alpha,
                         a: p.a.master.download(stream)?,
                         b: p.b.master.download(stream)?,

@@ -10,14 +10,22 @@ use crate::{Error, Result};
 /// A row-major FP32 device matrix, used for gradients and optimizer state.
 #[derive(Clone)]
 pub struct FloatTensor {
-    /// Number of rows.
-    pub rows: usize,
-    /// Number of columns.
-    pub cols: usize,
+    rows: usize,
+    cols: usize,
     buffer: Arc<Buffer>,
 }
 
 impl FloatTensor {
+    /// Number of rows, fixed when the allocation is created.
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Number of columns, fixed when the allocation is created.
+    pub fn cols(&self) -> usize {
+        self.cols
+    }
+
     /// Allocate a zero-initialized FP32 matrix.
     pub fn zero(stream: &Stream, rows: usize, cols: usize) -> Result<Self> {
         let bytes = rows
@@ -452,7 +460,10 @@ pub fn attention_backward(
         || v.cols() != k.cols()
         || k.rows() != q.rows()
         || v.rows() != q.rows()
-        || forward.output.rows() != q.rows()
+        || forward.exact.rows != q.rows()
+        || forward.exact.cols != q.cols()
+        || forward.lse.rows != q.rows()
+        || forward.lse.cols != heads
     {
         return Err(Error::invalid("attention backward dimensions"));
     }

@@ -185,7 +185,7 @@ impl Trainer {
                     for (kind, tensor) in [("first", &p.first), ("second", &p.second)] {
                         let t = file.get(&format!("{name}.{part}.{kind}"))?;
                         if t.dtype != crate::checkpoint::DType::F32
-                            || t.shape != [tensor.rows, tensor.cols]
+                            || t.shape != [tensor.rows(), tensor.cols()]
                         {
                             return Err(Error::invalid("optimizer state shape/dtype mismatch"));
                         }
@@ -398,7 +398,7 @@ impl Trainer {
                             format!("{name}.{part}.{kind}"),
                             SavedTensor {
                                 dtype: "F32",
-                                shape: vec![t.rows, t.cols],
+                                shape: vec![t.rows(), t.cols()],
                                 bytes: values.into_iter().flat_map(f32::to_le_bytes).collect(),
                             },
                         );

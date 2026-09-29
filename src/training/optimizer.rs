@@ -80,9 +80,9 @@ pub fn adamw(
 ) -> Result<()> {
     if [(&p.grad, &p.master), (&p.first, &p.master), (&p.second, &p.master)]
         .iter()
-        .any(|(a, b)| a.rows != b.rows || a.cols != b.cols)
-        || p.value.rows() != p.master.rows
-        || p.value.cols() != p.master.cols
+        .any(|(a, b)| a.rows() != b.rows() || a.cols() != b.cols())
+        || p.value.rows() != p.master.rows()
+        || p.value.cols() != p.master.cols()
         || !scale.is_finite()
         || scale < 0.0
         || !bias1.is_finite()
