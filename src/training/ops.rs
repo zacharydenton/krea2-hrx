@@ -242,7 +242,7 @@ pub fn cast(ops: &Ops, stream: &Stream, x: &FloatTensor) -> Result<Tensor> {
     cast_view(ops, stream, x.binding(), x.rows, x.cols)
 }
 
-/// Convert a checked FP32 view into a BF16 matrix.
+/// Convert the leading FP32 matrix in a view, allowing extra pooled capacity.
 pub fn cast_view(
     ops: &Ops,
     stream: &Stream,
@@ -250,9 +250,12 @@ pub fn cast_view(
     rows: usize,
     cols: usize,
 ) -> Result<Tensor> {
-    if rows.checked_mul(cols).and_then(|n| n.checked_mul(4)) != Some(x.len()) {
-        return Err(Error::invalid("FP32 cast dimensions"));
-    }
+    let bytes = rows
+        .checked_mul(cols)
+        .and_then(|n| n.checked_mul(4))
+        .filter(|n| *n > 0 && *n <= x.len())
+        .ok_or_else(|| Error::invalid("FP32 cast dimensions"))?;
+    let x = x.slice(0, bytes)?;
     let out = ops.tensor(stream, rows, cols)?;
     // SAFETY: the input and output contain the same number of elements.
     unsafe {

@@ -45,6 +45,22 @@ fn close(got: &[f32], expected: &[f32], relative: f64, absolute: f64) {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn float_cast_uses_logical_dimensions_with_extra_allocation_capacity() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    let source = stream.allocate(32).unwrap();
+    let values = [0.25f32, -2.5, 1.0078125, 3.125];
+    stream.fill(source.binding(), 0xff).unwrap();
+    stream.upload(source.try_slice(0, 16).unwrap(), bytemuck::cast_slice(&values)).unwrap();
+    let out = ops::cast_view(&ops, &stream, source.binding(), 2, 2).unwrap();
+    assert_eq!(out.download(&mut stream).unwrap(), values.map(from_f32));
+    assert!(ops::cast_view(&ops, &stream, source.binding(), 3, 3).is_err());
+    assert!(ops::cast_view(&ops, &stream, source.binding(), usize::MAX, 2).is_err());
+    assert!(ops::cast_view(&ops, &stream, source.binding(), 0, 2).is_err());
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn transpose_preserves_bits_across_tiles_and_ragged_edges() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
