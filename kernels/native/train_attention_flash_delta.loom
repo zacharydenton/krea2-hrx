@@ -1,0 +1,142 @@
+// Match the backward WMMA dot-product reduction for delta = sum(dO * O).
+// Split saved FP32 O into BF16 high/residual products. In saturated attention,
+// O=V and the high product cancels dP exactly rather than leaving scalar/WMMA
+// reduction noise. Only the diagonal of each 16x16 result is published.
+amdgpu.target<gfx11-generic> @krea2_train_attention_flash_delta_target {subgroup_size = 32}
+config.decl @krea2.train_attention_flash_delta.tokens : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_delta.heads : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_delta.q_stride : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_delta.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_delta.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_attention_flash_delta_target) export("krea2_train_attention_flash_delta") @krea2_train_attention_flash_delta(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 32 : index
+ %gx = config.get @krea2.train_attention_flash_delta.grid_x : index
+ %gy = config.get @krea2.train_attention_flash_delta.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %grad: buffer, %exact: buffer, %delta: buffer) {
+ %c0 = index.constant 0 : index
+ %c1 = index.constant 1 : index
+ %c2 = index.constant 2 : index
+ %c16 = index.constant 16 : index
+ %c128 = index.constant 128 : index
+ %tokens = config.get @krea2.train_attention_flash_delta.tokens : index
+ %heads = config.get @krea2.train_attention_flash_delta.heads : index
+ %q_stride = config.get @krea2.train_attention_flash_delta.q_stride : index
+ %offset = index.constant 0 : offset
+ %tile = kernel.workgroup.id<x> : index
+ %head_raw = kernel.workgroup.id<y> : index
+ %head = index.rem %head_raw, %heads : index
+ %lane = kernel.subgroup.lane.id : index
+ %col = index.rem %lane, %c16 : index
+ %half = index.div %lane, %c16 : index
+ %origin = index.mul %tile, %c16 : index
+ %row = index.add %origin, %col : index
+ %valid = index.cmp ult, %row, %tokens : index
+ %base = index.mul %head, %c128 : index
+ %zv = vector.constant 0.0 : vector<8xf32>
+ %z16 = vector.constant 0.0 : vector<16xf32>
+ %zb16 = vector.constant 0.0 : vector<16xbf16>
+ %init = vector.fragment<init> %zv shape [%c16, %c16] : vector<8xf32>
+ %grad_global = buffer.assume.memory_space<global> %grad : buffer
+ %grad_view = buffer.view %grad_global[%offset] : buffer -> view<[%tokens]x[%q_stride]xbf16>
+ %exact_global = buffer.assume.memory_space<global> %exact : buffer
+ %exact_view = buffer.view %exact_global[%offset] : buffer -> view<[%tokens]x[%q_stride]xf32>
+ %delta_global = buffer.assume.memory_space<global> %delta : buffer
+ %delta_view = buffer.view %delta_global[%offset] : buffer -> view<[%tokens]x[%heads]xf32>
+ %hi, %lo = scf.for %channel = [%c0 to %c128 step %c16](%ahi = %init : vector<8xf32>, %alo = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {
+ %gc = index.add %base, %channel : index
+ %gd, %od = scf.if %valid -> (vector<16xbf16>, vector<16xf32>) {
+ %vr = index.assume %row [lt(%row, %tokens)] : index
+ %gv = vector.load %grad_view[%vr, %gc] : view<[%tokens]x[%q_stride]xbf16> -> vector<16xbf16>
+ %ov = vector.load %exact_view[%vr, %gc] : view<[%tokens]x[%q_stride]xf32> -> vector<16xf32>
+ scf.yield %gv, %ov : vector<16xbf16>, vector<16xf32>
+ } else {
+ scf.yield %zb16, %z16 : vector<16xbf16>, vector<16xf32>
+ }
+ %oh = vector.fptrunc %od : vector<16xf32> to vector<16xbf16>
+ %ohf = vector.extf %oh : vector<16xbf16> to vector<16xf32>
+ %res = vector.subf %od, %ohf : vector<16xf32>
+ %ol = vector.fptrunc %res : vector<16xf32> to vector<16xbf16>
+ %g = vector.fragment<lhs> %gd shape [%c16, %c16] : vector<16xbf16>
+ %h = vector.fragment<rhs> %oh shape [%c16, %c16] : vector<16xbf16>
+ %l = vector.fragment<rhs> %ol shape [%c16, %c16] : vector<16xbf16>
+ %nh = vector.mma %g, %h, %ahi : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %nl = vector.mma %g, %l, %alo : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ scf.yield %nh, %nl : vector<8xf32>, vector<8xf32>
+ }
+ %sum = vector.addf %hi, %lo : vector<8xf32>
+ %ri0 = index.constant 0 : index
+ %r0 = index.add %half, %ri0 : index
+ %diag0 = index.cmp eq, %r0, %col : index
+ %write0 = scalar.andi %diag0, %valid : i1
+ scf.if %write0 {
+ %vr0 = index.assume %row [lt(%row, %tokens)] : index
+ %v0 = vector.extract %sum[0] : vector<8xf32> -> f32
+ view.store %v0, %delta_view[%vr0, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri1 = index.constant 2 : index
+ %r1 = index.add %half, %ri1 : index
+ %diag1 = index.cmp eq, %r1, %col : index
+ %write1 = scalar.andi %diag1, %valid : i1
+ scf.if %write1 {
+ %vr1 = index.assume %row [lt(%row, %tokens)] : index
+ %v1 = vector.extract %sum[1] : vector<8xf32> -> f32
+ view.store %v1, %delta_view[%vr1, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri2 = index.constant 4 : index
+ %r2 = index.add %half, %ri2 : index
+ %diag2 = index.cmp eq, %r2, %col : index
+ %write2 = scalar.andi %diag2, %valid : i1
+ scf.if %write2 {
+ %vr2 = index.assume %row [lt(%row, %tokens)] : index
+ %v2 = vector.extract %sum[2] : vector<8xf32> -> f32
+ view.store %v2, %delta_view[%vr2, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri3 = index.constant 6 : index
+ %r3 = index.add %half, %ri3 : index
+ %diag3 = index.cmp eq, %r3, %col : index
+ %write3 = scalar.andi %diag3, %valid : i1
+ scf.if %write3 {
+ %vr3 = index.assume %row [lt(%row, %tokens)] : index
+ %v3 = vector.extract %sum[3] : vector<8xf32> -> f32
+ view.store %v3, %delta_view[%vr3, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri4 = index.constant 8 : index
+ %r4 = index.add %half, %ri4 : index
+ %diag4 = index.cmp eq, %r4, %col : index
+ %write4 = scalar.andi %diag4, %valid : i1
+ scf.if %write4 {
+ %vr4 = index.assume %row [lt(%row, %tokens)] : index
+ %v4 = vector.extract %sum[4] : vector<8xf32> -> f32
+ view.store %v4, %delta_view[%vr4, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri5 = index.constant 10 : index
+ %r5 = index.add %half, %ri5 : index
+ %diag5 = index.cmp eq, %r5, %col : index
+ %write5 = scalar.andi %diag5, %valid : i1
+ scf.if %write5 {
+ %vr5 = index.assume %row [lt(%row, %tokens)] : index
+ %v5 = vector.extract %sum[5] : vector<8xf32> -> f32
+ view.store %v5, %delta_view[%vr5, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri6 = index.constant 12 : index
+ %r6 = index.add %half, %ri6 : index
+ %diag6 = index.cmp eq, %r6, %col : index
+ %write6 = scalar.andi %diag6, %valid : i1
+ scf.if %write6 {
+ %vr6 = index.assume %row [lt(%row, %tokens)] : index
+ %v6 = vector.extract %sum[6] : vector<8xf32> -> f32
+ view.store %v6, %delta_view[%vr6, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ %ri7 = index.constant 14 : index
+ %r7 = index.add %half, %ri7 : index
+ %diag7 = index.cmp eq, %r7, %col : index
+ %write7 = scalar.andi %diag7, %valid : i1
+ scf.if %write7 {
+ %vr7 = index.assume %row [lt(%row, %tokens)] : index
+ %v7 = vector.extract %sum[7] : vector<8xf32> -> f32
+ view.store %v7, %delta_view[%vr7, %head] : f32, view<[%tokens]x[%heads]xf32>
+ }
+ kernel.return
+}

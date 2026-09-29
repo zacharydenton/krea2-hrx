@@ -7,6 +7,53 @@ use crate::kernels::Scalars;
 use crate::ops::{Ops, Tensor, config};
 use crate::{Error, Result};
 
+#[derive(Default, serde::Serialize)]
+struct HostTiming {
+    calls: usize,
+    milliseconds: f64,
+}
+
+thread_local! {
+    static HOST_TIMINGS: std::cell::RefCell<std::collections::BTreeMap<&'static str, HostTiming>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+fn host_profile() -> bool {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var_os("KREA2_HOST_PROFILE").is_some_and(|value| value == "1")
+    });
+    *ENABLED
+}
+
+pub(crate) fn profile<T>(name: &'static str, run: impl FnOnce() -> Result<T>) -> Result<T> {
+    if !host_profile() {
+        return run();
+    }
+    let started = std::time::Instant::now();
+    let result = run();
+    let milliseconds = started.elapsed().as_secs_f64() * 1000.0;
+    HOST_TIMINGS.with_borrow_mut(|timings| {
+        let row = timings.entry(name).or_default();
+        row.calls += 1;
+        row.milliseconds += milliseconds;
+    });
+    result
+}
+
+pub(crate) fn clear_host_timings() {
+    if host_profile() {
+        HOST_TIMINGS.with_borrow_mut(|timings| timings.clear());
+    }
+}
+
+pub(crate) fn report_host_timings() {
+    if host_profile() {
+        HOST_TIMINGS.with_borrow(|timings| {
+            eprintln!("training host operations: {}", serde_json::to_string(timings).unwrap());
+        });
+    }
+}
+
 /// A row-major FP32 device matrix, used for gradients and optimizer state.
 #[derive(Clone)]
 pub struct FloatTensor {
@@ -113,10 +160,20 @@ pub fn matmul(
     b: &Tensor,
     alpha: f32,
 ) -> Result<Tensor> {
+    profile("matmul", || matmul_inner(ops, stream, a, b, alpha))
+}
+
+fn matmul_inner(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    alpha: f32,
+) -> Result<Tensor> {
     if a.cols() != b.cols() || !alpha.is_finite() {
         return Err(Error::invalid("training GEMM dimensions"));
     }
-    let out = ops.tensor(stream, a.rows(), b.rows())?;
+    let out = profile("bf16_allocation", || ops.tensor(stream, a.rows(), b.rows()))?;
     if a.rows() >= 512 && b.rows().is_multiple_of(64) && a.cols().is_multiple_of(64) {
         // SAFETY: this kernel permits a ragged M, with full 64-column N/K tiles.
         // Both operands are contiguous row-major BF16 matrices; the output is M x N.
@@ -168,11 +225,21 @@ pub fn matmul_nn(
     b: &Tensor,
     alpha: f32,
 ) -> Result<Tensor> {
+    profile("matmul_nn", || matmul_nn_inner(ops, stream, a, b, alpha))
+}
+
+fn matmul_nn_inner(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    alpha: f32,
+) -> Result<Tensor> {
     if a.cols() != b.rows() || !alpha.is_finite() {
         return Err(Error::invalid("training NN GEMM dimensions"));
     }
     let (m, n, k) = (a.rows(), b.cols(), a.cols());
-    let out = ops.tensor(stream, m, n)?;
+    let out = profile("bf16_allocation", || ops.tensor(stream, m, n))?;
     if m >= 512 && n.is_multiple_of(64) && k.is_multiple_of(64) {
         // SAFETY: the matrices are M x K, K x N and M x N; N/K have full 64-wide tiles.
         unsafe {
@@ -216,6 +283,16 @@ pub fn matmul_nn(
 
 /// FP32 result for an adapter parameter gradient.
 pub fn matmul_float(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    alpha: f32,
+) -> Result<FloatTensor> {
+    profile("matmul_float", || matmul_float_inner(ops, stream, a, b, alpha))
+}
+
+fn matmul_float_inner(
     ops: &Ops,
     stream: &Stream,
     a: &Tensor,
@@ -281,6 +358,10 @@ pub fn flow_loss(
 
 /// Transpose a BF16 matrix without a host round trip.
 pub fn transpose(ops: &Ops, stream: &Stream, x: &Tensor) -> Result<Tensor> {
+    profile("transpose", || transpose_inner(ops, stream, x))
+}
+
+fn transpose_inner(ops: &Ops, stream: &Stream, x: &Tensor) -> Result<Tensor> {
     let out = ops.tensor(stream, x.cols(), x.rows())?;
     // SAFETY: each group transposes a 32x32 tile, guarding both ragged edges.
     unsafe {
@@ -511,6 +592,21 @@ fn attention_config(tokens: usize, heads: usize, kv: usize) -> crate::kernels::C
     ])
 }
 
+fn pad_attention_input(
+    ops: &Ops,
+    stream: &Stream,
+    input: &Tensor,
+    capacity: usize,
+) -> Result<Tensor> {
+    if input.rows() == capacity {
+        return Ok(input.clone());
+    }
+    let out = ops.tensor(stream, capacity, input.cols())?;
+    stream.fill(out.binding()?, 0)?;
+    stream.copy(out.binding()?.slice(0, input.size() * 2)?, input.binding()?)?;
+    Ok(out)
+}
+
 /// Streaming GQA with linear auxiliary storage and FP32 softmax accumulation.
 pub fn attention(
     ops: &Ops,
@@ -534,6 +630,41 @@ pub fn attention(
     let output = ops.tensor(stream, q.rows(), q.cols())?;
     let exact = FloatTensor::scratch(ops, stream, q.rows(), q.cols())?;
     let lse = FloatTensor::scratch(ops, stream, q.rows(), heads)?;
+    if (16..=65536).contains(&q.rows()) && q.cols() <= 32768 && heads == kv * 4 {
+        let capacity = q.rows().div_ceil(16) * 16 + 16;
+        let qp = pad_attention_input(ops, stream, q, capacity)?;
+        let kp = pad_attention_input(ops, stream, k, capacity)?;
+        let vp = pad_attention_input(ops, stream, v, capacity)?;
+        let vt = transpose(ops, stream, &vp)?;
+        // SAFETY: operands have zero-filled 16-token headroom; each workgroup owns
+        // sixteen queries and four heads, writing only valid rows to all outputs.
+        unsafe {
+            ops.launch(
+                stream,
+                "train_attention_flash",
+                config(&[
+                    ("q_stride", q.cols()),
+                    ("kv_stride", k.cols()),
+                    ("out_stride", q.cols()),
+                    ("tokens", q.rows()),
+                    ("token_capacity", capacity),
+                ]),
+                &Scalars::new().index(q.rows()),
+                &[
+                    qp.binding()?,
+                    kp.binding()?,
+                    vt.binding()?,
+                    output.binding()?,
+                    exact.binding(),
+                    lse.binding(),
+                ],
+                q.rows().div_ceil(16),
+                kv,
+                128,
+            )?;
+        }
+        return Ok(Attention { output, exact, lse, heads, kv });
+    }
     // SAFETY: dimensions above match the configured GQA layout; a wave owns one query/head.
     unsafe {
         ops.launch(
@@ -588,18 +719,79 @@ pub fn attention_backward(
     let dv = ops.tensor(stream, v.rows(), v.cols())?;
     let conf = attention_config(q.rows(), heads, kv);
     let scalars = Scalars::new().index(q.rows());
+    let tiled = (16..=65536).contains(&q.rows()) && q.cols() <= 32768 && heads == kv * 4;
     // SAFETY: each kernel owns disjoint output rows; all shapes match conf and share the stream.
     unsafe {
         ops.launch(
             stream,
-            "train_attention_delta",
-            conf.clone(),
+            if tiled { "train_attention_flash_delta" } else { "train_attention_delta" },
+            if tiled {
+                config(&[("tokens", q.rows()), ("heads", heads), ("q_stride", q.cols())])
+            } else {
+                conf.clone()
+            },
             &scalars,
             &[grad.binding()?, forward.exact.binding(), delta.binding()],
-            q.rows() * heads,
-            1,
+            if tiled { q.rows().div_ceil(16) } else { q.rows() * heads },
+            if tiled { heads } else { 1 },
             32,
         )?;
+        if tiled {
+            let capacity = q.rows().div_ceil(16) * 16;
+            let qp = pad_attention_input(ops, stream, q, capacity)?;
+            let kp = pad_attention_input(ops, stream, k, capacity)?;
+            let vp = pad_attention_input(ops, stream, v, capacity)?;
+            let gp = pad_attention_input(ops, stream, grad, capacity)?;
+            let kt = transpose(ops, stream, &kp)?;
+            let qt = transpose(ops, stream, &qp)?;
+            let gt = transpose(ops, stream, &gp)?;
+            let tiled = config(&[
+                ("tokens", q.rows()),
+                ("token_capacity", capacity),
+                ("q_stride", q.cols()),
+                ("kv_stride", k.cols()),
+                ("heads", heads),
+                ("kv", kv),
+            ]);
+            let mut args = vec![
+                qp.binding()?,
+                kp.binding()?,
+                vp.binding()?,
+                gp.binding()?,
+                forward.lse.binding(),
+                delta.binding(),
+                kt.binding()?,
+                gt.binding()?,
+                dq.binding()?,
+                dq.binding()?,
+            ];
+            // Padded inputs cover every 16-row tile. Each wave owns its output
+            // rows/head; dKV reduces the four query heads locally without atomics.
+            ops.launch(
+                stream,
+                "train_attention_flash_dq",
+                tiled.clone(),
+                &scalars,
+                &args,
+                q.rows().div_ceil(16),
+                heads,
+                32,
+            )?;
+            args[6] = qt.binding()?;
+            args[8] = dk.binding()?;
+            args[9] = dv.binding()?;
+            ops.launch(
+                stream,
+                "train_attention_flash_dkv",
+                tiled,
+                &scalars,
+                &args,
+                q.rows().div_ceil(16),
+                kv,
+                32,
+            )?;
+            return Ok((dq, dk, dv));
+        }
         let inputs = [
             q.binding()?,
             k.binding()?,

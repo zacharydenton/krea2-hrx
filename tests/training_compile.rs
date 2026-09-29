@@ -6,7 +6,9 @@ use krea2::kernels::{compiler, sources};
 fn training_kernels_compile_without_a_device() {
     let compiler = compiler(None).unwrap();
     for &(name, source) in sources::AUXILIARY.iter().filter(|(name, _)| {
-        (name.starts_with("train_") && !name.starts_with("train_gemm"))
+        (name.starts_with("train_")
+            && !name.starts_with("train_gemm")
+            && !name.starts_with("train_attention_flash"))
             || *name == "lora_transport"
     }) {
         let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
@@ -41,9 +43,14 @@ fn training_kernels_compile_without_a_device() {
 #[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
 fn real_training_attention_shapes_compile_without_spills() {
     let compiler = compiler(None).unwrap();
-    for tokens in [1024usize, 1043, 4096, 4115] {
+    // Include actual 512-area buckets with text tokens, not only round lengths.
+    for tokens in [1015usize, 1023, 1024, 1025, 1043, 1067, 1070, 1074, 4096, 4115] {
         for name in [
             "train_attention",
+            "train_attention_flash",
+            "train_attention_flash_dq",
+            "train_attention_flash_dkv",
+            "train_attention_flash_delta",
             "train_attention_delta",
             "train_attention_dq",
             "train_attention_dkv",
@@ -53,9 +60,28 @@ fn real_training_attention_shapes_compile_without_spills() {
             for (key, value) in [
                 (
                     "grid_x",
-                    tokens * if name.starts_with("train_attention_dkv") { 12 } else { 48 },
+                    if name.starts_with("train_attention_flash") {
+                        tokens.div_ceil(16)
+                    } else {
+                        tokens * if name.starts_with("train_attention_dkv") { 12 } else { 48 }
+                    },
                 ),
-                ("grid_y", 1),
+                (
+                    "grid_y",
+                    match name {
+                        "train_attention_flash" | "train_attention_flash_dkv" => 12,
+                        "train_attention_flash_dq" | "train_attention_flash_delta" => 48,
+                        _ => 1,
+                    },
+                ),
+                ("q_stride", 6144),
+                ("kv_stride", 1536),
+                ("out_stride", 6144),
+                (
+                    "token_capacity",
+                    tokens.div_ceil(16) * 16
+                        + if name == "train_attention_flash" { 16 } else { 0 },
+                ),
                 ("tokens", tokens),
                 ("heads", 48),
                 ("kv", 12),

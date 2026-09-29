@@ -68,11 +68,13 @@ fn main() -> Result<()> {
             }
         }
         Command::Prepare { config } => {
+            prefer_oom_victim()?;
             let config = TrainConfig::read(&config)?;
             let data = krea2::training::prepare::prepare(&config)?;
             println!("Prepared {} images in {}", data.samples.len(), config.output.display());
         }
         Command::Run { config, resume, stop_after } => {
+            prefer_oom_victim()?;
             let mut trainer = match resume {
                 Some(path) => Trainer::resume(&path)?,
                 None => Trainer::open(TrainConfig::read(&config.context("missing config")?)?)?,
@@ -102,6 +104,13 @@ fn main() -> Result<()> {
         Command::Evaluate { run, model, strengths } => evaluate(run, model, strengths)?,
     }
     Ok(())
+}
+
+fn prefer_oom_victim() -> Result<()> {
+    // GPU-pinned RAM is not fully reflected in process RSS. Prefer terminating
+    // this disposable training process over the user's desktop if RAM runs out.
+    std::fs::write("/proc/self/oom_score_adj", "1000")
+        .context("could not set training process OOM priority")
 }
 
 fn evaluate(run: PathBuf, model: PathBuf, strengths: Vec<f32>) -> Result<()> {

@@ -1,6 +1,7 @@
 //! Character LoRA training with explicit Loom backward operations.
 mod config;
 pub mod dataset;
+mod memory;
 pub mod model;
 pub mod ops;
 pub mod optimizer;

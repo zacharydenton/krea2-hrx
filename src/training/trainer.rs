@@ -137,6 +137,7 @@ impl Trainer {
 
     fn build(config: TrainConfig, resume: Option<(&Path, State)>) -> Result<Self> {
         config.validate()?;
+        super::memory::during_run()?;
         let data = prepare::load(&config)?;
         let memory = MemoryEstimate::for_run(&config, &data)?;
         eprintln!(
@@ -147,6 +148,7 @@ impl Trainer {
         if memory.total > config.memory_gib * (1usize << 30) {
             return Err(Error::invalid("training allocation estimate exceeds memory_gib"));
         }
+        super::memory::before_load(memory.total)?;
         let budget = hrx::residency::ResidencyManager::new(config.memory_gib * (1usize << 30))?;
         let mut stream = Stream::open()?.with_memory_budget(budget.budget());
         let target = stream.target().as_str().to_owned();
@@ -189,6 +191,7 @@ impl Trainer {
             config.scratch_pool_mib << 20,
         )));
         let model = Transformer::load(&models.ops, &mut stream, &config.model, Some(&adapter))?;
+        super::memory::during_run()?;
         drop(adapter);
         if let Some((path, _)) = &resume {
             let file = Checkpoint::open(&path.join("optimizer.safetensors"))?;
@@ -252,6 +255,8 @@ impl Trainer {
             return Ok(None);
         }
         self.failed = true;
+        super::memory::during_run()?;
+        ops::clear_host_timings();
         let started = Instant::now();
         let mut loss = 0.0;
         for _ in 0..self.config.accumulation {
@@ -281,6 +286,7 @@ impl Trainer {
             );
         }
         self.state.step = next;
+        ops::report_host_timings();
         self.state.rng_word = self.rng.get_word_pos().to_string();
         self.failed = false;
         Ok(Some(StepStats {
@@ -348,6 +354,7 @@ impl Trainer {
         let profile = crate::kernels::native_profile();
         let forward_started = Instant::now();
         for block in 0..28 {
+            super::memory::during_run()?;
             let m = mods.view(6, 6144, block * 6 * 6144)?;
             let tape = self.model.block(
                 ops,
@@ -387,6 +394,7 @@ impl Trainer {
         let mut recompute_ms = 0.0;
         let mut backward_ms = 0.0;
         for block in (0..28).rev() {
+            super::memory::during_run()?;
             boundaries.pop();
             let input = boundaries.last().expect("saved block input");
             let m = mods.view(6, 6144, block * 6 * 6144)?;

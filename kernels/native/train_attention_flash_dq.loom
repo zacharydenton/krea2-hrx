@@ -1,0 +1,347 @@
+// Tiled attention backward: one wave owns sixteen output rows and one head.
+// Recompute scores in FP32 using BF16 WMMA; split P and dS into BF16 high
+// and residual parts before gradient products. No score matrix or atomics.
+// Inputs are zero-padded to token_capacity; transposed operands have layout
+// [channel][token_capacity]. dKV sums all four query heads in FP32.
+// Keep this wave's Q and upstream gradient in LDS across every key tile.
+// Rolled channel dot products bound SGPR pressure and avoid private spills.
+amdgpu.target<gfx11-generic> @krea2_train_attention_flash_dq_target {subgroup_size = 32}
+config.decl @krea2.train_attention_flash_dq.tokens : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.token_capacity : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.q_stride : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.kv_stride : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.heads : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.kv : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_flash_dq.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_attention_flash_dq_target) export("krea2_train_attention_flash_dq") @krea2_train_attention_flash_dq(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 32 : index
+ %gx = config.get @krea2.train_attention_flash_dq.grid_x : index
+ %gy = config.get @krea2.train_attention_flash_dq.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %q: buffer, %k: buffer, %v: buffer, %grad: buffer, %lse: buffer, %delta: buffer, %trans: buffer, %grad_trans: buffer, %out: buffer, %outv: buffer) {
+ %c0 = index.constant 0 : index
+ %c1 = index.constant 1 : index
+ %c2 = index.constant 2 : index
+ %c4 = index.constant 4 : index
+ %c8 = index.constant 8 : index
+ %c15 = index.constant 15 : index
+ %c16 = index.constant 16 : index
+ %c32 = index.constant 32 : index
+ %c48 = index.constant 48 : index
+ %c64 = index.constant 64 : index
+ %c80 = index.constant 80 : index
+ %c96 = index.constant 96 : index
+ %c112 = index.constant 112 : index
+ %c128 = index.constant 128 : index
+ %tokens = config.get @krea2.train_attention_flash_dq.tokens : index
+ %token_capacity = config.get @krea2.train_attention_flash_dq.token_capacity : index
+ %q_stride = config.get @krea2.train_attention_flash_dq.q_stride : index
+ %kv_stride = config.get @krea2.train_attention_flash_dq.kv_stride : index
+ %heads = config.get @krea2.train_attention_flash_dq.heads : index
+ %kv = config.get @krea2.train_attention_flash_dq.kv : index
+ %offset = index.constant 0 : offset
+ %bytes = index.constant 9728 : offset
+ %lds = buffer.alloca<workgroup> align(16) %bytes : buffer
+ %scratch = buffer.view %lds[%offset] : buffer -> view<16x16xbf16>
+ %result = buffer.view %lds[%offset] : buffer -> view<16x16xf32>
+ %zf = scalar.constant 0.0 : f32
+ %scale = scalar.constant 0.08838834764831845 : f32
+ %scalev = vector.splat %scale : vector<8xf32>
+ %zv = vector.constant 0.0 : vector<8xf32>
+ %init = vector.fragment<init> %zv shape [%c16, %c16] : vector<8xf32>
+ %tile = kernel.workgroup.id<x> : index
+ %head_raw = kernel.workgroup.id<y> : index
+ %lane = kernel.subgroup.lane.id : index
+ %col = index.rem %lane, %c16 : index
+ %row_half = index.div %lane, %c16 : index
+ %origin = index.mul %tile, %c16 : index
+ %round = index.add %tokens, %c15 : index
+ %tiles = index.div %round, %c16 : index
+ %head = index.rem %head_raw, %heads : index
+ %base = index.mul %head, %c128 : index
+ %kvhead = index.div %head, %c4 : index
+ %kvbase = index.mul %kvhead, %c128 : index
+ %q_global = buffer.assume.memory_space<global> %q : buffer
+ %q_view = buffer.view %q_global[%offset] : buffer -> view<[%token_capacity]x[%q_stride]xbf16>
+ %k_global = buffer.assume.memory_space<global> %k : buffer
+ %k_view = buffer.view %k_global[%offset] : buffer -> view<[%token_capacity]x[%kv_stride]xbf16>
+ %v_global = buffer.assume.memory_space<global> %v : buffer
+ %v_view = buffer.view %v_global[%offset] : buffer -> view<[%token_capacity]x[%kv_stride]xbf16>
+ %grad_global = buffer.assume.memory_space<global> %grad : buffer
+ %grad_view = buffer.view %grad_global[%offset] : buffer -> view<[%token_capacity]x[%q_stride]xbf16>
+ %lse_global = buffer.assume.memory_space<global> %lse : buffer
+ %lse_view = buffer.view %lse_global[%offset] : buffer -> view<[%tokens]x[%heads]xf32>
+ %delta_global = buffer.assume.memory_space<global> %delta : buffer
+ %delta_view = buffer.view %delta_global[%offset] : buffer -> view<[%tokens]x[%heads]xf32>
+ %trans_global = buffer.assume.memory_space<global> %trans : buffer
+ %trans_view = buffer.view %trans_global[%offset] : buffer -> view<[%kv_stride]x[%token_capacity]xbf16>
+ %grad_trans_global = buffer.assume.memory_space<global> %grad_trans : buffer
+ %grad_trans_view = buffer.view %grad_trans_global[%offset] : buffer -> view<[%q_stride]x[%token_capacity]xbf16>
+ %out_global = buffer.assume.memory_space<global> %out : buffer
+ %out_view = buffer.view %out_global[%offset] : buffer -> view<[%tokens]x[%q_stride]xbf16>
+ %outv_global = buffer.assume.memory_space<global> %outv : buffer
+ %outv_view = buffer.view %outv_global[%offset] : buffer -> view<[%tokens]x[%q_stride]xbf16>
+ %left_offset = index.constant 1024 : offset
+ %grad_offset = index.constant 5376 : offset
+ %left_tile = buffer.view %lds[%left_offset] : buffer -> view<16x136xbf16>
+ %grad_tile = buffer.view %lds[%grad_offset] : buffer -> view<16x136xbf16>
+ %stage_row = index.div %lane, %c8 : index
+ %stage_chunk = index.rem %lane, %c8 : index
+ %stage_col = index.mul %stage_chunk, %c16 : index
+ %stage_global_col = index.add %base, %stage_col : index
+ scf.for %stage = [%c0 to %c4 step %c1] {
+ %stage_offset = index.mul %stage, %c4 : index
+ %stage_local_row = index.add %stage_row, %stage_offset : index
+ %stage_global_row = index.add %origin, %stage_local_row : index
+ %stage_left = vector.load %q_view[%stage_global_row, %stage_global_col] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ vector.store %stage_left, %left_tile[%stage_local_row, %stage_col] : vector<16xbf16>, view<16x136xbf16>
+ %stage_grad = vector.load %grad_view[%stage_global_row, %stage_global_col] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ vector.store %stage_grad, %grad_tile[%stage_local_row, %stage_col] : vector<16xbf16>, view<16x136xbf16>
+ }
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %ri0 = index.constant 0 : index
+ %rl0 = index.add %row_half, %ri0 : index
+ %rg0 = index.add %origin, %rl0 : index
+ %valid0 = index.cmp ult, %rg0, %tokens : index
+ %lv0, %dv0 = scf.if %valid0 -> (f32, f32) {
+ %rr0 = index.assume %rg0 [lt(%rg0, %tokens)] : index
+ %ll0 = view.load %lse_view[%rr0, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd0 = view.load %delta_view[%rr0, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll0, %dd0 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri1 = index.constant 2 : index
+ %rl1 = index.add %row_half, %ri1 : index
+ %rg1 = index.add %origin, %rl1 : index
+ %valid1 = index.cmp ult, %rg1, %tokens : index
+ %lv1, %dv1 = scf.if %valid1 -> (f32, f32) {
+ %rr1 = index.assume %rg1 [lt(%rg1, %tokens)] : index
+ %ll1 = view.load %lse_view[%rr1, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd1 = view.load %delta_view[%rr1, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll1, %dd1 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri2 = index.constant 4 : index
+ %rl2 = index.add %row_half, %ri2 : index
+ %rg2 = index.add %origin, %rl2 : index
+ %valid2 = index.cmp ult, %rg2, %tokens : index
+ %lv2, %dv2 = scf.if %valid2 -> (f32, f32) {
+ %rr2 = index.assume %rg2 [lt(%rg2, %tokens)] : index
+ %ll2 = view.load %lse_view[%rr2, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd2 = view.load %delta_view[%rr2, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll2, %dd2 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri3 = index.constant 6 : index
+ %rl3 = index.add %row_half, %ri3 : index
+ %rg3 = index.add %origin, %rl3 : index
+ %valid3 = index.cmp ult, %rg3, %tokens : index
+ %lv3, %dv3 = scf.if %valid3 -> (f32, f32) {
+ %rr3 = index.assume %rg3 [lt(%rg3, %tokens)] : index
+ %ll3 = view.load %lse_view[%rr3, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd3 = view.load %delta_view[%rr3, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll3, %dd3 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri4 = index.constant 8 : index
+ %rl4 = index.add %row_half, %ri4 : index
+ %rg4 = index.add %origin, %rl4 : index
+ %valid4 = index.cmp ult, %rg4, %tokens : index
+ %lv4, %dv4 = scf.if %valid4 -> (f32, f32) {
+ %rr4 = index.assume %rg4 [lt(%rg4, %tokens)] : index
+ %ll4 = view.load %lse_view[%rr4, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd4 = view.load %delta_view[%rr4, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll4, %dd4 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri5 = index.constant 10 : index
+ %rl5 = index.add %row_half, %ri5 : index
+ %rg5 = index.add %origin, %rl5 : index
+ %valid5 = index.cmp ult, %rg5, %tokens : index
+ %lv5, %dv5 = scf.if %valid5 -> (f32, f32) {
+ %rr5 = index.assume %rg5 [lt(%rg5, %tokens)] : index
+ %ll5 = view.load %lse_view[%rr5, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd5 = view.load %delta_view[%rr5, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll5, %dd5 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri6 = index.constant 12 : index
+ %rl6 = index.add %row_half, %ri6 : index
+ %rg6 = index.add %origin, %rl6 : index
+ %valid6 = index.cmp ult, %rg6, %tokens : index
+ %lv6, %dv6 = scf.if %valid6 -> (f32, f32) {
+ %rr6 = index.assume %rg6 [lt(%rg6, %tokens)] : index
+ %ll6 = view.load %lse_view[%rr6, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd6 = view.load %delta_view[%rr6, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll6, %dd6 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ri7 = index.constant 14 : index
+ %rl7 = index.add %row_half, %ri7 : index
+ %rg7 = index.add %origin, %rl7 : index
+ %valid7 = index.cmp ult, %rg7, %tokens : index
+ %lv7, %dv7 = scf.if %valid7 -> (f32, f32) {
+ %rr7 = index.assume %rg7 [lt(%rg7, %tokens)] : index
+ %ll7 = view.load %lse_view[%rr7, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ %dd7 = view.load %delta_view[%rr7, %head] : view<[%tokens]x[%heads]xf32> -> f32
+ scf.yield %ll7, %dd7 : f32, f32
+ } else {
+ scf.yield %zf, %zf : f32, f32
+ }
+ %ls = vector.from_elements %lv0, %lv1, %lv2, %lv3, %lv4, %lv5, %lv6, %lv7 : vector<8xf32>
+ %ds = vector.from_elements %dv0, %dv1, %dv2, %dv3, %dv4, %dv5, %dv6, %dv7 : vector<8xf32>
+ %iterations = index.mul %tiles, %c1 : index
+ %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7 = scf.for %it = [%c0 to %iterations step %c1](%acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+ %keytile = index.rem %it, %tiles : index
+ %other = index.mul %keytile, %c16 : index
+ %other_row0 = index.add %other, %col : index
+ %other_row = index.assume %other_row0 [lt(%other_row0, %token_capacity)] : index
+ %other_valid = index.cmp ult, %other_row, %tokens : index
+ %score7 = scf.for %channel_score = [%c0 to %c128 step %c16](%dot_score = %init : vector<8xf32>) -> (vector<8xf32>) {
+ %score_lc = index.add %base, %channel_score : index
+ %score_rc = index.add %kvbase, %channel_score : index
+ %score_lr = index.add %origin, %col : index
+ %score_ld = vector.load %left_tile[%col, %channel_score] : view<16x136xbf16> -> vector<16xbf16>
+ %score_l = vector.fragment<lhs> %score_ld shape [%c16, %c16] : vector<16xbf16>
+ %score_raw = vector.load %k_view[%other_row, %score_rc] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
+ %score_r = vector.fragment<rhs> %score_raw shape [%c16, %c16] : vector<16xbf16>
+ %score_next = vector.mma %score_l, %score_r, %dot_score : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ scf.yield %score_next : vector<8xf32>
+ }
+ %dp7 = scf.for %channel_dp = [%c0 to %c128 step %c16](%dot_dp = %init : vector<8xf32>) -> (vector<8xf32>) {
+ %dp_lc = index.add %base, %channel_dp : index
+ %dp_rc = index.add %kvbase, %channel_dp : index
+ %dp_lr = index.add %origin, %col : index
+ %dp_ld = vector.load %grad_tile[%col, %channel_dp] : view<16x136xbf16> -> vector<16xbf16>
+ %dp_l = vector.fragment<lhs> %dp_ld shape [%c16, %c16] : vector<16xbf16>
+ %dp_raw = vector.load %v_view[%other_row, %dp_rc] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
+ %dp_r = vector.fragment<rhs> %dp_raw shape [%c16, %c16] : vector<16xbf16>
+ %dp_next = vector.mma %dp_l, %dp_r, %dot_dp : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ scf.yield %dp_next : vector<8xf32>
+ }
+ %scaled = vector.mulf %score7, %scalev : vector<8xf32>
+ %shifted = vector.subf %scaled, %ls : vector<8xf32>
+ %prob0 = vector.expf<afn> %shifted : vector<8xf32>
+ %prob = scf.select %other_valid, %prob0, %zv : vector<8xf32>
+ %center = vector.subf %dp7, %ds : vector<8xf32>
+ %weighted = vector.mulf %prob, %center : vector<8xf32>
+ %deriv = vector.mulf %weighted, %scalev : vector<8xf32>
+ vector.fragment.store<result> %deriv, %scratch[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xbf16>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p0hi = vector.fragment.load<lhs> %scratch[%c0, %c0] shape [%c16, %c16] : view<16x16xbf16> -> vector<16xbf16>
+ %p0round = vector.fptrunc %deriv : vector<8xf32> to vector<8xbf16>
+ %p0wide = vector.extf %p0round : vector<8xbf16> to vector<8xf32>
+ %p0residual = vector.subf %deriv, %p0wide : vector<8xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ vector.fragment.store<result> %p0residual, %scratch[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xbf16>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p0lo = vector.fragment.load<lhs> %scratch[%c0, %c0] shape [%c16, %c16] : view<16x16xbf16> -> vector<16xbf16>
+ %p0c0 = index.add %col, %c0 : index
+ %p0r0 = index.add %kvbase, %p0c0 : index
+ %p0raw0 = vector.load %trans_view[%p0r0, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs0 = vector.fragment<rhs> %p0raw0 shape [%c16, %c16] : vector<16xbf16>
+ %hi0 = vector.mma %p0hi, %p0rhs0, %acc0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next0 = vector.mma %p0lo, %p0rhs0, %hi0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %p0c1 = index.add %col, %c16 : index
+ %p0r1 = index.add %kvbase, %p0c1 : index
+ %p0raw1 = vector.load %trans_view[%p0r1, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs1 = vector.fragment<rhs> %p0raw1 shape [%c16, %c16] : vector<16xbf16>
+ %hi1 = vector.mma %p0hi, %p0rhs1, %acc1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next1 = vector.mma %p0lo, %p0rhs1, %hi1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p0c2 = index.add %col, %c32 : index
+ %p0r2 = index.add %kvbase, %p0c2 : index
+ %p0raw2 = vector.load %trans_view[%p0r2, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs2 = vector.fragment<rhs> %p0raw2 shape [%c16, %c16] : vector<16xbf16>
+ %hi2 = vector.mma %p0hi, %p0rhs2, %acc2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next2 = vector.mma %p0lo, %p0rhs2, %hi2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %p0c3 = index.add %col, %c48 : index
+ %p0r3 = index.add %kvbase, %p0c3 : index
+ %p0raw3 = vector.load %trans_view[%p0r3, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs3 = vector.fragment<rhs> %p0raw3 shape [%c16, %c16] : vector<16xbf16>
+ %hi3 = vector.mma %p0hi, %p0rhs3, %acc3 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next3 = vector.mma %p0lo, %p0rhs3, %hi3 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p0c4 = index.add %col, %c64 : index
+ %p0r4 = index.add %kvbase, %p0c4 : index
+ %p0raw4 = vector.load %trans_view[%p0r4, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs4 = vector.fragment<rhs> %p0raw4 shape [%c16, %c16] : vector<16xbf16>
+ %hi4 = vector.mma %p0hi, %p0rhs4, %acc4 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next4 = vector.mma %p0lo, %p0rhs4, %hi4 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %p0c5 = index.add %col, %c80 : index
+ %p0r5 = index.add %kvbase, %p0c5 : index
+ %p0raw5 = vector.load %trans_view[%p0r5, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs5 = vector.fragment<rhs> %p0raw5 shape [%c16, %c16] : vector<16xbf16>
+ %hi5 = vector.mma %p0hi, %p0rhs5, %acc5 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next5 = vector.mma %p0lo, %p0rhs5, %hi5 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %p0c6 = index.add %col, %c96 : index
+ %p0r6 = index.add %kvbase, %p0c6 : index
+ %p0raw6 = vector.load %trans_view[%p0r6, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs6 = vector.fragment<rhs> %p0raw6 shape [%c16, %c16] : vector<16xbf16>
+ %hi6 = vector.mma %p0hi, %p0rhs6, %acc6 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next6 = vector.mma %p0lo, %p0rhs6, %hi6 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %p0c7 = index.add %col, %c112 : index
+ %p0r7 = index.add %kvbase, %p0c7 : index
+ %p0raw7 = vector.load %trans_view[%p0r7, %other] : view<[%kv_stride]x[%token_capacity]xbf16> -> vector<16xbf16>
+ %p0rhs7 = vector.fragment<rhs> %p0raw7 shape [%c16, %c16] : vector<16xbf16>
+ %hi7 = vector.mma %p0hi, %p0rhs7, %acc7 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %next7 = vector.mma %p0lo, %p0rhs7, %hi7 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ scf.yield %next0, %next1, %next2, %next3, %next4, %next5, %next6, %next7 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+ }
+ %publish_row = index.div %lane, %c4 : index
+ %publish_group = index.rem %lane, %c4 : index
+ %publish_col = index.mul %publish_group, %c4 : index
+ scf.for %fragment0 = [%c0 to %c8 step %c1] {
+ %pi0_1 = index.constant 1 : index
+ %is0_1 = index.cmp eq, %fragment0, %pi0_1 : index
+ %pick0_1 = scf.select %is0_1, %final1, %final0 : vector<8xf32>
+ %pi0_2 = index.constant 2 : index
+ %is0_2 = index.cmp eq, %fragment0, %pi0_2 : index
+ %pick0_2 = scf.select %is0_2, %final2, %pick0_1 : vector<8xf32>
+ %pi0_3 = index.constant 3 : index
+ %is0_3 = index.cmp eq, %fragment0, %pi0_3 : index
+ %pick0_3 = scf.select %is0_3, %final3, %pick0_2 : vector<8xf32>
+ %pi0_4 = index.constant 4 : index
+ %is0_4 = index.cmp eq, %fragment0, %pi0_4 : index
+ %pick0_4 = scf.select %is0_4, %final4, %pick0_3 : vector<8xf32>
+ %pi0_5 = index.constant 5 : index
+ %is0_5 = index.cmp eq, %fragment0, %pi0_5 : index
+ %pick0_5 = scf.select %is0_5, %final5, %pick0_4 : vector<8xf32>
+ %pi0_6 = index.constant 6 : index
+ %is0_6 = index.cmp eq, %fragment0, %pi0_6 : index
+ %pick0_6 = scf.select %is0_6, %final6, %pick0_5 : vector<8xf32>
+ %pi0_7 = index.constant 7 : index
+ %is0_7 = index.cmp eq, %fragment0, %pi0_7 : index
+ %pick0_7 = scf.select %is0_7, %final7, %pick0_6 : vector<8xf32>
+ vector.fragment.store<result> %pick0_7, %result[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %fc0 = index.mul %fragment0, %c16 : index
+ %oc0a = index.add %base, %fc0 : index
+ %oc0 = index.add %oc0a, %publish_col : index
+ scf.for %half0 = [%c0 to %c2 step %c1] {
+ %ro0 = index.mul %half0, %c8 : index
+ %lr0 = index.add %publish_row, %ro0 : index
+ %gr0 = index.add %origin, %lr0 : index
+ %ok0 = index.cmp ult, %gr0, %tokens : index
+ scf.if %ok0 {
+ %row0 = index.assume %gr0 [lt(%gr0, %tokens)] : index
+ %vv0 = vector.load %result[%lr0, %publish_col] : view<16x16xf32> -> vector<4xf32>
+ %hh0 = vector.fptrunc %vv0 : vector<4xf32> to vector<4xbf16>
+ vector.store %hh0, %out_view[%row0, %oc0] : vector<4xbf16>, view<[%tokens]x[%q_stride]xbf16>
+ }
+ }
+ kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ }
+ kernel.return
+}

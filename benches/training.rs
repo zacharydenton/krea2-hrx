@@ -187,28 +187,32 @@ fn attention(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/attention");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
     for tokens in [1024, 4096] {
-        let mut prepared = None;
-        group.bench_function(format!("forward_backward/{tokens}"), |b| {
-            let (mut stream, ops, q, k, v, grad) = prepared.take().unwrap_or_else(|| {
-                let mut stream = Stream::open().unwrap();
-                let ops = Ops::new(BufferPool::new());
-                let q = tensor(&ops, &mut stream, tokens, 6144);
-                let k = tensor(&ops, &mut stream, tokens, 1536);
-                let v = tensor(&ops, &mut stream, tokens, 1536);
-                let grad = tensor(&ops, &mut stream, tokens, 6144);
-                (stream, ops, q, k, v, grad)
+        for backward in [false, true] {
+            let mut prepared = None;
+            let pass = if backward { "forward_backward" } else { "forward" };
+            group.bench_function(format!("{pass}/{tokens}"), |b| {
+                let (mut stream, ops, q, k, v, grad) = prepared.take().unwrap_or_else(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let q = tensor(&ops, &mut stream, tokens, 6144);
+                    let k = tensor(&ops, &mut stream, tokens, 1536);
+                    let v = tensor(&ops, &mut stream, tokens, 1536);
+                    let grad = tensor(&ops, &mut stream, tokens, 6144);
+                    (stream, ops, q, k, v, grad)
+                });
+                let mut run = || {
+                    let f = train::attention(&ops, &stream, &q, &k, &v).unwrap();
+                    let gradients = backward.then(|| {
+                        train::attention_backward(&ops, &stream, &q, &k, &v, &f, &grad).unwrap()
+                    });
+                    stream.synchronize().unwrap();
+                    black_box((f, gradients));
+                };
+                run();
+                b.iter(run);
+                prepared = Some((stream, ops, q, k, v, grad));
             });
-            let mut run = || {
-                let f = train::attention(&ops, &stream, &q, &k, &v).unwrap();
-                let gradients =
-                    train::attention_backward(&ops, &stream, &q, &k, &v, &f, &grad).unwrap();
-                stream.synchronize().unwrap();
-                black_box((f, gradients));
-            };
-            run();
-            b.iter(run);
-            prepared = Some((stream, ops, q, k, v, grad));
-        });
+        }
     }
     group.finish();
 }

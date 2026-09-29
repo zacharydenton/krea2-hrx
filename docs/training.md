@@ -12,8 +12,17 @@ rotary gradients, grouped attention and original-basis adapters on ConvRot
 projections. A two-update RAW run with prepared 1024-area inputs passed exact
 checkpoint/resume equivalence, and its exported adapter loaded into native Turbo
 inference. These checks do not establish character quality or full-model reference
-parity. Attention currently uses a streaming implementation with FP32
-softmax and gradient reductions. Adapter-enabled
+parity. Attention uses tiled BF16 matrix operations for four query heads per
+KV head, with FP32 softmax, saved statistics and gradient accumulation.
+Probabilities and score gradients are split into a BF16 high part and residual
+before the output and gradient products. Backward recomputes each score tile
+and sums shared key/value gradients without atomics or a quadratic score buffer.
+Saved output uses full FP32 division, and its softmax correction uses the same
+matrix reduction as backward to avoid false gradients in saturated attention.
+The changed reduction order is not bitwise equivalent to scalar attention;
+checkpoint/resume equivalence is checked within the same implementation.
+Other head ratios and sequences shorter than 16 tokens use the scalar streaming
+implementation. Adapter-enabled
 INT8 inference also uses separate projections and has not been performance tuned.
 
 ## Configuration
@@ -101,6 +110,12 @@ atomics.
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
+The trainer also requires available system RAM to cover that estimate plus
+16 GiB of headroom, and aborts between blocks if available RAM falls below
+8 GiB. Swap is not counted as GPU capacity. These checks cannot reserve RAM
+against other processes; the `run` and `prepare` commands also mark themselves
+as preferred OOM victims so system pressure targets training before the desktop.
+Builds and full-model trials should run separately on a shared machine.
 
 Use `KREA2_NATIVE_PROFILE=1` for synchronized forward, recomputation, backward,
 and optimizer stage timings. For individual dense kernels, the runnable Criterion
@@ -116,6 +131,12 @@ GPU-clock probes run during benchmark setup. Criterion measures ordinary,
 uninstrumented dispatches afterward; profiling markers serialize execution and
 must not be treated as end-to-end timing. Realistic token counts include text
 tokens, so the benches cover ragged shapes such as 1043 and 4115.
+
+`KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
+operations, transposes and optimizer submissions. These include compilation,
+allocation and queue backpressure, and do not measure kernel execution time.
+The `bf16_allocation` category is a subset of the matrix-operation timings;
+do not add it to those totals. Both profiling switches are off by default.
 
 Caches bind image bytes, captions, buckets, model contents, tokenizer,
 preprocessing source, dependency lockfile and compiler identity. Changed data or

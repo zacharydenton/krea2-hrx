@@ -28,23 +28,25 @@ pub fn update(
     let mut offset = 0;
     for p in &parameters {
         let parts = p.grad.size().div_ceil(1024);
-        // SAFETY: each wave reduces at most 1024 input floats and writes one partial.
-        unsafe {
-            ops.launch(
-                stream,
-                "train_grad_norm",
-                crate::ops::config(&[("parts", parts)]),
-                &Scalars::new().index(p.grad.size()),
-                &[p.grad.binding(), partials.binding().slice(offset * 4, parts * 4)?],
-                parts,
-                1,
-                32,
-            )?;
-        }
+        super::ops::profile("grad_norm_submit", || {
+            // SAFETY: each wave reduces at most 1024 input floats and writes one partial.
+            unsafe {
+                ops.launch(
+                    stream,
+                    "train_grad_norm",
+                    crate::ops::config(&[("parts", parts)]),
+                    &Scalars::new().index(p.grad.size()),
+                    &[p.grad.binding(), partials.binding().slice(offset * 4, parts * 4)?],
+                    parts,
+                    1,
+                    32,
+                )
+            }
+        })?;
         offset += parts;
     }
     let mut sum = 0.0f64;
-    for value in partials.download(stream)? {
+    for value in super::ops::profile("grad_norm_readback", || partials.download(stream))? {
         if !value.is_finite() || value < 0.0 {
             return Err(Error::invalid(
                 "nonfinite adapter gradient; optimizer update cancelled",
@@ -69,6 +71,18 @@ pub fn update(
 
 /// One parameter update; callers must validate all gradients before dispatching.
 pub fn adamw(
+    ops: &Ops,
+    stream: &Stream,
+    p: &Parameter,
+    c: &TrainConfig,
+    scale: f32,
+    bias1: f32,
+    bias2: f32,
+) -> Result<()> {
+    super::ops::profile("adamw", || adamw_inner(ops, stream, p, c, scale, bias1, bias2))
+}
+
+fn adamw_inner(
     ops: &Ops,
     stream: &Stream,
     p: &Parameter,

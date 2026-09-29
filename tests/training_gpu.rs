@@ -301,13 +301,200 @@ fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
 #[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
-    for (tokens, heads, kv) in
-        [(1, 1, 1), (3, 3, 1), (9, 8, 2), (33, 4, 1), (128, 4, 1), (129, 8, 2)]
-    {
+    for (tokens, heads, kv) in [
+        (1, 1, 1),
+        (3, 3, 1),
+        (9, 8, 2),
+        (16, 4, 1),
+        (17, 4, 1),
+        (31, 4, 1),
+        (32, 4, 1),
+        (33, 4, 1),
+        (128, 4, 1),
+        (129, 8, 2),
+        (257, 4, 1),
+        (17, 48, 12),
+        (33, 48, 12),
+    ] {
         check_attention(tokens, heads, kv, 1.0);
     }
     for gain in [8.0, 32.0] {
         check_attention(129, 8, 2, gain);
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn tiled_attention_matches_scalar_kernels_at_model_dimensions() {
+    use krea2::kernels::{Scalars, config};
+    let (t, heads, kv, d) = (1070usize, 48usize, 12usize, 128usize);
+    for gain in [1.0f32, 8.0, 32.0] {
+        let mut stream = Stream::open().unwrap();
+        let ops = Ops::new(BufferPool::new());
+        let scaled =
+            |n, offset| values(n, offset).into_iter().map(|v| v * gain).collect::<Vec<_>>();
+        let q = upload(&ops, &mut stream, t, heads * d, &scaled(t * heads * d, 3));
+        let k = upload(&ops, &mut stream, t, kv * d, &scaled(t * kv * d, 5));
+        let v = upload(&ops, &mut stream, t, kv * d, &values(t * kv * d, 7));
+        let grad = upload(&ops, &mut stream, t, heads * d, &values(t * heads * d, 13));
+        let f = ops::attention(&ops, &stream, &q, &k, &v).unwrap();
+        let (dq, dk, dv) =
+            ops::attention_backward(&ops, &stream, &q, &k, &v, &f, &grad).unwrap();
+        let out = ops.tensor(&stream, t, heads * d).unwrap();
+        let exact =
+            FloatTensor::from_slice(&mut stream, t, heads * d, &vec![0.0; t * heads * d])
+                .unwrap();
+        let lse =
+            FloatTensor::from_slice(&mut stream, t, heads, &vec![0.0; t * heads]).unwrap();
+        let delta =
+            FloatTensor::from_slice(&mut stream, t, heads, &vec![0.0; t * heads]).unwrap();
+        let rq = ops.tensor(&stream, t, heads * d).unwrap();
+        let rk = ops.tensor(&stream, t, kv * d).unwrap();
+        let rv = ops.tensor(&stream, t, kv * d).unwrap();
+        let conf = config([
+            ("tokens", t as u64),
+            ("heads", heads as u64),
+            ("kv", kv as u64),
+            ("qsize", (t * heads * d) as u64),
+            ("ksize", (t * kv * d) as u64),
+            ("stats", (t * heads) as u64),
+        ]);
+        let scalars = Scalars::new().index(t);
+        // SAFETY: the scalar reference kernels receive their contiguous logical
+        // shapes; each wave owns one token/head and every output is disjoint.
+        unsafe {
+            ops.launch(
+                &stream,
+                "train_attention",
+                conf.clone(),
+                &scalars,
+                &[
+                    q.binding().unwrap(),
+                    k.binding().unwrap(),
+                    v.binding().unwrap(),
+                    out.binding().unwrap(),
+                    exact.binding(),
+                    lse.binding(),
+                ],
+                t * heads,
+                1,
+                32,
+            )
+            .unwrap();
+            ops.launch(
+                &stream,
+                "train_attention_delta",
+                conf.clone(),
+                &scalars,
+                &[grad.binding().unwrap(), exact.binding(), delta.binding()],
+                t * heads,
+                1,
+                32,
+            )
+            .unwrap();
+            for (name, a, b, count) in [
+                ("train_attention_dq", &rq, &rq, t * heads),
+                ("train_attention_dkv", &rk, &rv, t * kv),
+            ] {
+                ops.launch(
+                    &stream,
+                    name,
+                    conf.clone(),
+                    &scalars,
+                    &[
+                        q.binding().unwrap(),
+                        k.binding().unwrap(),
+                        v.binding().unwrap(),
+                        grad.binding().unwrap(),
+                        lse.binding(),
+                        delta.binding(),
+                        a.binding().unwrap(),
+                        b.binding().unwrap(),
+                    ],
+                    count,
+                    1,
+                    32,
+                )
+                .unwrap();
+            }
+        }
+        for (name, candidate, reference) in
+            [("output", &f.output, &out), ("dq", &dq, &rq), ("dk", &dk, &rk), ("dv", &dv, &rv)]
+        {
+            let candidate = read(candidate, &mut stream);
+            let reference = read(reference, &mut stream);
+            let error = candidate
+                .iter()
+                .zip(&reference)
+                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                .sum::<f64>();
+            let norm = reference.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>();
+            eprintln!(
+                "attention gain {gain} {name}: relative L2 error {}",
+                (error / norm).sqrt()
+            );
+            // Relative-only: saturated attention has tiny but nonzero dQ/dK.
+            // An absolute floor hid false gradients from approximate division
+            // of saved FP32 output and mismatched delta/dP reductions.
+            close(&candidate, &reference, 0.005, 0.0);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn tiled_attention_real_shapes_match_uniform_attention() {
+    // K=0 makes attention uniform. Constant Q and upstream gradients across
+    // tokens give a closed-form FP64 oracle, including nonzero dK and dV, at
+    // full model dimensions without constructing a quadratic CPU reference.
+    let (heads, kv, d) = (48, 12, 128);
+    for t in [1024, 1043, 4096, 4115] {
+        let mut stream = Stream::open().unwrap();
+        let ops = Ops::new(BufferPool::new());
+        let qrow = values(heads * d, 3);
+        let grow = values(heads * d, 13);
+        let v = values(t * kv * d, 7);
+        let qt = upload(&ops, &mut stream, t, heads * d, &qrow.repeat(t));
+        let kt = upload(&ops, &mut stream, t, kv * d, &vec![0.0; t * kv * d]);
+        let vt = upload(&ops, &mut stream, t, kv * d, &v);
+        let gt = upload(&ops, &mut stream, t, heads * d, &grow.repeat(t));
+        let f = ops::attention(&ops, &stream, &qt, &kt, &vt).unwrap();
+        let (dq, dk, dv) =
+            ops::attention_backward(&ops, &stream, &qt, &kt, &vt, &f, &gt).unwrap();
+        let mut mean = vec![0.0f64; kv * d];
+        for row in v.chunks_exact(kv * d) {
+            for (sum, value) in mean.iter_mut().zip(row) {
+                *sum += f64::from(*value) / t as f64;
+            }
+        }
+        let mut expected_out = vec![0.0; heads * d];
+        let mut expected_v = vec![0.0; kv * d];
+        for h in 0..heads {
+            for c in 0..d {
+                expected_out[h * d + c] = mean[(h / 4) * d + c] as f32;
+                expected_v[(h / 4) * d + c] += grow[h * d + c];
+            }
+        }
+        let mut expected_k = vec![0.0f32; t * kv * d];
+        for row in 0..t {
+            for h in 0..heads {
+                let base = (row * kv + h / 4) * d;
+                let ds = (0..d)
+                    .map(|c| {
+                        f64::from(grow[h * d + c])
+                            * (f64::from(v[base + c]) - mean[(h / 4) * d + c])
+                    })
+                    .sum::<f64>()
+                    / (d as f64).sqrt();
+                for c in 0..d {
+                    expected_k[base + c] += (ds * f64::from(qrow[h * d + c])) as f32;
+                }
+            }
+        }
+        close(&read(&f.output, &mut stream), &expected_out.repeat(t), 0.005, 1e-5);
+        close(&read(&dq, &mut stream), &vec![0.0; t * heads * d], 0.0, 1e-5);
+        close(&read(&dk, &mut stream), &expected_k, 0.005, 1e-5);
+        close(&read(&dv, &mut stream), &expected_v.repeat(t), 0.005, 1e-5);
     }
 }
 
