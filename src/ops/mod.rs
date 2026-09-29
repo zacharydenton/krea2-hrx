@@ -715,7 +715,7 @@ impl Ops {
     /// The bf16 GEMM every dense layer here goes through, at the tile [`tile`]
     /// chooses for its shape.
     #[allow(clippy::too_many_arguments)]
-    fn matmul(
+    pub(crate) fn matmul(
         &self,
         stream: &Stream,
         name: &'static str,

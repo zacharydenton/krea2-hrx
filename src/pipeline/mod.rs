@@ -90,6 +90,8 @@ pub struct Pipeline {
     files: Files,
     compiler: Option<String>,
     models: Models,
+    dense: Option<crate::training::model::Transformer>,
+    adapter_strength: f32,
     /// Calls are serialized: they share the models' buffer pool.
     state: Mutex<State>,
 }
@@ -104,6 +106,33 @@ struct State {
 }
 
 impl Pipeline {
+    /// Open a BF16 or INT8 ConvRot pipeline with one original-basis LoRA adapter.
+    pub fn open_with_adapter(
+        files: Files,
+        compiler: Option<&str>,
+        adapter: &crate::lora::Adapter,
+        strength: f32,
+    ) -> Result<Pipeline> {
+        if !strength.is_finite() {
+            return Err(Error::invalid("LoRA strength must be finite"));
+        }
+        adapter.validate()?;
+        let mut pipeline = Self::open(files, compiler)?;
+        if strength == 0.0 {
+            return Ok(pipeline);
+        }
+        let state = pipeline.state.get_mut().map_err(|_| Error::Poisoned("pipeline"))?;
+        pipeline.dense = None;
+        pipeline.dense = Some(crate::training::model::Transformer::load_inference(
+            &pipeline.models.ops,
+            &mut state.stream,
+            &pipeline.files.checkpoint,
+            Some(adapter),
+        )?);
+        pipeline.adapter_strength = strength;
+        Ok(pipeline)
+    }
+
     /// `compiler` of `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(files: Files, compiler: Option<&str>) -> Result<Pipeline> {
         Self::open_in(files, &ModelContext::new(Default::default())?, compiler)
@@ -121,10 +150,25 @@ impl Pipeline {
         // then moves into the state lock.
         let mut stream = native_stream(context)?;
         let models = Models::open(&mut stream, &files, compiler)?;
+        let checkpoint = crate::checkpoint::Checkpoint::open(&files.checkpoint)?;
+        let dense = if checkpoint.get("blocks.0.attn.wq.weight")?.dtype
+            == crate::checkpoint::DType::BF16
+        {
+            Some(crate::training::model::Transformer::load(
+                &models.ops,
+                &mut stream,
+                &files.checkpoint,
+                None,
+            )?)
+        } else {
+            None
+        };
         Ok(Pipeline {
             context: context.clone(),
             bridge: Arc::new(Bridge::new(native_stream(context)?)),
             models,
+            dense,
+            adapter_strength: 1.0,
             files,
             compiler: compiler.map(str::to_string),
             state: Mutex::new(State {
@@ -318,6 +362,45 @@ impl Pipeline {
         width: usize,
         height: usize,
     ) -> Result<Tensor> {
+        if let Some(dense) = &self.dense {
+            let ops = &self.models.ops;
+            let tokens = text.rows() + inputs.image.rows();
+            let mut x = ops.tensor(stream, tokens, WIDTH)?;
+            stream.copy(x.binding()?.slice(0, text.size() * 2)?, text.binding()?)?;
+            stream.copy(
+                x.binding()?.slice(text.size() * 2, inputs.image.size() * 2)?,
+                inputs.image.binding()?,
+            )?;
+            let mods = crate::training::ops::cast_view(
+                ops,
+                stream,
+                inputs.modulation.binding(),
+                28 * 6,
+                WIDTH,
+            )?;
+            let (cos, sin) = rope_tables(width, height, text.rows());
+            let cos = crate::training::ops::FloatTensor::from_slice(stream, tokens, 128, &cos)?;
+            let sin = crate::training::ops::FloatTensor::from_slice(stream, tokens, 128, &sin)?;
+            for index in 0..28 {
+                x = dense
+                    .block(
+                        ops,
+                        stream,
+                        index,
+                        &x,
+                        &mods.view(6, WIDTH, index * 6 * WIDTH)?,
+                        &cos,
+                        &sin,
+                        self.adapter_strength,
+                    )?
+                    .output;
+            }
+            return self.models.last(
+                stream,
+                &x.view(inputs.image.rows(), WIDTH, text.size())?,
+                &inputs.embedding,
+            );
+        }
         let mut timing = Profile::new(stream, "forward");
         let blocks = self.prepare(
             stream,
@@ -398,6 +481,15 @@ impl Pipeline {
 /// and sines. Geometry, not just the token count: rectangular grids have
 /// different phases. Built once per prepared block shape.
 fn rope(shape: BlockShape) -> (Vec<f32>, Vec<f32>) {
+    rope_tables(shape.width, shape.height, shape.text_tokens)
+}
+
+pub(crate) fn rope_tables(
+    width: usize,
+    height: usize,
+    text_tokens: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let shape = BlockShape { width, height, text_tokens };
     let columns = shape.width / PATCH;
     let tokens = shape.tokens();
     // Three axes over 128 channels: 32 for the frame, 48 each for the row and

@@ -1,0 +1,65 @@
+amdgpu.target<gfx11-generic> @krea2_train_adamw_target {subgroup_size = 32}
+config.decl @krea2.train_adamw.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_adamw.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_adamw_target) export("krea2_train_adamw") @krea2_train_adamw(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %gx = config.get @krea2.train_adamw.grid_x : index
+  %gy = config.get @krea2.train_adamw.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %lr: f32, %decay: f32, %beta1: f32, %beta2: f32, %eps: f32, %grad_scale: f32, %bias1: f32, %bias2: f32, %master: buffer, %grad: buffer, %first: buffer, %second: buffer, %value: buffer) {
+  %zero = index.constant 0 : offset
+  %onef = scalar.constant 1.0 : f32
+  %zerof = scalar.constant 0.0 : f32
+  %step = index.constant 256 : index
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %base = index.mul %group, %step : index
+  %idx = index.add %base, %lane : index
+  %pg = buffer.assume.memory_space<global> %master : buffer
+  %pv = buffer.view %pg[%zero] : buffer -> view<[%n]xf32>
+  %gg = buffer.assume.memory_space<global> %grad : buffer
+  %gv = buffer.view %gg[%zero] : buffer -> view<[%n]xf32>
+  %mg = buffer.assume.memory_space<global> %first : buffer
+  %mv = buffer.view %mg[%zero] : buffer -> view<[%n]xf32>
+  %vg = buffer.assume.memory_space<global> %second : buffer
+  %vv = buffer.view %vg[%zero] : buffer -> view<[%n]xf32>
+  %bg = buffer.assume.memory_space<global> %value : buffer
+  %bv = buffer.view %bg[%zero] : buffer -> view<[%n]xbf16>
+  %ok = index.cmp ult, %idx, %n : index
+  scf.if %ok {
+    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+    %p = view.load %pv[%i] : view<[%n]xf32> -> f32
+    %g0 = view.load %gv[%i] : view<[%n]xf32> -> f32
+    %m0 = view.load %mv[%i] : view<[%n]xf32> -> f32
+    %v0 = view.load %vv[%i] : view<[%n]xf32> -> f32
+    %g = scalar.mulf %g0, %grad_scale : f32
+    %b1c = scalar.subf %onef, %beta1 : f32
+    %b2c = scalar.subf %onef, %beta2 : f32
+    %mold = scalar.mulf %m0, %beta1 : f32
+    %madd = scalar.mulf %g, %b1c : f32
+    %m = scalar.addf %mold, %madd : f32
+    %vold = scalar.mulf %v0, %beta2 : f32
+    %gsquare = scalar.mulf %g, %g : f32
+    %vadd = scalar.mulf %gsquare, %b2c : f32
+    %v = scalar.addf %vold, %vadd : f32
+    %mhat = scalar.divf %m, %bias1 : f32
+    %vhat = scalar.divf %v, %bias2 : f32
+    %root = scalar.sqrtf %vhat : f32
+    %denom = scalar.addf %root, %eps : f32
+    %step0 = scalar.divf %mhat, %denom : f32
+    %update = scalar.mulf %lr, %step0 : f32
+    %ld = scalar.mulf %lr, %decay : f32
+    %retained = scalar.subf %onef, %ld : f32
+    %decayed = scalar.mulf %p, %retained : f32
+    %next = scalar.subf %decayed, %update : f32
+    %rounded = scalar.fptrunc %next : f32 to bf16
+    view.store %next, %pv[%i] : f32, view<[%n]xf32>
+    view.store %m, %mv[%i] : f32, view<[%n]xf32>
+    view.store %v, %vv[%i] : f32, view<[%n]xf32>
+    view.store %zerof, %gv[%i] : f32, view<[%n]xf32>
+    view.store %rounded, %bv[%i] : bf16, view<[%n]xbf16>
+  }
+  kernel.return
+}

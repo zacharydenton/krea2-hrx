@@ -74,6 +74,10 @@ impl Item<'_> {
 }
 
 impl Weights {
+    pub(crate) fn empty() -> Self {
+        Self { values: BTreeMap::new() }
+    }
+
     /// Loads every tensor `rename` maps to a non-empty name.
     pub fn load(
         stream: &mut Stream,

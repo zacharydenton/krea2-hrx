@@ -68,6 +68,12 @@ struct Args {
     /// The int8 ConvRot checkpoint: an explicit file or a name in Comfy-Org/Krea-2
     #[arg(long)]
     model: Option<PathBuf>,
+    /// Character LoRA safetensors adapter
+    #[arg(long)]
+    lora: Option<PathBuf>,
+    /// Adapter multiplier (requires --lora)
+    #[arg(long, default_value_t = 0.9)]
+    lora_strength: f32,
     /// Qwen3-VL-4B text encoder file (default: Hugging Face cache)
     #[arg(long)]
     text_encoder: Option<PathBuf>,
@@ -204,7 +210,15 @@ fn run(args: Args) -> Result<()> {
     let files = request.resolve()?;
     let compiler =
         args.compiler_library.as_ref().map(|path| path.to_string_lossy().into_owned());
-    let pipeline = Pipeline::open(files, compiler.as_deref())?;
+    let pipeline = match &args.lora {
+        Some(path) => Pipeline::open_with_adapter(
+            files,
+            compiler.as_deref(),
+            &krea2::lora::Adapter::load(path)?,
+            args.lora_strength,
+        )?,
+        None => Pipeline::open(files, compiler.as_deref())?,
+    };
     let load = loading.elapsed().as_secs_f64();
     let steps = args.steps.unwrap_or(if pipeline.distilled() { 8 } else { 52 });
     let guidance = args.guidance.unwrap_or(if pipeline.distilled() { 0.0 } else { 3.5 });

@@ -70,10 +70,18 @@ impl<'a> Request<'a> {
             return Ok(value);
         }
         match self.checkpoint.to_str() {
-            Some("krea2_turbo_int8_convrot" | "krea2_turbo_int8_convrot.safetensors") => {
-                Ok(true)
-            }
-            Some("krea2_raw_int8_convrot" | "krea2_raw_int8_convrot.safetensors") => Ok(false),
+            Some(
+                "krea2_turbo_int8_convrot"
+                | "krea2_turbo_int8_convrot.safetensors"
+                | "krea2_turbo_bf16"
+                | "krea2_turbo_bf16.safetensors",
+            ) => Ok(true),
+            Some(
+                "krea2_raw_int8_convrot"
+                | "krea2_raw_int8_convrot.safetensors"
+                | "krea2_raw_bf16"
+                | "krea2_raw_bf16.safetensors",
+            ) => Ok(false),
             _ => Err(Error::invalid(
                 "custom checkpoints require an explicit Turbo or Raw sampler",
             )),

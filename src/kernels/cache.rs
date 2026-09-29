@@ -122,6 +122,7 @@ impl PreparedKernels {
 /// without a device: naming a kernel takes a stream, resolving it does not.
 fn auxiliary_source(name: &str) -> Result<(&'static str, &'static str)> {
     sources::auxiliary_entry(name)
+        .or_else(|| sources::BLOCK.iter().find(|(stem, _)| *stem == name).copied())
         .ok_or_else(|| Error::internal(format!("no auxiliary kernel named {name}")))
 }
 

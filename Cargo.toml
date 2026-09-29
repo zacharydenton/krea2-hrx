@@ -22,12 +22,21 @@ name = "krea2"
 path = "src/main.rs"
 bench = false
 
+[[bin]]
+name = "krea2-train"
+path = "src/train_main.rs"
+bench = false
+
 [[bench]]
 name = "generation"
 harness = false
 
 [[bench]]
 name = "kernels"
+harness = false
+
+[[bench]]
+name = "training"
 harness = false
 
 [lints.rust]
@@ -58,6 +67,9 @@ thiserror = "2"
 # default-features = false keeps this pure Rust: fancy-regex instead of the
 # oniguruma C library, and no progress bars or HTTP.
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+serde = { version = "1.0.229", features = ["derive"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+blake3 = { version = "1.8.7", features = ["pure"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
@@ -65,4 +77,3 @@ criterion = { version = "0.8.2", default-features = false, features = ["cargo_be
 half = { version = "2", features = ["bytemuck"] }
 tempfile = "3"
 unicode-normalization = "0.1"
-

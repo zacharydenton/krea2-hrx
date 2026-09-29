@@ -1,0 +1,44 @@
+amdgpu.target<gfx11-generic> @krea2_lora_transport_target {subgroup_size = 32}
+config.decl @krea2.lora_transport.reverse : %value: index where [range(%value, 1, 2)]
+config.decl @krea2.lora_transport.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.lora_transport.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_lora_transport_target) export("krea2_lora_transport") @krea2_lora_transport(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %gx = config.get @krea2.lora_transport.grid_x : index
+  %gy = config.get @krea2.lora_transport.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %out: buffer) {
+  %zero = index.constant 0 : offset
+  %one = index.constant 1 : index
+  %step = index.constant 256 : index
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %reverse = config.get @krea2.lora_transport.reverse : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %base = index.mul %group, %step : index
+  %idx = index.add %base, %lane : index
+  %xg = buffer.assume.memory_space<global> %x : buffer
+  %og = buffer.assume.memory_space<global> %out : buffer
+  %ok = index.cmp ult, %idx, %n : index
+  scf.if %ok {
+    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+    %forward = index.cmp eq, %reverse, %one : index
+    scf.if %forward {
+      %xv = buffer.view %xg[%zero] : buffer -> view<[%n]xbf16>
+      %ov = buffer.view %og[%zero] : buffer -> view<[%n]xf16>
+      %b = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+      %f = scalar.extf %b : bf16 to f32
+      %h = scalar.fptrunc %f : f32 to f16
+      view.store %h, %ov[%i] : f16, view<[%n]xf16>
+    } else {
+      %xv2 = buffer.view %xg[%zero] : buffer -> view<[%n]xf16>
+      %ov2 = buffer.view %og[%zero] : buffer -> view<[%n]xbf16>
+      %h2 = view.load %xv2[%i] : view<[%n]xf16> -> f16
+      %f2 = scalar.extf %h2 : f16 to f32
+      %b2 = scalar.fptrunc %f2 : f32 to bf16
+      view.store %b2, %ov2[%i] : bf16, view<[%n]xbf16>
+    }
+  }
+  kernel.return
+}

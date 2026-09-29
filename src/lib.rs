@@ -26,11 +26,13 @@
 pub mod checkpoint;
 mod error;
 pub mod kernels;
+pub mod lora;
 pub mod models;
 pub mod numerics;
 pub mod ops;
 pub mod pipeline;
 pub mod session;
 pub mod tokenizer;
+pub mod training;
 
 pub use error::{Error, Result};

@@ -31,7 +31,7 @@ pub struct Models {
     /// The prompt tokenizer and chat template.
     pub tokenizer: Tokenizer,
     text: Weights,
-    transformer: Weights,
+    pub(crate) transformer: Weights,
     vae: Weights,
     /// The 28 blocks' modulation tables as one `[28 * 6][6144]` bf16 tensor.
     block_tables: Tensor,
@@ -60,6 +60,17 @@ impl Models {
         tokenizer: Option<&std::path::Path>,
         compiler: Option<&str>,
     ) -> Result<Models> {
+        Self::load_parts(stream, checkpoint, Some(text_encoder), Some(vae), tokenizer, compiler)
+    }
+
+    pub(crate) fn load_parts(
+        stream: &mut Stream,
+        checkpoint: &std::path::Path,
+        text_encoder: Option<&std::path::Path>,
+        vae: Option<&std::path::Path>,
+        tokenizer: Option<&std::path::Path>,
+        compiler: Option<&str>,
+    ) -> Result<Models> {
         let pool = BufferPool::new();
         let models = Models {
             ops: Ops::with_compiler(Arc::clone(&pool), compiler),
@@ -67,13 +78,19 @@ impl Models {
                 Some(path) => Tokenizer::from_file(path)?,
                 None => Tokenizer::embedded()?,
             },
-            text: Weights::load(stream, &Checkpoint::open(text_encoder)?, text_name)?,
+            text: match text_encoder {
+                Some(path) => Weights::load(stream, &Checkpoint::open(path)?, text_name)?,
+                None => Weights::empty(),
+            },
             transformer: Weights::load(
                 stream,
                 &Checkpoint::open(checkpoint)?,
                 transformer_name,
             )?,
-            vae: Weights::load(stream, &Checkpoint::open(vae)?, vae_name)?,
+            vae: match vae {
+                Some(path) => Weights::load(stream, &Checkpoint::open(path)?, vae_name)?,
+                None => Weights::empty(),
+            },
             block_tables: Tensor::new(&pool, stream, 28 * 6, WIDTH)?,
         };
         models.tables(stream)?;
@@ -630,15 +647,15 @@ struct Tile {
 
 /// The sampler's 2x2-packed latents into the VAE's `[h * w][16]`, undoing the
 /// Wan latent scaling with bf16 rounding at every term.
+pub(crate) const LATENT_MEAN: [f32; 16] = [
+    -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134, -0.0715,
+    0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
+];
+pub(crate) const LATENT_STDDEV: [f32; 16] = [
+    2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652,
+    1.5579, 1.6382, 1.1253, 2.8251, 1.916,
+];
 fn unpack(packed: &[u16], h: usize, w: usize) -> Result<Vec<u16>> {
-    const MEAN: [f32; 16] = [
-        -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508, 0.4134, -0.0715,
-        0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
-    ];
-    const STDDEV: [f32; 16] = [
-        2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743, 3.2687, 2.1526, 2.8652,
-        1.5579, 1.6382, 1.1253, 2.8251, 1.916,
-    ];
     if h == 0
         || w == 0
         || !h.is_multiple_of(2)
@@ -650,8 +667,8 @@ fn unpack(packed: &[u16], h: usize, w: usize) -> Result<Vec<u16>> {
     // The reference divides by a reciprocal it has already rounded, so the
     // rounding happens there and not on the scale itself.
     let inverse: Vec<f32> =
-        STDDEV.iter().map(|&s| to_f32(from_f32(1.0 / to_f32(from_f32(s))))).collect();
-    let mean: Vec<f32> = MEAN.iter().map(|&m| to_f32(from_f32(m))).collect();
+        LATENT_STDDEV.iter().map(|&s| to_f32(from_f32(1.0 / to_f32(from_f32(s))))).collect();
+    let mean: Vec<f32> = LATENT_MEAN.iter().map(|&m| to_f32(from_f32(m))).collect();
     let mut latent = vec![0u16; h * w * 16];
     for y in 0..h {
         for x in 0..w {

@@ -38,6 +38,10 @@ Builds, tests, and model execution use Rust. Kernel sources are maintained direc
 in `kernels`. See the [runtime guide](docs/hrx-runtime.md) for deployment
 and [native tests](docs/testing.md) for validation.
 
+An experimental native character LoRA trainer is under development. See
+[training](docs/training.md) for its configuration, CPU checks, and remaining
+GPU validation. It uses Rust, Loom and HRX throughout.
+
 ## Quick start
 
 Clone the repository and install the runtime CLI:

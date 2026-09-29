@@ -30,6 +30,7 @@ bon
 bon-macros
 bstr
 bytemuck
+byteorder-lite
 bytes
 castaway
 cfg-if
@@ -123,6 +124,7 @@ icu_provider
 ident_case
 idna
 idna_adapter
+image
 indexmap
 ipnet
 is_terminal_polyfill
@@ -154,6 +156,7 @@ mio
 monostate
 monostate-impl
 more-asserts
+moxcms
 multiversion
 multiversion-macros
 multiversion_no_op
@@ -181,6 +184,7 @@ prettyplease
 proc-macro2
 protobuf
 protobuf-support
+pxfm
 quote
 rand
 rand_chacha
@@ -295,3 +299,5 @@ zerotrie
 zerovec
 zerovec-derive
 zmij
+zune-core
+zune-jpeg

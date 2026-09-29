@@ -1,0 +1,33 @@
+amdgpu.target<gfx11-generic> @krea2_train_accumulate_target {subgroup_size = 32}
+
+config.decl @krea2.train_accumulate.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_accumulate.grid_y : %value: index where [range(%value, 1, 1073741824)]
+
+kernel.def target(@krea2_train_accumulate_target) export("krea2_train_accumulate") @krea2_train_accumulate(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %grid_x = config.get @krea2.train_accumulate.grid_x : index
+  %grid_y = config.get @krea2.train_accumulate.grid_y : index
+  kernel.launch.config workgroups(%grid_x, %grid_y, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %dst: buffer, %src: buffer) {
+  %zero_offset = index.constant 0 : offset
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %step = index.constant 256 : index
+  %base = index.mul %group, %step : index
+  %idx = index.add %base, %lane : index
+  %dst_global = buffer.assume.memory_space<global> %dst : buffer
+  %dstv = buffer.view %dst_global[%zero_offset] : buffer -> view<[%n]xf32>
+  %src_global = buffer.assume.memory_space<global> %src : buffer
+  %srcv = buffer.view %src_global[%zero_offset] : buffer -> view<[%n]xf32>
+  %ok = index.cmp ult, %idx, %n : index
+  scf.if %ok {
+    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+    %a = view.load %dstv[%i] : view<[%n]xf32> -> f32
+    %b = view.load %srcv[%i] : view<[%n]xf32> -> f32
+    %sum = scalar.addf %a, %b : f32
+    view.store %sum, %dstv[%i] : f32, view<[%n]xf32>
+  }
+  kernel.return
+}

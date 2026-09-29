@@ -1,0 +1,51 @@
+amdgpu.target<gfx11-generic> @krea2_train_stride_two_target {subgroup_size = 32}
+config.decl @krea2.train_stride_two.width : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_stride_two.cols : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_stride_two.size : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_stride_two.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_stride_two.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_stride_two_target) export("krea2_train_stride_two") @krea2_train_stride_two(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %gx = config.get @krea2.train_stride_two.grid_x : index
+  %gy = config.get @krea2.train_stride_two.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %out: buffer) {
+  %zero = index.constant 0 : offset
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %step = index.constant 256 : index
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %width = config.get @krea2.train_stride_two.width : index
+  %cols = config.get @krea2.train_stride_two.cols : index
+  %size = config.get @krea2.train_stride_two.size : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %base = index.mul %group, %step : index
+  %idx = index.add %base, %lane : index
+  %xg = buffer.assume.memory_space<global> %x : buffer
+  %xv = buffer.view %xg[%zero] : buffer -> view<[%size]xbf16>
+  %og = buffer.assume.memory_space<global> %out : buffer
+  %ov = buffer.view %og[%zero] : buffer -> view<[%n]xbf16>
+  %ok = index.cmp ult, %idx, %n : index
+  scf.if %ok {
+    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+    %pixel = index.div %i, %cols : index
+    %channel = index.rem %i, %cols : index
+    %half = index.div %width, %two : index
+    %y = index.div %pixel, %half : index
+    %xpos = index.rem %pixel, %half : index
+    %y2 = index.mul %y, %two : index
+    %x2 = index.mul %xpos, %two : index
+    %yi = index.add %y2, %one : index
+    %xi = index.add %x2, %one : index
+    %row = index.mul %yi, %width : index
+    %pix = index.add %row, %xi : index
+    %at = index.mul %pix, %cols : index
+    %src = index.add %at, %channel : index
+    %si = index.assume %src [range(%src, 0, 1073741824), lt(%src, %size)] : index
+    %value = view.load %xv[%si] : view<[%size]xbf16> -> bf16
+    view.store %value, %ov[%i] : bf16, view<[%n]xbf16>
+  }
+  kernel.return
+}

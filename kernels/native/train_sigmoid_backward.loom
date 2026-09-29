@@ -1,0 +1,45 @@
+amdgpu.target<gfx11-generic> @krea2_train_sigmoid_backward_target {subgroup_size = 32}
+
+config.decl @krea2.train_sigmoid_backward.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_sigmoid_backward.grid_y : %value: index where [range(%value, 1, 1073741824)]
+
+kernel.def target(@krea2_train_sigmoid_backward_target) export("krea2_train_sigmoid_backward") @krea2_train_sigmoid_backward(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %grid_x = config.get @krea2.train_sigmoid_backward.grid_x : index
+  %grid_y = config.get @krea2.train_sigmoid_backward.grid_y : index
+  kernel.launch.config workgroups(%grid_x, %grid_y, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %grad: buffer, %out: buffer) {
+  %zero_offset = index.constant 0 : offset
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %step = index.constant 256 : index
+  %base = index.mul %group, %step : index
+  %idx = index.add %base, %lane : index
+  %x_global = buffer.assume.memory_space<global> %x : buffer
+  %xv = buffer.view %x_global[%zero_offset] : buffer -> view<[%n]xbf16>
+  %grad_global = buffer.assume.memory_space<global> %grad : buffer
+  %gradv = buffer.view %grad_global[%zero_offset] : buffer -> view<[%n]xbf16>
+  %out_global = buffer.assume.memory_space<global> %out : buffer
+  %outv = buffer.view %out_global[%zero_offset] : buffer -> view<[%n]xbf16>
+  %ok = index.cmp ult, %idx, %n : index
+  scf.if %ok {
+    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+    %xfbits = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+    %xf = scalar.extf %xfbits : bf16 to f32
+    %gfbits = view.load %gradv[%i] : view<[%n]xbf16> -> bf16
+    %gf = scalar.extf %gfbits : bf16 to f32
+    %onef = scalar.constant 1.0 : f32
+    %negative = scalar.negf %xf : f32
+    %exp = scalar.expf<afn> %negative : f32
+    %denom = scalar.addf %onef, %exp : f32
+    %sig = scalar.divf %onef, %denom : f32
+    %complement = scalar.subf %onef, %sig : f32
+    %product = scalar.mulf %sig, %complement : f32
+    %dx = scalar.mulf %gf, %product : f32
+    %rounded = scalar.fptrunc %dx : f32 to bf16
+    view.store %rounded, %outv[%i] : bf16, view<[%n]xbf16>
+  }
+  kernel.return
+}
