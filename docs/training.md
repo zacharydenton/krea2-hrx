@@ -74,6 +74,10 @@ cargo run --release --locked --bin krea2-train -- prepare --config ~/training/ch
 # GPU: train with both preprocessing models released.
 cargo run --release --locked --bin krea2-train -- run --config ~/training/character.json
 
+# Optional short trial: save after 25 updates without changing the final step target.
+cargo run --release --locked --bin krea2-train -- run \
+  --config ~/training/character.json --stop-after 25
+
 # Resume the FP32 master weights, moments, sample order and random generator.
 cargo run --release --locked --bin krea2-train -- run \
   --resume ~/training/character/run/checkpoints/step-000250
@@ -99,6 +103,9 @@ target and the complete training implementation. Optimizer/backward changes can
 reuse preprocessing caches but cannot resume old optimizer state. A failed training
 update cannot be retried or saved through the same trainer; reopen a complete
 checkpoint.
+
+`run --stop-after N` counts additional updates, including when resuming. It saves
+the final update before exiting, even between regular checkpoint intervals.
 
 Each complete checkpoint directory contains a portable BF16
 `adapter.safetensors`, an FP32 `optimizer.safetensors`, and `state.json`.

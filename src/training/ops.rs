@@ -172,15 +172,17 @@ pub fn flow_loss(
 /// Transpose a BF16 matrix without a host round trip.
 pub fn transpose(ops: &Ops, stream: &Stream, x: &Tensor) -> Result<Tensor> {
     let out = ops.tensor(stream, x.cols(), x.rows())?;
-    // SAFETY: equal-sized matrices; the kernel maps each source element to its transpose.
+    // SAFETY: each group transposes a 32x32 tile, guarding both ragged edges.
     unsafe {
-        ops.launch_1d(
+        ops.launch(
             stream,
             "train_transpose",
             config(&[("rows", x.rows()), ("cols", x.cols())]),
             &Scalars::new().index(x.size()),
             &[x.binding()?, out.binding()?],
-            x.size(),
+            x.rows().div_ceil(32) * x.cols().div_ceil(32),
+            1,
+            256,
         )?;
     }
     Ok(out)

@@ -44,6 +44,25 @@ fn close(got: &[f32], expected: &[f32], relative: f64, absolute: f64) {
 }
 
 #[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn transpose_preserves_bits_across_tiles_and_ragged_edges() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (rows, cols) in [(1, 1), (1, 65), (65, 1), (7, 19), (32, 32), (33, 65), (1043, 128)] {
+        // Include signed zero, infinities and NaN payloads: transpose is a copy.
+        let bits: Vec<u16> = (0..rows * cols).map(|i| (i * 31337) as u16).collect();
+        let input = Tensor::from_slice(ops.pool(), &mut stream, &bits, rows, cols).unwrap();
+        let out = ops::transpose(&ops, &stream, &input).unwrap();
+        let actual = out.download(&mut stream).unwrap();
+        for row in 0..rows {
+            for col in 0..cols {
+                assert_eq!(actual[col * rows + row], bits[row * cols + col]);
+            }
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn flow_loss_matches_cpu_mse_and_rejects_nonfinite_inputs() {
     let mut stream = Stream::open().unwrap();
@@ -229,9 +248,15 @@ fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
 #[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
+    for (tokens, heads, kv) in [(1, 1, 1), (3, 3, 1), (9, 8, 2), (33, 4, 1)] {
+        check_attention(tokens, heads, kv);
+    }
+}
+
+fn check_attention(t: usize, heads: usize, kv: usize) {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
-    let (t, heads, kv, d) = (9, 8, 2, 128);
+    let d = 128;
     let q = values(t * heads * d, 3);
     let k = values(t * kv * d, 5);
     let v = values(t * kv * d, 7);

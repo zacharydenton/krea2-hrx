@@ -34,6 +34,9 @@ enum Command {
         config: Option<PathBuf>,
         #[arg(long)]
         resume: Option<PathBuf>,
+        /// Save and stop after this many additional updates, preserving the full run target
+        #[arg(long)]
+        stop_after: Option<std::num::NonZeroUsize>,
     },
     /// Evaluate retained checkpoints with Turbo and fixed prompts/seeds
     Evaluate {
@@ -69,7 +72,7 @@ fn main() -> Result<()> {
             let data = krea2::training::prepare::prepare(&config)?;
             println!("Prepared {} images in {}", data.samples.len(), config.output.display());
         }
-        Command::Run { config, resume } => {
+        Command::Run { config, resume, stop_after } => {
             let mut trainer = match resume {
                 Some(path) => Trainer::resume(&path)?,
                 None => Trainer::open(TrainConfig::read(&config.context("missing config")?)?)?,
@@ -79,12 +82,18 @@ fn main() -> Result<()> {
                 .append(true)
                 .open(trainer.config().output.join("training.jsonl"))?;
             let total = trainer.config().steps;
+            let starting_step = trainer.step();
             let mut log_error = None;
-            trainer.run(|step,loss,norm,seconds| {
+            trainer.run(|step, loss, norm, seconds| {
                 eprintln!("step {step}/{total}  loss {loss:.6}  grad {norm:.5}  {seconds:.2}s");
-                let row=serde_json::json!({"step":step,"loss":loss,"grad_norm":norm,"seconds":seconds});
-                if let Err(e)=writeln!(log,"{row}").and_then(|_|log.flush()) {log_error=Some(e);return false;}
-                true
+                let row = serde_json::json!({
+                    "step": step, "loss": loss, "grad_norm": norm, "seconds": seconds
+                });
+                if let Err(e) = writeln!(log, "{row}").and_then(|_| log.flush()) {
+                    log_error = Some(e);
+                    return false;
+                }
+                stop_after.is_none_or(|limit| step - starting_step < limit.get())
             })?;
             if let Some(e) = log_error {
                 return Err(e.into());

@@ -8,33 +8,75 @@ config.decl @krea2.train_transpose.grid_y : %value: index where [range(%value, 1
 kernel.def target(@krea2_train_transpose_target) export("krea2_train_transpose") @krea2_train_transpose(%count: index) {
   %one = index.constant 1 : index
   %threads = index.constant 256 : index
-  %grid_x = config.get @krea2.train_transpose.grid_x : index
-  %grid_y = config.get @krea2.train_transpose.grid_y : index
-  kernel.launch.config workgroups(%grid_x, %grid_y, %one) workgroup_size(%threads, %one, %one) : index
+  %gx = config.get @krea2.train_transpose.grid_x : index
+  %gy = config.get @krea2.train_transpose.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
 } launch(%count: index, %x: buffer, %out: buffer) {
-  %zero_offset = index.constant 0 : offset
+  %offset = index.constant 0 : offset
   %n = index.assume %count [range(%count, 1, 1073741824)] : index
   %lane = kernel.workitem.id<x> : index
   %group = kernel.workgroup.id<x> : index
-  %step = index.constant 256 : index
-  %base = index.mul %group, %step : index
-  %idx = index.add %base, %lane : index
+  %zero = index.constant 0 : index
+  %eight = index.constant 8 : index
+  %tile = index.constant 32 : index
+  %pad = index.constant 31 : index
   %rows = config.get @krea2.train_transpose.rows : index
   %cols = config.get @krea2.train_transpose.cols : index
-  %x_global = buffer.assume.memory_space<global> %x : buffer
-  %xv = buffer.view %x_global[%zero_offset] : buffer -> view<[%n]xbf16>
-  %out_global = buffer.assume.memory_space<global> %out : buffer
-  %outv = buffer.view %out_global[%zero_offset] : buffer -> view<[%n]xbf16>
-  %ok = index.cmp ult, %idx, %n : index
-  scf.if %ok {
-    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
-    %r = index.div %i, %cols : index
-    %c = index.rem %i, %cols : index
-    %cb = index.mul %c, %rows : index
-    %oi = index.add %cb, %r : index
-    %o = index.assume %oi [range(%oi, 0, 1073741824), lt(%oi, %n)] : index
-    %value = view.load %xv[%i] : view<[%n]xbf16> -> bf16
-    view.store %value, %outv[%o] : bf16, view<[%n]xbf16>
+  %rounded = index.add %cols, %pad : index
+  %tiles = index.div %rounded, %tile : index
+  %tr = index.div %group, %tiles : index
+  %tc = index.rem %group, %tiles : index
+  %br = index.mul %tr, %tile : index
+  %bc = index.mul %tc, %tile : index
+  %lr = index.div %lane, %tile : index
+  %lc = index.rem %lane, %tile : index
+  %xg = buffer.assume.memory_space<global> %x : buffer
+  %xv = buffer.view %xg[%offset] : buffer -> view<[%n]xbf16>
+  %og = buffer.assume.memory_space<global> %out : buffer
+  %ov = buffer.view %og[%offset] : buffer -> view<[%n]xbf16>
+  %bytes = index.constant 2112 : offset
+  %storage = buffer.alloca<workgroup> align(16) %bytes : buffer
+  %shared = buffer.view %storage[%offset] : buffer -> view<32x33xbf16>
+  // Both global traversals are contiguous within a wave. Padding separates
+  // transposed LDS columns; values remain BF16 throughout, preserving bits.
+  scf.for %j = [%zero to %tile step %eight] {
+    %r = index.add %lr, %j : index
+    %ir = index.add %br, %r : index
+    %ic = index.add %bc, %lc : index
+    %row_ok = index.cmp ult, %ir, %rows : index
+    %col_ok = index.cmp ult, %ic, %cols : index
+    scf.if %row_ok {
+      scf.if %col_ok {
+        %base = index.mul %ir, %cols : index
+        %idx = index.add %base, %ic : index
+        %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+        %sr = index.assume %r [range(%r, 0, 32)] : index
+        %sc = index.assume %lc [range(%lc, 0, 32)] : index
+        %v = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+        view.store %v, %shared[%sr, %sc] : bf16, view<32x33xbf16>
+      }
+    }
+    scf.yield
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  scf.for %j = [%zero to %tile step %eight] {
+    %r = index.add %lr, %j : index
+    %or = index.add %bc, %r : index
+    %oc = index.add %br, %lc : index
+    %row_ok = index.cmp ult, %or, %cols : index
+    %col_ok = index.cmp ult, %oc, %rows : index
+    scf.if %row_ok {
+      scf.if %col_ok {
+        %base = index.mul %or, %rows : index
+        %idx = index.add %base, %oc : index
+        %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+        %sr = index.assume %r [range(%r, 0, 32)] : index
+        %sc = index.assume %lc [range(%lc, 0, 32)] : index
+        %v = view.load %shared[%sc, %sr] : view<32x33xbf16> -> bf16
+        view.store %v, %ov[%i] : bf16, view<[%n]xbf16>
+      }
+    }
+    scf.yield
   }
   kernel.return
 }
