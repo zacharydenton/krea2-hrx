@@ -54,15 +54,23 @@ impl MemoryEstimate {
     /// Compute an upper estimate from validated caches and the actual checkpoint.
     pub fn for_run(c: &TrainConfig, data: &PreparedDataset) -> Result<Self> {
         let file = Checkpoint::open(&c.model)?;
-        let mut frozen = 0usize;
+        // Auxiliary and main-block loaders partition this file; they do not
+        // retain two copies of every weight. F32 tensors additionally retain
+        // their BF16 execution copy, and BF16 norms gain a lazy F32 scale copy.
+        let mut frozen: usize = 28 * 6 * 6144 * 2 + 2 * 4096;
         for name in file.names() {
             let t = file.get(name)?;
             frozen = frozen
-                .checked_add(t.bytes.len() * 2)
+                .checked_add(resident_weight_bytes(
+                    t.dtype,
+                    t.bytes.len(),
+                    name.ends_with(".scale"),
+                )?)
                 .ok_or_else(|| Error::invalid("checkpoint size overflow"))?;
         }
-        // Weight storage is BF16, except small norm vectors retained in both formats.
-        // A 2x file bound also covers loader staging and an individual transpose.
+        // Upload staging is bounded to 64 MiB by HRX, not the size of the file.
+        // The existing 2 GiB scratch allowance covers staging, conversion and
+        // the small final-projection transpose; dense dX never transposes weights.
         let parameters: usize =
             c.targets.layers().iter().map(|(_, o, i)| (o + i) * c.rank).sum();
         let adapters = parameters * 18;
@@ -97,6 +105,32 @@ impl MemoryEstimate {
         let total = frozen + adapters + activations + scratch;
         Ok(Self { frozen, adapters, activations, scratch, total })
     }
+}
+
+fn resident_weight_bytes(
+    dtype: crate::checkpoint::DType,
+    bytes: usize,
+    norm: bool,
+) -> Result<usize> {
+    use crate::checkpoint::DType;
+    let aligned = |size: usize, alignment: usize| {
+        size.checked_add(alignment - 1).map(|n| n / alignment * alignment)
+    };
+    let extra = match dtype {
+        DType::F32 => bytes / 2,
+        DType::BF16 if norm => {
+            bytes.checked_mul(2).ok_or_else(|| Error::invalid("norm size overflow"))?
+        }
+        DType::BF16 => 0,
+        _ => {
+            return Err(Error::invalid(
+                "training memory estimate requires dense BF16/F32 weights",
+            ));
+        }
+    };
+    aligned(bytes, 256)
+        .and_then(|base| aligned(extra, 4096).and_then(|extra| base.checked_add(extra)))
+        .ok_or_else(|| Error::invalid("resident weight size overflow"))
 }
 
 /// One resident training run, with a single stream and update-boundary checkpoints.
@@ -715,6 +749,17 @@ fn loss_gradient(prediction: &[u16], target: &[f32]) -> Result<(f64, Vec<u16>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resident_memory_counts_execution_copies_without_duplicating_bf16_weights() {
+        use crate::checkpoint::DType;
+        assert_eq!(resident_weight_bytes(DType::BF16, 256 << 20, false).unwrap(), 256 << 20);
+        assert_eq!(resident_weight_bytes(DType::F32, 256 << 20, false).unwrap(), 384 << 20);
+        assert_eq!(resident_weight_bytes(DType::BF16, 256, true).unwrap(), 256 + 4096);
+        assert_eq!(resident_weight_bytes(DType::F32, 48, false).unwrap(), 256 + 4096);
+        assert!(resident_weight_bytes(DType::I8, 256, false).is_err());
+        assert!(resident_weight_bytes(DType::BF16, usize::MAX, true).is_err());
+        assert!(resident_weight_bytes(DType::BF16, usize::MAX, false).is_err());
+    }
     #[test]
     fn full_target_resume_restores_every_master_and_rejects_missing_auxiliary_factors() {
         let directory = tempfile::tempdir().unwrap();

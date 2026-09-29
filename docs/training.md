@@ -137,7 +137,11 @@ operations. The complete global norm is read and checked before any parameter
 update; a nonfinite gradient cancels the update without changing optimizer state.
 
 The memory budget limits HRX allocations during preparation and training. A
-conservative training estimate is checked before opening its stream. The initial
+conservative training estimate is checked before opening its stream. The
+estimate counts BF16 weights once and includes the additional execution copies
+of F32 weights, saved activations, adapter state and scratch capacity. Checkpoint
+file size is not doubled to account for upload staging; HRX bounds staging
+independently. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
 The trainer also requires available system RAM to cover that estimate plus
 16 GiB of headroom, and aborts between blocks if available RAM falls below
