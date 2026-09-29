@@ -338,6 +338,9 @@ impl Trainer {
                 1.0,
             )?;
             boundaries.push(tape.output);
+            // Limit pending buffer ownership to one block. Dropping a host tensor
+            // does not release storage still referenced by queued dispatches.
+            stream.synchronize()?;
         }
         let last = boundaries.last().expect("output").view(image.rows(), 6144, text.size())?;
         let prediction = self.models.last(stream, &last, &embedding)?;
@@ -356,6 +359,7 @@ impl Trainer {
             let m = mods.view(6, 6144, block * 6 * 6144)?;
             let tape = self.model.block(ops, stream, block, input, &m, &cos, &sin, 1.0)?;
             grad = self.model.backward(ops, stream, block, tape, &m, &cos, &sin, &grad)?;
+            stream.synchronize()?;
         }
         Ok(loss)
     }

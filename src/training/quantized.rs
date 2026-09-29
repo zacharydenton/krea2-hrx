@@ -111,3 +111,117 @@ impl Quantized {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lora::{Factors, SavedTensor, save_tensors};
+    use crate::numerics::{from_f32, to_f32};
+    use crate::training::model::Projection;
+    use half::f16;
+    use std::collections::BTreeMap;
+
+    #[test]
+    #[ignore = "requires a gfx1151 GPU; no model weights needed"]
+    fn convrot_adapter_path_matches_integer_and_original_basis_cpu_algebra() {
+        let mut stream = Stream::open().unwrap();
+        let ops = Ops::new(hrx::BufferPool::new());
+        let directory = tempfile::tempdir().unwrap();
+        let h4 = [[1., 1., 1., -1.], [1., 1., -1., 1.], [1., -1., 1., 1.], [-1., 1., 1., 1.]];
+        for inputs in [6144usize, 16384] {
+            let (tokens, outputs) = (3, 128);
+            let weights: Vec<i8> =
+                (0..outputs * inputs).map(|i| ((i * 37 % 31) as i32 - 15) as i8).collect();
+            let scales: Vec<f32> = (0..outputs).map(|i| (i % 7 + 1) as f32 / 256.0).collect();
+            let path = directory.path().join(format!("{inputs}.safetensors"));
+            save_tensors(
+                &path,
+                [
+                    (
+                        "projection.weight".into(),
+                        SavedTensor {
+                            dtype: "I8",
+                            shape: vec![outputs, inputs],
+                            bytes: weights.iter().map(|v| *v as u8).collect(),
+                        },
+                    ),
+                    (
+                        "projection.weight_scale".into(),
+                        SavedTensor {
+                            dtype: "F32",
+                            shape: vec![outputs],
+                            bytes: scales.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                        },
+                    ),
+                ]
+                .into(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+            let file = Checkpoint::open(&path).unwrap();
+            let quantized =
+                Quantized::load(&mut stream, &file, "projection", outputs, inputs).unwrap();
+            let x: Vec<u16> = (0..tokens * inputs)
+                .map(|i| {
+                    from_f32(if i < inputs {
+                        0.0
+                    } else {
+                        ((i * 17 % 97) as f32 - 48.0) / 128.0
+                    })
+                })
+                .collect();
+            let input =
+                Tensor::from_slice(ops.pool(), &mut stream, &x, tokens, inputs).unwrap();
+            let base = quantized.forward(&ops, &stream, &input).unwrap();
+            let factors = Factors {
+                inputs,
+                outputs,
+                rank: 2,
+                alpha: 1.0,
+                a: vec![0.03125; 2 * inputs],
+                b: vec![0.125; 2 * outputs],
+            };
+            let adapter = Projection::new(&ops, &mut stream, &factors).unwrap();
+            let output = adapter.forward(&ops, &stream, &input, &base, 0.75).unwrap();
+            let actual = output.download(&mut stream).unwrap();
+            let mut expected = Vec::with_capacity(actual.len());
+            for row in x.chunks_exact(inputs) {
+                let low = to_f32(from_f32(
+                    row.iter().map(|x| f64::from(to_f32(*x)) / 32.0).sum::<f64>() as f32,
+                ));
+                let delta = to_f32(from_f32(low * 0.25));
+                let mut rotated: Vec<f16> =
+                    row.iter().map(|v| f16::from_f32(to_f32(*v))).collect();
+                for step in [1, 4, 16, 64] {
+                    for block in (0..inputs).step_by(4 * step) {
+                        for col in 0..step {
+                            let x: Vec<_> = (0..4)
+                                .map(|j| rotated[block + col + j * step].to_f64())
+                                .collect();
+                            for i in 0..4 {
+                                let sum: f64 = (0..4).map(|j| h4[i][j] * x[j]).sum();
+                                rotated[block + col + i * step] = f16::from_f64(sum * 0.25);
+                            }
+                        }
+                    }
+                }
+                let max = rotated.iter().map(|v| v.to_f32().abs()).fold(0.0f32, f32::max);
+                let scale = (max * 16.0).max(1e-30) / 127.0;
+                let codes: Vec<i32> = rotated
+                    .iter()
+                    .map(|v| {
+                        (v.to_f32() * (16.0 / scale)).round_ties_even().clamp(-127.0, 127.0)
+                            as i32
+                    })
+                    .collect();
+                for (col, weight) in weights.chunks_exact(inputs).enumerate() {
+                    let dot: i32 =
+                        codes.iter().zip(weight).map(|(a, b)| *a * i32::from(*b)).sum();
+                    let base = to_f32(from_f32((dot as f32 * scales[col]) * scale));
+                    expected.push(from_f32(base + 0.375 * delta));
+                }
+            }
+            assert_eq!(actual, expected, "ConvRot plus original-basis adapter, width {inputs}");
+        }
+    }
+}

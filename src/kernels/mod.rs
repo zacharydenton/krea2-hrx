@@ -106,7 +106,7 @@ pub fn workgroup(stage: &str, kernel: &Kernel, threads: u32) -> Result<[u32; 3]>
 pub struct Scalars {
     indices: [u64; 4],
     index_count: usize,
-    floats: [f32; 2],
+    floats: [f32; 8],
     float_count: usize,
 }
 
@@ -124,9 +124,9 @@ impl Scalars {
         self
     }
 
-    /// Appends a float. Kernels take at most two.
+    /// Appends a float. AdamW uses eight; inference kernels use at most two.
     pub fn float(mut self, value: f32) -> Scalars {
-        assert!(self.float_count < self.floats.len(), "a kernel takes at most two floats");
+        assert!(self.float_count < self.floats.len(), "a kernel takes at most eight floats");
         self.floats[self.float_count] = value;
         self.float_count += 1;
         self

@@ -1,0 +1,55 @@
+//! Full-model training validation with an external prepared dataset.
+//! No checkpoint, dataset, or result fixture is stored in this repository.
+use krea2::training::{TrainConfig, Trainer, dataset::file_hash};
+
+#[test]
+#[ignore = "requires a GPU, RAW weights and KREA2_TRAIN_TEST_CONFIG with prepared caches"]
+fn checkpoint_resume_matches_two_uninterrupted_updates() {
+    let path = std::env::var_os("KREA2_TRAIN_TEST_CONFIG")
+        .expect("set KREA2_TRAIN_TEST_CONFIG to an external prepared configuration");
+    let mut config = TrainConfig::read(std::path::Path::new(&path)).unwrap();
+    // Checkpoints can exceed a GiB; keep them beside the external run rather
+    // than on a potentially RAM-backed /tmp filesystem.
+    let temporary = tempfile::tempdir_in(config.output.parent().unwrap()).unwrap();
+    let output = temporary.path().join("run");
+    std::fs::create_dir(&output).unwrap();
+    std::fs::copy(config.output.join("prepared.json"), output.join("prepared.json")).unwrap();
+    std::os::unix::fs::symlink(config.output.join("cache"), output.join("cache")).unwrap();
+    config.output = output.clone();
+    config.steps = 2;
+    config.keep_checkpoints = 4;
+
+    let mut uninterrupted = Trainer::open(config).unwrap();
+    eprintln!("validating uninterrupted update 1");
+    let first = uninterrupted.train_step().unwrap().unwrap();
+    assert_eq!(first.step, 1);
+    assert!(first.loss.is_finite() && first.loss > 0.0);
+    assert!(first.gradient_norm.is_finite() && first.gradient_norm > 0.0);
+    let checkpoint = uninterrupted.save().unwrap();
+    eprintln!("update 1 loss {}; validating uninterrupted update 2", first.loss);
+    let second = uninterrupted.train_step().unwrap().unwrap();
+    assert_eq!(second.step, 2);
+    assert!(second.loss.is_finite() && second.loss > 0.0);
+    assert!(second.gradient_norm.is_finite() && second.gradient_norm > 0.0);
+    assert!(uninterrupted.train_step().unwrap().is_none());
+    let complete = uninterrupted.save().unwrap();
+    let reference = temporary.path().join("continuous");
+    std::fs::rename(&complete, &reference).unwrap();
+    drop(uninterrupted);
+
+    eprintln!("update 2 loss {}; validating resumed update 2", second.loss);
+    let mut resumed = Trainer::resume(&checkpoint).unwrap();
+    assert_eq!(resumed.step(), 1);
+    let resumed_second = resumed.train_step().unwrap().unwrap();
+    assert_eq!(second.loss, resumed_second.loss);
+    assert_eq!(second.gradient_norm, resumed_second.gradient_norm);
+    let resumed_path = resumed.save().unwrap();
+    drop(resumed);
+    for file in ["adapter.safetensors", "optimizer.safetensors", "state.json"] {
+        assert_eq!(
+            file_hash(&reference.join(file)).unwrap(),
+            file_hash(&resumed_path.join(file)).unwrap(),
+            "resume differs in {file}"
+        );
+    }
+}

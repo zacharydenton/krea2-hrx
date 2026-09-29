@@ -89,6 +89,35 @@ fn attention(c: &mut Criterion) {
     group.finish();
 }
 
+fn frozen_backward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/frozen_backward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (tokens, inputs, outputs) in
+        [(1043, 6144, 6144), (4115, 16384, 6144), (4115, 6144, 16384)]
+    {
+        let mut prepared = None;
+        group.bench_function(format!("{tokens}x{inputs}x{outputs}"), |b| {
+            let (mut stream, ops, gradient, weight) = prepared.take().unwrap_or_else(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let gradient = tensor(&ops, &mut stream, tokens, outputs);
+                let weight = tensor(&ops, &mut stream, outputs, inputs);
+                (stream, ops, gradient, weight)
+            });
+            let mut run = || {
+                let transpose = train::transpose(&ops, &stream, &weight).unwrap();
+                let dx = train::matmul(&ops, &stream, &gradient, &transpose, 1.0).unwrap();
+                stream.synchronize().unwrap();
+                black_box(dx);
+            };
+            run();
+            b.iter(run);
+            prepared = Some((stream, ops, gradient, weight));
+        });
+    }
+    group.finish();
+}
+
 fn adamw(c: &mut Criterion) {
     let mut prepared = None;
     c.bench_function("training/adamw/rank32x16384", |b| {
@@ -151,5 +180,5 @@ fn full_step(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, projections, attention, adamw, full_step);
+criterion_group!(benches, projections, attention, frozen_backward, adamw, full_step);
 criterion_main!(benches);

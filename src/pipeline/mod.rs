@@ -117,20 +117,13 @@ impl Pipeline {
             return Err(Error::invalid("LoRA strength must be finite"));
         }
         adapter.validate()?;
-        let mut pipeline = Self::open(files, compiler)?;
-        if strength == 0.0 {
-            return Ok(pipeline);
-        }
-        let state = pipeline.state.get_mut().map_err(|_| Error::Poisoned("pipeline"))?;
-        pipeline.dense = None;
-        pipeline.dense = Some(crate::training::model::Transformer::load_inference(
-            &pipeline.models.ops,
-            &mut state.stream,
-            &pipeline.files.checkpoint,
-            Some(adapter),
-        )?);
-        pipeline.adapter_strength = strength;
-        Ok(pipeline)
+        Self::open_impl(
+            files,
+            &ModelContext::new(Default::default())?,
+            compiler,
+            (strength != 0.0).then_some(adapter),
+            strength,
+        )
     }
 
     /// `compiler` of `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
@@ -146,6 +139,16 @@ impl Pipeline {
         context: &ModelContext,
         compiler: Option<&str>,
     ) -> Result<Pipeline> {
+        Self::open_impl(files, context, compiler, None, 1.0)
+    }
+
+    fn open_impl(
+        files: Files,
+        context: &ModelContext,
+        compiler: Option<&str>,
+        adapter: Option<&crate::lora::Adapter>,
+        strength: f32,
+    ) -> Result<Pipeline> {
         // The models allocate on the stream that will later dispatch them, which
         // then moves into the state lock.
         let mut stream = native_stream(context)?;
@@ -153,12 +156,13 @@ impl Pipeline {
         let checkpoint = crate::checkpoint::Checkpoint::open(&files.checkpoint)?;
         let dense = if checkpoint.get("blocks.0.attn.wq.weight")?.dtype
             == crate::checkpoint::DType::BF16
+            || adapter.is_some()
         {
-            Some(crate::training::model::Transformer::load(
+            Some(crate::training::model::Transformer::load_inference(
                 &models.ops,
                 &mut stream,
                 &files.checkpoint,
-                None,
+                adapter,
             )?)
         } else {
             None
@@ -168,7 +172,7 @@ impl Pipeline {
             bridge: Arc::new(Bridge::new(native_stream(context)?)),
             models,
             dense,
-            adapter_strength: 1.0,
+            adapter_strength: strength,
             files,
             compiler: compiler.map(str::to_string),
             state: Mutex::new(State {
@@ -394,6 +398,9 @@ impl Pipeline {
                         self.adapter_strength,
                     )?
                     .output;
+                // Dispatches retain temporary bindings until completion. Keep
+                // the unfused adapter path bounded to one block's workspace.
+                stream.synchronize()?;
             }
             return self.models.last(
                 stream,

@@ -18,6 +18,7 @@ if [ "$gpu" = 1 ]; then
   # Keep model fixtures, benchmarks and the exhaustive CPU sweep opt-in.
   cargo test --locked --lib ops::tensor::tests:: -- --ignored --test-threads=1
   cargo test --locked --lib pipeline::shared::tests:: -- --ignored --test-threads=1
+  cargo test --locked --lib training::quantized::tests:: -- --ignored --test-threads=1
   cargo test --locked --test arithmetic --test dispatch --test quantized \
     --test softmax_repeat --test uploads --test training_gpu -- --ignored --test-threads=1
 fi

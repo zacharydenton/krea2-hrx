@@ -6,9 +6,13 @@ cached conditioning, differentiation, AdamW, serialization and inference are
 native. No Python generator, Python runtime, PyTorch, CUDA or external training
 framework is required.
 
-**GPU numerical validation, a complete character trial, and ComfyUI loading
-validation are still pending.** Compilation and CPU tests do not establish
-training correctness or character quality. Attention currently uses a streaming
+**A complete character trial and ComfyUI loading validation are still pending.**
+Primitive GPU tests cover flow loss, LoRA forward/backward, AdamW, normalization,
+rotary gradients, grouped attention and original-basis adapters on ConvRot
+projections. A two-update RAW run with prepared 1024-area inputs passed exact
+checkpoint/resume equivalence, and its exported adapter loaded into native Turbo
+inference. These checks do not establish character quality or full-model reference
+parity. Attention currently uses a streaming
 correctness implementation; its speed has not been measured. Adapter-enabled
 INT8 inference also uses separate projections and has not been performance tuned.
 
@@ -80,18 +84,21 @@ blocks has adapters on `attn.wq`, `attn.wk`, `attn.wv`, `attn.gate`, `attn.wo`,
 `mlp.gate`, `mlp.up` and `mlp.down`. Factors execute in BF16 with FP32 master
 weights, parameter gradients and optimizer moments. Intermediate activation
 gradients use BF16. Block inputs are retained and each block is recomputed during
-backpropagation. Grouped-query attention stores linear-sized statistics and
-computes gradients without floating-point atomics.
+backpropagation. Each block completes before advancing, bounding temporary
+storage retained by queued dispatches. Grouped-query attention stores linear-sized
+statistics and computes gradients without floating-point atomics.
 
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
 
-Caches bind image bytes, captions, buckets, model contents, tokenizer, host and
-kernel source, dependency lockfile and compiler identity. Changed data or
+Caches bind image bytes, captions, buckets, model contents, tokenizer,
+preprocessing source, dependency lockfile and compiler identity. Changed data or
 preprocessing requires a fresh output directory. Resume also checks the device
-target. A failed training update cannot be retried or saved through the same
-trainer; reopen a complete checkpoint.
+target and the complete training implementation. Optimizer/backward changes can
+reuse preprocessing caches but cannot resume old optimizer state. A failed training
+update cannot be retried or saved through the same trainer; reopen a complete
+checkpoint.
 
 Each complete checkpoint directory contains a portable BF16
 `adapter.safetensors`, an FP32 `optimizer.safetensors`, and `state.json`.
@@ -127,9 +134,13 @@ scripts/test.sh --cpu
 cargo test --locked --test training_compile -- --ignored --test-threads=1
 # Only when the GPU is available:
 cargo test --locked --test training_gpu -- --ignored --test-threads=1
+# Full-model update/checkpoint/resume equivalence, using external prepared caches:
+KREA2_TRAIN_TEST_CONFIG=~/training/character.json \
+  cargo test --release --locked --test training_resume -- --ignored --test-threads=1 --nocapture
 
 cargo bench --locked --bench training -- training/projection
 cargo bench --locked --bench training -- training/attention
+cargo bench --locked --bench training -- training/frozen_backward
 cargo bench --locked --bench training -- training/adamw
 KREA2_TRAIN_BENCH_CONFIG=~/training/character.json \
   cargo bench --locked --bench training -- training/prepared

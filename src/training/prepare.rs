@@ -29,24 +29,52 @@ pub(crate) fn components(c: &TrainConfig) -> Result<(PathBuf, PathBuf)> {
 
 pub(crate) fn software_hash() -> String {
     let mut hash = blake3::Hasher::new();
-    hash.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hash.update(preprocessing_hash().as_bytes());
     for source in [
         include_str!("trainer.rs"),
         include_str!("model.rs"),
         include_str!("optimizer.rs"),
-        include_str!("dataset.rs"),
-        include_str!("vae.rs"),
         include_str!("ops.rs"),
-        include_str!("prepare.rs"),
-        include_str!("../models/graph.rs"),
-        include_str!("../numerics.rs"),
-        include_str!("../../Cargo.lock"),
+        include_str!("config.rs"),
+        include_str!("../lora.rs"),
+        include_str!("../pipeline/mod.rs"),
+        include_str!("../pipeline/schedule.rs"),
     ] {
         hash.update(source.as_bytes());
     }
     for (name, source) in
         crate::kernels::sources::AUXILIARY.iter().chain(crate::kernels::sources::BLOCK)
     {
+        hash.update(name.as_bytes());
+        hash.update(source.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+// Cache identity covers preprocessing only. Backward and optimizer changes must
+// invalidate resumable state without forcing unchanged images/text to be encoded again.
+fn preprocessing_hash() -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(env!("CARGO_PKG_VERSION").as_bytes());
+    for source in [
+        include_str!("dataset.rs"),
+        include_str!("vae.rs"),
+        include_str!("prepare.rs"),
+        include_str!("../models/graph.rs"),
+        include_str!("../models/weights.rs"),
+        include_str!("../ops/mod.rs"),
+        include_str!("../ops/tensor.rs"),
+        include_str!("../numerics.rs"),
+        include_str!("../tokenizer.rs"),
+        include_str!("../kernels/mod.rs"),
+        include_str!("../../Cargo.lock"),
+    ] {
+        hash.update(source.as_bytes());
+    }
+    for (name, source) in crate::kernels::sources::AUXILIARY.iter().filter(|(name, _)| {
+        (!name.starts_with("train_") || *name == "train_stride_two")
+            && *name != "lora_transport"
+    }) {
         hash.update(name.as_bytes());
         hash.update(source.as_bytes());
     }
@@ -65,7 +93,7 @@ pub(crate) fn fingerprint(
     h.update(b"krea2-prepared-v1");
     h.update(&serde_json::to_vec(&identities).map_err(io)?);
     h.update(include_bytes!("../../assets/tokenizer.json"));
-    h.update(software_hash().as_bytes());
+    h.update(preprocessing_hash().as_bytes());
     h.update(crate::kernels::compiler(None)?.identity().as_bytes());
     for s in &d.samples {
         h.update(s.key.as_bytes());
