@@ -258,6 +258,38 @@ fn attention(c: &mut Criterion) {
     group.finish();
 }
 
+fn fusion_attention(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/fusion_attention");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (batch, sequence) in [(43, 12), (128, 12), (1, 43), (1, 128)] {
+        let mut prepared = None;
+        group.bench_function(format!("forward_backward/{batch}x{sequence}x2560"), |b| {
+            let (mut stream, ops, q, k, v, grad) = prepared.take().unwrap_or_else(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let q = tensor(&ops, &mut stream, batch * sequence, 2560);
+                let k = tensor(&ops, &mut stream, batch * sequence, 2560);
+                let v = tensor(&ops, &mut stream, batch * sequence, 2560);
+                let grad = tensor(&ops, &mut stream, batch * sequence, 2560);
+                (stream, ops, q, k, v, grad)
+            });
+            let mut run = || {
+                let forward =
+                    train::attention_batched(&ops, &stream, &q, &k, &v, sequence).unwrap();
+                let backward =
+                    train::attention_backward(&ops, &stream, &q, &k, &v, &forward, &grad)
+                        .unwrap();
+                stream.synchronize().unwrap();
+                black_box((forward, backward));
+            };
+            run();
+            b.iter(run);
+            prepared = Some((stream, ops, q, k, v, grad));
+        });
+    }
+    group.finish();
+}
+
 fn frozen_backward(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/frozen_backward");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -429,6 +461,7 @@ criterion_group!(
     dense,
     projections,
     attention,
+    fusion_attention,
     frozen_backward,
     adamw,
     optimizer_update,

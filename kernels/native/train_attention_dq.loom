@@ -1,4 +1,5 @@
 amdgpu.target<gfx11-generic> @krea2_train_attention_dq_target {subgroup_size = 32}
+config.decl @krea2.train_attention_dq.sequence : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_attention_dq.tokens : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_attention_dq.heads : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_attention_dq.kv : %value: index where [range(%value, 1, 1073741824)]
@@ -50,6 +51,10 @@ kernel.def target(@krea2_train_attention_dq_target) export("krea2_train_attentio
 %outv_view = buffer.view %outvg[%zero_offset] : buffer -> view<[%qsize]xbf16>
 %v1 = index.rem %group, %heads : index
 %v2 = index.div %group, %heads : index
+%sequence = config.get @krea2.train_attention_dq.sequence : index
+%batch = index.div %v2, %sequence : index
+%start = index.mul %batch, %sequence : index
+%end = index.add %start, %sequence : index
 %v3 = index.mul %v2, %heads : index
 %v4 = index.add %v3, %v1 : index
 %v5 = index.mul %v4, %hsize : index
@@ -94,7 +99,7 @@ kernel.def target(@krea2_train_attention_dq_target) export("krea2_train_attentio
 %v44 = index.assume %group [range(%group, 0, 1073741824), lt(%group, %stats)] : index
 %v45 = view.load %delta_view[%v44] : view<[%stats]xf32> -> f32
 %v46 = index.div %v1, %repeat : index
-%a0, %a1, %a2, %a3 = scf.for %j = [%zero to %tokens step %one](%c0 = %zf, %c1 = %zf, %c2 = %zf, %c3 = %zf : f32, f32, f32, f32) -> (f32, f32, f32, f32) {
+%a0, %a1, %a2, %a3 = scf.for %j = [%start to %end step %one](%c0 = %zf, %c1 = %zf, %c2 = %zf, %c3 = %zf : f32, f32, f32, f32) -> (f32, f32, f32, f32) {
 %v47 = index.mul %j, %kv : index
 %v48 = index.add %v47, %v46 : index
 %v49 = index.mul %v48, %hsize : index

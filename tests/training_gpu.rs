@@ -220,7 +220,9 @@ fn zero_b_preserves_base_output_and_accumulates_only_b_gradients() {
 fn lora_backward_and_adam_match_independent_dense_algebra() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
-    for (m, k, n, r) in [(7, 19, 11, 3), (65, 128, 64, 32), (513, 64, 128, 64)] {
+    for (m, k, n, r) in
+        [(7, 19, 11, 3), (65, 128, 64, 32), (513, 64, 128, 64), (257, 12, 1, 32)]
+    {
         let x = values(m * k, 2);
         let g = values(m * n, 7);
         let a = values(r * k, 5);
@@ -517,6 +519,7 @@ fn tiled_attention_matches_scalar_kernels_at_model_dimensions() {
         let rv = ops.tensor(&stream, t, kv * d).unwrap();
         let conf = config([
             ("tokens", t as u64),
+            ("sequence", t as u64),
             ("heads", heads as u64),
             ("kv", kv as u64),
             ("qsize", (t * heads * d) as u64),
@@ -663,6 +666,10 @@ fn tiled_attention_real_shapes_match_uniform_attention() {
 }
 
 fn check_attention(t: usize, heads: usize, kv: usize, gain: f32) {
+    check_batched_attention(t, heads, kv, gain, t);
+}
+
+fn check_batched_attention(t: usize, heads: usize, kv: usize, gain: f32, sequence: usize) {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
     let d = 128;
@@ -674,7 +681,7 @@ fn check_attention(t: usize, heads: usize, kv: usize, gain: f32) {
     let kt = upload(&ops, &mut stream, t, kv * d, &k);
     let vt = upload(&ops, &mut stream, t, kv * d, &v);
     let gt = upload(&ops, &mut stream, t, heads * d, &g);
-    let mut f = ops::attention(&ops, &stream, &qt, &kt, &vt).unwrap();
+    let mut f = ops::attention_batched(&ops, &stream, &qt, &kt, &vt, sequence).unwrap();
     let (dq, dk, dv) = ops::attention_backward(&ops, &stream, &qt, &kt, &vt, &f, &gt).unwrap();
     let mut output = vec![0.0; q.len()];
     let mut eq = vec![0.0f64; q.len()];
@@ -685,7 +692,8 @@ fn check_attention(t: usize, heads: usize, kv: usize, gain: f32) {
         for h in 0..heads {
             let hi = h / (heads / kv);
             let qi = (i * heads + h) * d;
-            let mut scores = (0..t)
+            let begin = (i / sequence) * sequence;
+            let mut scores = (begin..begin + sequence)
                 .map(|j| {
                     let kj = (j * kv + hi) * d;
                     (0..d).map(|c| f64::from(q[qi + c]) * f64::from(k[kj + c])).sum::<f64>()
@@ -702,12 +710,14 @@ fn check_attention(t: usize, heads: usize, kv: usize, gain: f32) {
             }
             let mut o = vec![0.0; d];
             for c in 0..d {
-                o[c] = (0..t).map(|j| scores[j] * f64::from(v[(j * kv + hi) * d + c])).sum();
+                o[c] = (begin..begin + sequence)
+                    .map(|j| scores[j - begin] * f64::from(v[(j * kv + hi) * d + c]))
+                    .sum();
                 output[qi + c] = o[c] as f32;
             }
             let delta = (0..d).map(|c| o[c] * f64::from(g[qi + c])).sum::<f64>();
             for (j, &probability) in scores.iter().enumerate() {
-                let kj = (j * kv + hi) * d;
+                let kj = ((begin + j) * kv + hi) * d;
                 let dp =
                     (0..d).map(|c| f64::from(g[qi + c]) * f64::from(v[kj + c])).sum::<f64>();
                 let ds = probability * (dp - delta) * scale;
@@ -738,4 +748,67 @@ fn check_attention(t: usize, heads: usize, kv: usize, gain: f32) {
         )
         .is_err()
     );
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn full_targets_batched_fusion_attention_matches_f64() {
+    for (batch, tokens, heads, kv) in [(3, 12, 20, 20), (2, 7, 4, 1), (1, 43, 20, 20)] {
+        for gain in [1.0, 8.0] {
+            check_batched_attention(batch * tokens, heads, kv, gain, tokens);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn full_targets_gelu_reduction_and_tap_layout_match_cpu() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    let (rows, cols) = (43, 257);
+    let x: Vec<_> = values(rows * cols, 3).into_iter().map(|v| v * 12.0).collect();
+    let g = values(rows * cols, 7);
+    let xt = upload(&ops, &mut stream, rows, cols, &x);
+    let gt = upload(&ops, &mut stream, rows, cols, &g);
+    let dx = ops::gelu_backward(&ops, &stream, &xt, &gt).unwrap();
+    // Finite differences of independent f64 GELU, including both saturated tails.
+    let gelu = |x: f64| {
+        0.5 * x
+            * (1.0 + ((2.0 / std::f64::consts::PI).sqrt() * (x + 0.044715 * x.powi(3))).tanh())
+    };
+    let expected: Vec<_> = x
+        .iter()
+        .zip(&g)
+        .map(|(&x, &g)| {
+            let x = f64::from(x);
+            (f64::from(g) * (gelu(x + 1e-5) - gelu(x - 1e-5)) / 2e-5) as f32
+        })
+        .collect();
+    close(&read(&dx, &mut stream), &expected, 0.003, 1e-6);
+    let dst = FloatTensor::zero(&stream, 6, cols).unwrap();
+    for _ in 0..28 {
+        ops::sum_rows_accumulate(&ops, &stream, &gt, &dst, 3).unwrap();
+    }
+    let sums: Vec<_> = (0..cols)
+        .map(|c| (0..rows).map(|r| f64::from(g[r * cols + c])).sum::<f64>() as f32 * 28.0)
+        .collect();
+    let result = dst.download(&mut stream).unwrap();
+    close(&result[3 * cols..4 * cols], &sums, 1e-6, 1e-6);
+    assert!(result[..3 * cols].iter().chain(&result[4 * cols..]).all(|v| *v == 0.0));
+    let taps = upload(&ops, &mut stream, 3 * 12, 2560, &values(3 * 12 * 2560, 11));
+    let permuted = ops::permute_taps(&ops, &stream, &taps, false).unwrap();
+    let original = taps.download(&mut stream).unwrap();
+    let perm = permuted.download(&mut stream).unwrap();
+    for token in 0..3 {
+        for c in 0..2560 {
+            for layer in 0..12 {
+                assert_eq!(
+                    perm[(token * 2560 + c) * 12 + layer],
+                    original[(token * 12 + layer) * 2560 + c]
+                );
+            }
+        }
+    }
+    let restored = ops::permute_taps(&ops, &stream, &permuted, true).unwrap();
+    assert_eq!(original, restored.download(&mut stream).unwrap());
 }

@@ -1,0 +1,50 @@
+amdgpu.target<gfx11-generic> @krea2_train_taps_target {subgroup_size = 32}
+config.decl @krea2.train_taps.reverse : %value: index where [range(%value, 1, 3)]
+config.decl @krea2.train_taps.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_taps.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_taps_target) export("krea2_train_taps") @krea2_train_taps(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 256 : index
+ %gx = config.get @krea2.train_taps.grid_x : index
+ %gy = config.get @krea2.train_taps.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %out: buffer) {
+ %offset = index.constant 0 : offset
+ %n = index.assume %count [range(%count, 1, 1073741824)] : index
+ %step = index.constant 256 : index
+ %lane = kernel.workitem.id<x> : index
+ %group = kernel.workgroup.id<x> : index
+ %base = index.mul %group, %step : index
+ %at = index.add %base, %lane : index
+ %xg = buffer.assume.memory_space<global> %x : buffer
+ %xv = buffer.view %xg[%offset] : buffer -> view<[%n]xbf16>
+ %og = buffer.assume.memory_space<global> %out : buffer
+ %ov = buffer.view %og[%offset] : buffer -> view<[%n]xbf16>
+ %ok = index.cmp ult, %at, %n : index
+ scf.if %ok {
+  %width = index.constant 2560 : index
+  %layers = index.constant 12 : index
+  %stride = index.constant 30720 : index
+  %token = index.div %at, %stride : index
+  %rest = index.rem %at, %stride : index
+  %channel = index.div %rest, %layers : index
+  %layer = index.rem %rest, %layers : index
+  %tb = index.mul %token, %stride : index
+  %lb = index.mul %layer, %width : index
+  %tl = index.add %tb, %lb : index
+  %other = index.add %tl, %channel : index
+  %i = index.assume %at [range(%at, 0, 1073741824), lt(%at, %n)] : index
+  %j = index.assume %other [range(%other, 0, 1073741824), lt(%other, %n)] : index
+  %reverse = config.get @krea2.train_taps.reverse : index
+  %one = index.constant 1 : index
+  %forward = index.cmp eq, %reverse, %one : index
+  scf.if %forward {
+   %v = view.load %xv[%j] : view<[%n]xbf16> -> bf16
+   view.store %v, %ov[%i] : bf16, view<[%n]xbf16>
+  } else {
+   %v = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+   view.store %v, %ov[%j] : bf16, view<[%n]xbf16>
+  }
+ }
+ kernel.return
+}

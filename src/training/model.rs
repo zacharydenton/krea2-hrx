@@ -127,15 +127,40 @@ pub struct BlockTape {
     mlp_gate: Tensor,
     up: Tensor,
     mixed: Tensor,
+    modulation: Option<[Tensor; 4]>,
     /// Resulting block output.
     pub output: Tensor,
 }
 
 impl Transformer {
+    #[cfg(test)]
+    pub(crate) fn auxiliary_test_model(
+        ops: &Ops,
+        stream: &mut Stream,
+        adapter: &Adapter,
+    ) -> Result<Self> {
+        let adapters = adapter
+            .layers
+            .iter()
+            .map(|(name, f)| Ok((name.clone(), Projection::new(ops, stream, f)?)))
+            .collect::<Result<_>>()?;
+        Ok(Self { weights: Weights::empty(), quantized: BTreeMap::new(), adapters, layers: 28 })
+    }
+
     /// Validate all RAW projection shapes and storage on CPU, without opening a device.
     pub fn validate_checkpoint(path: &Path) -> Result<()> {
         let file = Checkpoint::open(path)?;
-        Self::validate_weights(&file, false).map(|_| ())
+        Self::validate_weights(&file, false)?;
+        for (name, outputs, inputs) in crate::lora::Targets::All.layers().into_iter().skip(224)
+        {
+            let t = file.get(&format!("{name}.weight"))?;
+            if !matches!(t.dtype, DType::BF16 | DType::F32) || t.shape != [outputs, inputs] {
+                return Err(Error::invalid(format!(
+                    "{name}: expected dense [{outputs}, {inputs}]"
+                )));
+            }
+        }
+        Ok(())
     }
 
     fn validate_weights(file: &Checkpoint, allow_quantized: bool) -> Result<DType> {
@@ -231,6 +256,11 @@ impl Transformer {
             .transpose()?
             .unwrap_or_default();
         Ok(Self { weights, quantized, adapters, layers: 28 })
+    }
+
+    /// Whether any auxiliary DiT projection has an adapter.
+    pub(crate) fn has_auxiliary(&self) -> bool {
+        self.adapters.keys().any(|name| !name.starts_with("blocks."))
     }
 
     fn weight(&self, name: &str) -> Result<&Weight> {
@@ -395,6 +425,10 @@ impl Transformer {
             mlp_gate,
             up,
             mixed,
+            modulation: self
+                .adapters
+                .contains_key("tproj.1")
+                .then_some([norm1, projected, norm2, down]),
             output,
         })
     }
@@ -412,6 +446,23 @@ impl Transformer {
         sin: &FloatTensor,
         grad: &Tensor,
     ) -> Result<Tensor> {
+        self.backward_with_modulation(ops, stream, index, t, mods, cos, sin, grad, None)
+    }
+
+    /// Also accumulate all six broadcast modulation gradients in FP32.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward_with_modulation(
+        &self,
+        ops: &Ops,
+        stream: &mut Stream,
+        index: usize,
+        t: BlockTape,
+        mods: &Tensor,
+        cos: &FloatTensor,
+        sin: &FloatTensor,
+        grad: &Tensor,
+        modulation_grad: Option<&FloatTensor>,
+    ) -> Result<Tensor> {
         if !self.quantized.is_empty() {
             return Err(Error::invalid("quantized training is not supported"));
         }
@@ -425,6 +476,27 @@ impl Transformer {
         let gp1 = self.linear_backward(ops, stream, &t.post, &gg, &format!("{p}.mlp.gate"))?;
         let gp2 = self.linear_backward(ops, stream, &t.post, &gu, &format!("{p}.mlp.up"))?;
         let gp = train::add_scaled(ops, stream, &gp1, &gp2, 1.0)?;
+        if let Some(dst) = modulation_grad {
+            let [_, _, norm2, down] = t
+                .modulation
+                .as_ref()
+                .ok_or_else(|| Error::invalid("missing modulation tape"))?;
+            train::sum_rows_accumulate(
+                ops,
+                stream,
+                &ops.binary(stream, grad, down, Binary::Mul)?,
+                dst,
+                5,
+            )?;
+            train::sum_rows_accumulate(
+                ops,
+                stream,
+                &ops.binary(stream, &gp, norm2, Binary::Mul)?,
+                dst,
+                3,
+            )?;
+            train::sum_rows_accumulate(ops, stream, &gp, dst, 4)?;
+        }
         let gn2 =
             ops.binary(stream, &gp, &train::one_plus(ops, stream, &row(3)?)?, Binary::Mul)?;
         let gr =
@@ -466,6 +538,27 @@ impl Transformer {
                 self.linear_backward(ops, stream, &t.pre, g, &format!("{p}.attn.{name}"))?;
             pre_grad = train::add_scaled(ops, stream, &pre_grad, &part, 1.0)?;
         }
+        if let Some(dst) = modulation_grad {
+            let [norm1, projected, _, _] = t
+                .modulation
+                .as_ref()
+                .ok_or_else(|| Error::invalid("missing modulation tape"))?;
+            train::sum_rows_accumulate(
+                ops,
+                stream,
+                &ops.binary(stream, &gr, projected, Binary::Mul)?,
+                dst,
+                2,
+            )?;
+            train::sum_rows_accumulate(
+                ops,
+                stream,
+                &ops.binary(stream, &pre_grad, norm1, Binary::Mul)?,
+                dst,
+                0,
+            )?;
+            train::sum_rows_accumulate(ops, stream, &pre_grad, dst, 1)?;
+        }
         let gn1 = ops.binary(
             stream,
             &pre_grad,
@@ -497,5 +590,114 @@ impl Transformer {
             })
             .collect::<Result<_>>()?;
         Ok(Adapter { layers })
+    }
+}
+
+#[cfg(test)]
+mod full_target_tests {
+    use super::*;
+    use crate::numerics::{from_f32, to_f32};
+
+    #[test]
+    #[ignore = "requires GPU and KREA2_RAW_CHECKPOINT; loads one main block only"]
+    fn full_targets_main_modulation_gradients_match_cpu_chain_rule() {
+        super::super::memory::before_load(2usize << 30).unwrap();
+        let path = std::env::var_os("KREA2_RAW_CHECKPOINT").expect("set KREA2_RAW_CHECKPOINT");
+        let file = Checkpoint::open(std::path::Path::new(&path)).unwrap();
+        let mut stream = Stream::open().unwrap();
+        let ops = Ops::new(hrx::BufferPool::new());
+        let weights = Weights::load(&mut stream, &file, |name| {
+            if name.starts_with("blocks.0.") { name.into() } else { String::new() }
+        })
+        .unwrap();
+        let factors = Factors {
+            inputs: 6144,
+            outputs: 36864,
+            rank: 1,
+            alpha: 1.0,
+            a: vec![0.0; 6144],
+            b: vec![0.0; 36864],
+        };
+        let adapters =
+            [("tproj.1".into(), Projection::new(&ops, &mut stream, &factors).unwrap())].into();
+        let model = Transformer { weights, quantized: BTreeMap::new(), adapters, layers: 28 };
+        let upload = |s: &mut Stream, rows, offset, gain| {
+            let bits: Vec<_> = (0..rows * 6144)
+                .map(|i| from_f32((((i * 17 + offset) % 71) as f32 / 71.0 - 0.5) * gain))
+                .collect();
+            Tensor::from_slice(ops.pool(), s, &bits, rows, 6144).unwrap()
+        };
+        let x = upload(&mut stream, 1, 3, 1.0);
+        let mods = upload(&mut stream, 6, 7, 0.25);
+        let g = upload(&mut stream, 1, 11, 0.125);
+        let cos = FloatTensor::from_slice(&mut stream, 1, 128, &[1.0; 128]).unwrap();
+        let sin = FloatTensor::zero(&stream, 1, 128).unwrap();
+        let tape = model.block(&ops, &mut stream, 0, &x, &mods, &cos, &sin, 1.0).unwrap();
+        let read = |t: &Tensor, s: &mut Stream| {
+            t.download(s).unwrap().into_iter().map(to_f32).collect::<Vec<_>>()
+        };
+        let [n1, projected, n2, down] = tape.modulation.as_ref().unwrap();
+        let (n1, projected, n2, down) = (
+            read(n1, &mut stream),
+            read(projected, &mut stream),
+            read(n2, &mut stream),
+            read(down, &mut stream),
+        );
+        let residual = read(&tape.residual, &mut stream);
+        let incoming = read(&g, &mut stream);
+        let modulation = read(&mods, &mut stream);
+        let dst = FloatTensor::zero(&stream, 6, 6144).unwrap();
+        model
+            .backward_with_modulation(
+                &ops,
+                &mut stream,
+                0,
+                tape,
+                &mods,
+                &cos,
+                &sin,
+                &g,
+                Some(&dst),
+            )
+            .unwrap();
+        let dm = dst.download(&mut stream).unwrap();
+        let bf = |v: f32| to_f32(from_f32(v));
+        let scales = crate::lora::floats(file.get("blocks.0.postnorm.scale").unwrap()).unwrap();
+        // A single token exposes each broadcast reduction directly. Independently
+        // differentiate the residual RMSNorm to verify the attention gate branch.
+        let inv = 1.0
+            / ((residual.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>() / 6144.0 + 1e-5)
+                .sqrt());
+        let weighted: Vec<_> = (0..6144)
+            .map(|c| {
+                f64::from(bf(dm[4 * 6144 + c] * bf(1.0 + modulation[3 * 6144 + c])))
+                    * (1.0 + f64::from(scales[c]))
+            })
+            .collect();
+        let dot = weighted.iter().zip(&residual).map(|(g, x)| g * f64::from(*x)).sum::<f64>()
+            / 6144.0;
+        let mut actual_gate = Vec::new();
+        let mut expected_gate = Vec::new();
+        for c in 0..6144 {
+            assert_eq!(dm[c], bf(dm[6144 + c] * n1[c]), "pre scale {c}");
+            assert_eq!(dm[3 * 6144 + c], bf(dm[4 * 6144 + c] * n2[c]), "post scale {c}");
+            assert_eq!(dm[5 * 6144 + c], bf(incoming[c] * down[c]), "MLP gate {c}");
+            let norm_grad =
+                bf((inv * (weighted[c] - f64::from(residual[c]) * inv * inv * dot)) as f32);
+            expected_gate.push(bf(bf(incoming[c] + norm_grad) * projected[c]));
+            actual_gate.push(dm[2 * 6144 + c]);
+        }
+        let err: f64 =
+            actual_gate.iter().zip(&expected_gate).map(|(a, b)| f64::from(a - b).powi(2)).sum();
+        let norm: f64 = expected_gate.iter().map(|v| f64::from(*v).powi(2)).sum();
+        assert!(
+            err <= norm * 0.000025 + 1e-12,
+            "attention modulation relative L2 {}",
+            (err / norm).sqrt()
+        );
+        assert!(dm.iter().all(|v| v.is_finite()));
+        for row in dm.chunks_exact(6144) {
+            assert!(row.iter().any(|v| *v != 0.0));
+        }
     }
 }

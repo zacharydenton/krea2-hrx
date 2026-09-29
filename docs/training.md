@@ -39,6 +39,7 @@ and benchmark reports outside the checkout. Create a JSON configuration such as
   "output": "character/run",
   "resolution": 1024,
   "rank": 32,
+  "targets": "all",
   "alpha": 32,
   "steps": 1500,
   "accumulation": 1,
@@ -86,7 +87,7 @@ to BF16. Inference keeps its existing timestep rounding for trajectory parity.
 # CPU only: validate model projection shapes, image/caption pairs and buckets.
 cargo run --locked --bin krea2-train -- inspect --config ~/training/character.json
 
-# GPU: cache posterior moments and fully fused RAW conditioning, in separate phases.
+# GPU: cache posterior moments and frozen Qwen taps, in separate phases.
 cargo run --release --locked --bin krea2-train -- prepare --config ~/training/character.json
 
 # GPU: train with both preprocessing models released.
@@ -103,9 +104,21 @@ cargo run --release --locked --bin krea2-train -- run \
 
 Training freezes the base model and text encoder. Each of the 28 main transformer
 blocks has adapters on `attn.wq`, `attn.wk`, `attn.wv`, `attn.gate`, `attn.wo`,
-`mlp.gate`, `mlp.up` and `mlp.down`. These 224 projections exclude input/output,
-time and text-fusion linears; trainers that adapt all 264 linears have a different
-training scope. Freezing text fusion lets preparation cache its final output.
+`mlp.gate`, `mlp.up` and `mlp.down`. Select `"targets": "all"` for all 264 DiT
+linears: those 224, the 32 projections in the four text-fusion blocks,
+`txtfusion.projector`, `txtmlp.1`, `txtmlp.3`, `tmlp.0`, `tmlp.2`, `tproj.1`,
+`first`, and `last.linear`. Qwen, the VAE, normalization scales and modulation
+tables remain frozen. Full training caches the twelve Qwen taps before the
+trainable fusion tower. Broadcast modulation gradients accumulate in FP32 across
+all 28 main blocks, then feed the timestep projections.
+
+Omitting `targets` retains the existing `main_blocks` profile with 224 targets,
+which caches fully fused text conditioning. The two profiles have distinct cache
+identities; use a fresh output directory when switching. Initialization keeps
+the same main-block RNG sequence in both modes. Resume restores the complete
+selected target set, and native adapter inference applies auxiliary targets too.
+Full-target mode retains the small auxiliary graph even when main-block
+checkpointing is enabled; its storage is included in the allocation estimate.
 Factors execute in BF16 with FP32 master
 weights, parameter gradients and optimizer moments. Intermediate activation
 gradients use BF16. By default, block inputs are retained and each block is
@@ -208,6 +221,7 @@ KREA2_TRAIN_TEST_CONFIG=~/training/character.json \
 
 cargo bench --locked --bench training -- training/projection
 cargo bench --locked --bench training -- training/attention
+cargo bench --locked --bench training -- training/fusion_attention
 cargo bench --locked --bench training -- training/frozen_backward
 cargo bench --locked --bench training -- training/adamw
 cargo bench --locked --bench training -- training/optimizer

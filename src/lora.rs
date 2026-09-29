@@ -23,6 +23,60 @@ pub const PROJECTIONS: [(&str, usize, usize); 8] = [
     ("mlp.down", 6144, 16384),
 ];
 
+/// Which original-basis DiT linear layers receive adapters. Qwen stays frozen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Targets {
+    /// The eight projections in each of the 28 main blocks (224 total).
+    #[default]
+    MainBlocks,
+    /// All 264 DiT linears, including text fusion and time/text/image projections.
+    All,
+}
+
+impl Targets {
+    /// Canonical names and `[outputs, inputs]`, in deterministic initialization order.
+    pub fn layers(self) -> Vec<(String, usize, usize)> {
+        let mut layers = Vec::new();
+        for block in 0..28 {
+            for (name, outputs, inputs) in PROJECTIONS {
+                layers.push((format!("blocks.{block}.{name}"), outputs, inputs));
+            }
+        }
+        if self == Self::All {
+            for tower in ["layerwise_blocks", "refiner_blocks"] {
+                for block in 0..2 {
+                    for (name, _, _) in PROJECTIONS {
+                        let (outputs, inputs) = match name {
+                            "mlp.gate" | "mlp.up" => (6912, 2560),
+                            "mlp.down" => (2560, 6912),
+                            _ => (2560, 2560),
+                        };
+                        layers.push((
+                            format!("txtfusion.{tower}.{block}.{name}"),
+                            outputs,
+                            inputs,
+                        ));
+                    }
+                }
+            }
+            for (name, outputs, inputs) in [
+                ("first", 6144, 64),
+                ("last.linear", 64, 6144),
+                ("tmlp.0", 6144, 256),
+                ("tmlp.2", 6144, 6144),
+                ("tproj.1", 36864, 6144),
+                ("txtmlp.1", 6144, 2560),
+                ("txtmlp.3", 6144, 6144),
+                ("txtfusion.projector", 1, 12),
+            ] {
+                layers.push((name.into(), outputs, inputs));
+            }
+        }
+        layers
+    }
+}
+
 /// Row-major master factors: A is `[rank, inputs]`, B is `[outputs, rank]`.
 #[derive(Clone, Debug)]
 pub struct Factors {
@@ -66,16 +120,11 @@ pub struct Adapter {
 }
 
 fn dimensions(name: &str) -> Result<(usize, usize)> {
-    let rest = name.strip_prefix("blocks.").ok_or_else(|| Error::invalid(name))?;
-    let (block, projection) = rest.split_once('.').ok_or_else(|| Error::invalid(name))?;
-    let index = block.parse::<usize>().map_err(|_| Error::invalid(name))?;
-    if index >= 28 || block != index.to_string() {
-        return Err(Error::invalid(format!("unsupported LoRA target {name}")));
-    }
-    PROJECTIONS
-        .iter()
-        .find(|(key, _, _)| *key == projection)
-        .map(|(_, outputs, inputs)| (*outputs, *inputs))
+    Targets::All
+        .layers()
+        .into_iter()
+        .find(|(key, _, _)| key == name)
+        .map(|(_, outputs, inputs)| (outputs, inputs))
         .ok_or_else(|| Error::invalid(format!("unsupported LoRA target {name}")))
 }
 
@@ -96,24 +145,32 @@ impl Adapter {
 
     /// Initialize every main-block projection with Gaussian A and zero B.
     pub fn initialize(rank: usize, alpha: f32, seed: u64) -> Result<Self> {
+        Self::initialize_targets(rank, alpha, seed, Targets::MainBlocks)
+    }
+
+    /// Initialize the selected target profile; main-block RNG ordering is preserved.
+    pub fn initialize_targets(
+        rank: usize,
+        alpha: f32,
+        seed: u64,
+        targets: Targets,
+    ) -> Result<Self> {
         if !(1..=128).contains(&rank) || !alpha.is_finite() || alpha <= 0.0 {
             return Err(Error::invalid("LoRA rank must be 1..=128 and alpha positive"));
         }
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut layers = BTreeMap::new();
-        for block in 0..28 {
-            for (name, outputs, inputs) in PROJECTIONS {
-                let a = (0..rank * inputs)
-                    .map(|_| {
-                        let value: f32 = StandardNormal.sample(&mut rng);
-                        value / rank as f32
-                    })
-                    .collect();
-                layers.insert(
-                    format!("blocks.{block}.{name}"),
-                    Factors { inputs, outputs, rank, alpha, a, b: vec![0.0; outputs * rank] },
-                );
-            }
+        for (name, outputs, inputs) in targets.layers() {
+            let a = (0..rank * inputs)
+                .map(|_| {
+                    let value: f32 = StandardNormal.sample(&mut rng);
+                    value / rank as f32
+                })
+                .collect();
+            layers.insert(
+                name,
+                Factors { inputs, outputs, rank, alpha, a, b: vec![0.0; outputs * rank] },
+            );
         }
         Ok(Self { layers })
     }
@@ -230,6 +287,7 @@ pub(crate) fn floats(t: crate::checkpoint::Tensor<'_>) -> Result<Vec<f32>> {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct SavedTensor {
     pub dtype: &'static str,
     pub shape: Vec<usize>,
@@ -283,6 +341,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn full_target_profile_is_complete_and_preserves_main_initialization() {
+        let main = Adapter::initialize(1, 1.0, 37).unwrap();
+        let all = Adapter::initialize_targets(1, 1.0, 37, Targets::All).unwrap();
+        assert_eq!(main.layers.len(), 224);
+        assert_eq!(all.layers.len(), 264);
+        all.validate().unwrap();
+        for (name, factors) in main.layers {
+            assert_eq!(factors.a, all.layers[&name].a);
+            assert_eq!(factors.b, all.layers[&name].b);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("all.safetensors");
+        all.save(&path, BTreeMap::new()).unwrap();
+        let loaded = Adapter::load(&path).unwrap();
+        assert_eq!(loaded.layers.len(), 264);
+        for (name, factors) in loaded.layers {
+            assert_eq!((factors.outputs, factors.inputs), dimensions(&name).unwrap());
+            assert_eq!(
+                factors.a,
+                all.layers[&name].a.iter().map(|v| to_f32(from_f32(*v))).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
     fn export_round_trips_original_basis_factors_and_alpha() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("character.safetensors");
@@ -308,7 +391,7 @@ mod tests {
         for name in [
             "blocks.28.attn.wq",
             "blocks.00.attn.wq",
-            "txtfusion.projector",
+            "txtfusion.layerwise_blocks.2.attn.wq",
             "blocks.0.attn.qknorm",
         ] {
             assert!(dimensions(name).is_err());

@@ -1,4 +1,5 @@
 //! Character LoRA training with explicit Loom backward operations.
+pub(crate) mod auxiliary;
 mod config;
 pub mod dataset;
 mod memory;

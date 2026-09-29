@@ -33,6 +33,7 @@ pub(crate) fn software_hash() -> String {
     for source in [
         include_str!("trainer.rs"),
         include_str!("model.rs"),
+        include_str!("auxiliary.rs"),
         include_str!("optimizer.rs"),
         include_str!("ops.rs"),
         include_str!("config.rs"),
@@ -91,6 +92,7 @@ pub(crate) fn fingerprint(
         [dataset::file_hash(&c.model)?, dataset::file_hash(text)?, dataset::file_hash(vae)?];
     let mut h = blake3::Hasher::new();
     h.update(b"krea2-prepared-v1");
+    h.update(&serde_json::to_vec(&c.targets).map_err(io)?);
     h.update(&serde_json::to_vec(&identities).map_err(io)?);
     h.update(include_bytes!("../../assets/tokenizer.json"));
     h.update(preprocessing_hash().as_bytes());
@@ -123,6 +125,13 @@ pub(crate) fn cache_path(c: &TrainConfig, s: &Sample, kind: &str) -> PathBuf {
     c.output.join("cache").join(format!("{}.{kind}.safetensors", s.key))
 }
 
+pub(crate) fn text_spec(c: &TrainConfig) -> (&'static str, usize) {
+    match c.targets {
+        crate::lora::Targets::All => ("qwen_taps", 2560),
+        crate::lora::Targets::MainBlocks => ("conditioning", 6144),
+    }
+}
+
 fn valid_cache(path: &Path, name: &str, cols: usize, rows: Option<usize>) -> bool {
     Checkpoint::open(path)
         .and_then(|f| {
@@ -131,6 +140,9 @@ fn valid_cache(path: &Path, name: &str, cols: usize, rows: Option<usize>) -> boo
                 || t.shape.len() != 2
                 || t.shape[1] != cols
                 || t.shape[0] == 0
+                || (name == "qwen_taps"
+                    && (!t.shape[0].is_multiple_of(12) || t.shape[0] > 512 * 12))
+                || (name == "conditioning" && t.shape[0] > 512)
                 || rows.is_some_and(|r| t.shape[0] != r)
             {
                 return Err(Error::invalid("invalid prepared tensor"));
@@ -218,21 +230,25 @@ pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
     let need_text = data
         .samples
         .iter()
-        .any(|s| !valid_cache(&cache_path(c, s, "text"), "conditioning", 6144, None));
+        .any(|s| !valid_cache(&cache_path(c, s, "text"), text_spec(c).0, text_spec(c).1, None));
     if need_text {
         let budget = hrx::residency::ResidencyManager::new(c.memory_gib * (1usize << 30))?;
         let mut stream = Stream::open()?.with_memory_budget(budget.budget());
         let models = Models::load_parts(&mut stream, &c.model, Some(&text), None, None, None)?;
         for (index, s) in data.samples.iter().enumerate() {
             let path = cache_path(c, s, "text");
-            if valid_cache(&path, "conditioning", 6144, None) {
+            if valid_cache(&path, text_spec(c).0, text_spec(c).1, None) {
                 continue;
             }
             let ids = models.tokenizer.training_prompt(&s.caption)?;
             eprintln!("encoding caption {}/{}", index + 1, data.samples.len());
             let taps = models.encode(&mut stream, &ids)?;
-            let conditioning = models.text_fusion(&mut stream, &taps)?;
-            save_bf16(&path, "conditioning", &conditioning, &mut stream)?;
+            let conditioning = if c.targets == crate::lora::Targets::All {
+                taps
+            } else {
+                models.text_fusion(&mut stream, &taps)?
+            };
+            save_bf16(&path, text_spec(c).0, &conditioning, &mut stream)?;
         }
         stream.synchronize()?;
     }
@@ -260,7 +276,7 @@ pub(crate) fn load(c: &TrainConfig) -> Result<PreparedDataset> {
             "posterior",
             32,
             Some(s.width / 8 * (s.height / 8)),
-        ) || !valid_cache(&cache_path(c, s, "text"), "conditioning", 6144, None)
+        ) || !valid_cache(&cache_path(c, s, "text"), text_spec(c).0, text_spec(c).1, None)
         {
             return Err(Error::invalid("incomplete prepared dataset; run prepare first"));
         }

@@ -1,12 +1,13 @@
 //! Checkpointed main-block training, deterministic sampling and resumable state.
 use super::{
     PreparedDataset, TrainConfig,
+    auxiliary::Tape,
     model::Transformer,
     ops::{self, FloatTensor},
     optimizer, prepare,
 };
 use crate::checkpoint::Checkpoint;
-use crate::lora::{Adapter, Factors, PROJECTIONS, SavedTensor, floats, io, save_tensors};
+use crate::lora::{Adapter, Factors, SavedTensor, Targets, floats, io, save_tensors};
 use crate::models::Models;
 use crate::models::graph::{LATENT_MEAN, LATENT_STDDEV};
 use crate::numerics::{from_f32, to_f32};
@@ -62,15 +63,19 @@ impl MemoryEstimate {
         }
         // Weight storage is BF16, except small norm vectors retained in both formats.
         // A 2x file bound also covers loader staging and an individual transpose.
-        let parameters: usize = PROJECTIONS.iter().map(|(_, o, i)| (o + i) * c.rank * 28).sum();
+        let parameters: usize =
+            c.targets.layers().iter().map(|(_, o, i)| (o + i) * c.rank).sum();
         let adapters = parameters * 18;
         let mut tokens = 0;
+        let mut text_tokens = 0;
         for sample in &data.samples {
             let f = Checkpoint::open(&prepare::cache_path(c, sample, "text"))?;
-            let text = f.get("conditioning")?.shape[0];
+            let text = f.get(prepare::text_spec(c).0)?.shape[0]
+                / if c.targets == Targets::All { 12 } else { 1 };
+            text_tokens = text_tokens.max(text);
             tokens = tokens.max(sample.width / 16 * (sample.height / 16) + text);
         }
-        let activations = if c.gradient_checkpointing {
+        let mut activations = if c.gradient_checkpointing {
             29 * tokens * 6144 * 2
         } else {
             // Every BlockTape field, including FP32 attention output and LSE.
@@ -78,6 +83,15 @@ impl MemoryEstimate {
             // Adjacent blocks' shared input/output is still counted twice here.
             28 * tokens * (137728 * 2 + 6144 * 4 + 48 * 4)
         };
+        if c.targets == Targets::All {
+            // Four extra main-block tensors only when modulation is trainable.
+            if !c.gradient_checkpointing {
+                activations += 28 * tokens * 4 * 6144 * 2;
+            }
+            // All text-fusion forward nodes, gradients and the first/last tapes.
+            // Layerwise towers have twelve rows per conditioning token.
+            activations += text_tokens * 12 * 2560 * 2 * 96 + tokens * 6144 * 2 * 16;
+        }
         let scratch =
             tokens * (6144 * 24 + 16384 * 10) * 2 + (2usize << 30) + (c.scratch_pool_mib << 20);
         let total = frozen + adapters + activations + scratch;
@@ -184,7 +198,12 @@ impl Trainer {
             Some((path, _)) => {
                 read_master_adapter(&path.join("optimizer.safetensors"), &config)?
             }
-            None => Adapter::initialize(config.rank, config.alpha, config.seed)?,
+            None => Adapter::initialize_targets(
+                config.rank,
+                config.alpha,
+                config.seed,
+                config.targets,
+            )?,
         };
         let mut models =
             Models::load_parts(&mut stream, &config.model, None, None, None, None)?;
@@ -329,12 +348,29 @@ impl Trainer {
         let stream = &mut self.stream;
         let noisy = Tensor::from_slice(ops.pool(), stream, &noisy, h / 2 * (w / 2), 64)?;
         let textfile = Checkpoint::open(&prepare::cache_path(&self.config, sample, "text"))?;
-        let text = textfile.get("conditioning")?;
+        let text = textfile.get(prepare::text_spec(&self.config).0)?;
         let textbits: Vec<u16> =
             text.bytes.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
-        let text = Tensor::from_slice(ops.pool(), stream, &textbits, text.shape[0], 6144)?;
-        let (embedding, modvec) = self.models.time_continuous(stream, sigma)?;
-        let image = self.models.image_in(stream, &noisy)?;
+        let text =
+            Tensor::from_slice(ops.pool(), stream, &textbits, text.shape[0], text.shape[1])?;
+        let full = self.config.targets == Targets::All;
+        let mut auxiliary = Tape::new(&self.models, &self.model, 1.0);
+        let (text, embedding, modvec, image, roots) = if full {
+            let text_id = auxiliary.text(stream, &text)?;
+            let (embedding_id, mod_id) = auxiliary.time(stream, sigma)?;
+            let image_id = auxiliary.image(stream, &noisy)?;
+            (
+                auxiliary.value(text_id).clone(),
+                auxiliary.value(embedding_id).clone(),
+                auxiliary.value(mod_id).clone(),
+                auxiliary.value(image_id).clone(),
+                Some((text_id, embedding_id, mod_id, image_id)),
+            )
+        } else {
+            let (embedding, modvec) = self.models.time_continuous(stream, sigma)?;
+            (text, embedding, modvec, self.models.image_in(stream, &noisy)?, None)
+        };
+        let mod_grad = if full { Some(FloatTensor::zero(stream, 6, 6144)?) } else { None };
         let mods_f32 = self.models.modulation(stream, &modvec)?;
         let mods = ops::cast_view(ops, stream, mods_f32.binding(), 28 * 6, 6144)?;
         let tokens = text.rows() + image.rows();
@@ -379,10 +415,32 @@ impl Trainer {
             );
         }
         let last = boundaries.last().expect("output").view(image.rows(), 6144, text.size())?;
-        let prediction = self.models.last(stream, &last, &embedding)?;
+        let mut final_tape = Tape::new(&self.models, &self.model, 1.0);
+        let final_input = final_tape.input(&last);
+        let final_embedding = final_tape.input(&embedding);
+        let final_output = if full {
+            Some(final_tape.last(stream, final_input, final_embedding)?)
+        } else {
+            None
+        };
+        let prediction = match final_output {
+            Some(id) => final_tape.value(id).clone(),
+            None => self.models.last(stream, &last, &embedding)?,
+        };
         let target = FloatTensor::from_slice(stream, image.rows(), 64, &target)?;
         let (loss, gradient) = ops::flow_loss(ops, stream, &prediction, &target)?;
-        let image_grad = last_backward(&self.models, stream, &last, &embedding, &gradient)?;
+        let (image_grad, embedding_grad) = if let Some(id) = final_output {
+            let mut grads = final_tape.backward(stream, &[(id, gradient)])?;
+            (
+                grads[final_input]
+                    .take()
+                    .ok_or_else(|| Error::internal("missing final input gradient"))?,
+                grads[final_embedding].take(),
+            )
+        } else {
+            (last_backward(&self.models, stream, &last, &embedding, &gradient)?, None)
+        };
+        drop(final_tape);
         let mut grad = ops.tensor(stream, tokens, 6144)?;
         grad.zero(stream)?;
         stream.copy(
@@ -407,7 +465,17 @@ impl Trainer {
                 recompute_ms += started.elapsed().as_secs_f64() * 1000.0;
             }
             let started = Instant::now();
-            grad = self.model.backward(ops, stream, block, tape, &m, &cos, &sin, &grad)?;
+            grad = self.model.backward_with_modulation(
+                ops,
+                stream,
+                block,
+                tape,
+                &m,
+                &cos,
+                &sin,
+                &grad,
+                mod_grad.as_ref(),
+            )?;
             stream.synchronize()?;
             if profile {
                 backward_ms += started.elapsed().as_secs_f64() * 1000.0;
@@ -417,6 +485,25 @@ impl Trainer {
             eprintln!(
                 "training stage recompute: {recompute_ms:.3} ms; backward: {backward_ms:.3} ms"
             );
+        }
+        if let Some((text_id, embedding_id, mod_id, image_id)) = roots {
+            let mod_gradient =
+                ops::cast(ops, stream, mod_grad.as_ref().expect("full target modulation"))?
+                    .view(1, 6 * 6144, 0)?;
+            auxiliary.backward(
+                stream,
+                &[
+                    (text_id, grad.view(text.rows(), 6144, 0)?),
+                    (image_id, grad.view(image.rows(), 6144, text.size())?),
+                    (
+                        embedding_id,
+                        embedding_grad
+                            .ok_or_else(|| Error::internal("missing timestep gradient"))?,
+                    ),
+                    (mod_id, mod_gradient),
+                ],
+            )?;
+            stream.synchronize()?;
         }
         Ok(loss)
     }
@@ -445,6 +532,14 @@ impl Trainer {
                 ("base_model".into(), self.config.model.display().to_string()),
                 ("trigger".into(), self.config.trigger.clone()),
                 ("step".into(), self.state.step.to_string()),
+                (
+                    "targets".into(),
+                    match self.config.targets {
+                        Targets::All => "all",
+                        Targets::MainBlocks => "main_blocks",
+                    }
+                    .into(),
+                ),
             ]
             .into();
             adapter.save(&temporary.join("adapter.safetensors"), metadata)?;
@@ -498,29 +593,26 @@ impl Trainer {
 fn read_master_adapter(path: &Path, c: &TrainConfig) -> Result<Adapter> {
     let file = Checkpoint::open(path)?;
     let mut layers = BTreeMap::new();
-    for block in 0..28 {
-        for (name, outputs, inputs) in PROJECTIONS {
-            let key = format!("blocks.{block}.{name}");
-            let a = file.get(&format!("{key}.a.master"))?;
-            let b = file.get(&format!("{key}.b.master"))?;
-            if a.dtype != crate::checkpoint::DType::F32
-                || b.dtype != a.dtype
-                || a.shape != [c.rank, inputs]
-                || b.shape != [outputs, c.rank]
-            {
-                return Err(Error::invalid("resume master factor shape/dtype mismatch"));
-            }
-            let factors = Factors {
-                inputs,
-                outputs,
-                rank: c.rank,
-                alpha: c.alpha,
-                a: floats(a)?,
-                b: floats(b)?,
-            };
-            factors.validate()?;
-            layers.insert(key, factors);
+    for (key, outputs, inputs) in c.targets.layers() {
+        let a = file.get(&format!("{key}.a.master"))?;
+        let b = file.get(&format!("{key}.b.master"))?;
+        if a.dtype != crate::checkpoint::DType::F32
+            || b.dtype != a.dtype
+            || a.shape != [c.rank, inputs]
+            || b.shape != [outputs, c.rank]
+        {
+            return Err(Error::invalid("resume master factor shape/dtype mismatch"));
         }
+        let factors = Factors {
+            inputs,
+            outputs,
+            rank: c.rank,
+            alpha: c.alpha,
+            a: floats(a)?,
+            b: floats(b)?,
+        };
+        factors.validate()?;
+        layers.insert(key, factors);
     }
     Ok(Adapter { layers })
 }
@@ -623,6 +715,42 @@ fn loss_gradient(prediction: &[u16], target: &[f32]) -> Result<(f64, Vec<u16>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_target_resume_restores_every_master_and_rejects_missing_auxiliary_factors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("optimizer.safetensors");
+        let c = TrainConfig {
+            targets: Targets::All,
+            rank: 1,
+            alpha: 1.0,
+            ..TrainConfig::default()
+        };
+        let mut tensors = BTreeMap::new();
+        for (name, outputs, inputs) in c.targets.layers() {
+            for (part, rows, cols, value) in
+                [("a", 1, inputs, 0.125f32), ("b", outputs, 1, 0.25f32)]
+            {
+                tensors.insert(
+                    format!("{name}.{part}.master"),
+                    SavedTensor {
+                        dtype: "F32",
+                        shape: vec![rows, cols],
+                        bytes: value.to_le_bytes().repeat(rows * cols),
+                    },
+                );
+            }
+        }
+        save_tensors(&path, tensors.clone(), BTreeMap::new()).unwrap();
+        let restored = read_master_adapter(&path, &c).unwrap();
+        assert_eq!(restored.layers.len(), 264);
+        for factors in restored.layers.values() {
+            assert!(factors.a.iter().all(|v| *v == 0.125));
+            assert!(factors.b.iter().all(|v| *v == 0.25));
+        }
+        tensors.remove("txtfusion.projector.b.master");
+        save_tensors(&path, tensors, BTreeMap::new()).unwrap();
+        assert!(read_master_adapter(&path, &c).is_err());
+    }
     #[test]
     fn rng_resume_reproduces_times_noise_and_epoch_orders() {
         let mut a = ChaCha8Rng::seed_from_u64(37);

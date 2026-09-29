@@ -614,11 +614,18 @@ pub struct Attention {
     lse: FloatTensor,
     heads: usize,
     kv: usize,
+    sequence: usize,
 }
 
-fn attention_config(tokens: usize, heads: usize, kv: usize) -> crate::kernels::Config {
+fn attention_config(
+    tokens: usize,
+    heads: usize,
+    kv: usize,
+    sequence: usize,
+) -> crate::kernels::Config {
     config(&[
         ("tokens", tokens),
+        ("sequence", sequence),
         ("heads", heads),
         ("kv", kv),
         ("qsize", tokens * heads * 128),
@@ -650,9 +657,23 @@ pub fn attention(
     k: &Tensor,
     v: &Tensor,
 ) -> Result<Attention> {
+    attention_batched(ops, stream, q, k, v, q.rows())
+}
+
+/// Independent attention sequences packed along the row dimension.
+pub fn attention_batched(
+    ops: &Ops,
+    stream: &Stream,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    sequence: usize,
+) -> Result<Attention> {
     let heads = q.cols() / 128;
     let kv = k.cols() / 128;
-    if kv == 0
+    if sequence == 0
+        || !q.rows().is_multiple_of(sequence)
+        || kv == 0
         || !heads.is_multiple_of(kv)
         || !q.cols().is_multiple_of(128)
         || !k.cols().is_multiple_of(128)
@@ -665,7 +686,11 @@ pub fn attention(
     let output = ops.tensor(stream, q.rows(), q.cols())?;
     let exact = FloatTensor::scratch(ops, stream, q.rows(), q.cols())?;
     let lse = FloatTensor::scratch(ops, stream, q.rows(), heads)?;
-    if (16..=65536).contains(&q.rows()) && q.cols() <= 32768 && heads == kv * 4 {
+    if sequence == q.rows()
+        && (16..=65536).contains(&q.rows())
+        && q.cols() <= 32768
+        && heads == kv * 4
+    {
         let capacity = q.rows().div_ceil(16) * 16 + 16;
         let qp = pad_attention_input(ops, stream, q, capacity)?;
         let kp = pad_attention_input(ops, stream, k, capacity)?;
@@ -698,14 +723,14 @@ pub fn attention(
                 128,
             )?;
         }
-        return Ok(Attention { output, exact, lse, heads, kv });
+        return Ok(Attention { output, exact, lse, heads, kv, sequence });
     }
     // SAFETY: dimensions above match the configured GQA layout; a wave owns one query/head.
     unsafe {
         ops.launch(
             stream,
             "train_attention",
-            attention_config(q.rows(), heads, kv),
+            attention_config(q.rows(), heads, kv, sequence),
             &Scalars::new().index(q.rows()),
             &[
                 q.binding()?,
@@ -720,7 +745,7 @@ pub fn attention(
             32,
         )?;
     }
-    Ok(Attention { output, exact, lse, heads, kv })
+    Ok(Attention { output, exact, lse, heads, kv, sequence })
 }
 
 /// Compute dQ, dK and dV without atomic accumulation or repeated KV storage.
@@ -733,7 +758,7 @@ pub fn attention_backward(
     forward: &Attention,
     grad: &Tensor,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    let Attention { heads, kv, .. } = *forward;
+    let Attention { heads, kv, sequence, .. } = *forward;
     if q.rows() != grad.rows()
         || q.cols() != grad.cols()
         || q.cols() != heads * 128
@@ -752,9 +777,12 @@ pub fn attention_backward(
     let dq = ops.tensor(stream, q.rows(), q.cols())?;
     let dk = ops.tensor(stream, k.rows(), k.cols())?;
     let dv = ops.tensor(stream, v.rows(), v.cols())?;
-    let conf = attention_config(q.rows(), heads, kv);
+    let conf = attention_config(q.rows(), heads, kv, sequence);
     let scalars = Scalars::new().index(q.rows());
-    let tiled = (16..=65536).contains(&q.rows()) && q.cols() <= 32768 && heads == kv * 4;
+    let tiled = sequence == q.rows()
+        && (16..=65536).contains(&q.rows())
+        && q.cols() <= 32768
+        && heads == kv * 4;
     // SAFETY: each kernel owns disjoint output rows; all shapes match conf and share the stream.
     unsafe {
         ops.launch(
@@ -852,4 +880,81 @@ pub fn attention_backward(
         ops.launch(stream, "train_attention_dkv", conf, &scalars, &args, q.rows() * kv, 1, 32)?;
     }
     Ok((dq, dk, dv))
+}
+
+/// FP32 row reduction, accumulated into one row of a small shared gradient.
+pub fn sum_rows_accumulate(
+    ops: &Ops,
+    stream: &Stream,
+    x: &Tensor,
+    dst: &FloatTensor,
+    row: usize,
+) -> Result<()> {
+    if dst.cols() != x.cols() || row >= dst.rows() {
+        return Err(Error::invalid("row reduction dimensions"));
+    }
+    // SAFETY: each column owns one output; the slice is exactly the selected FP32 row.
+    unsafe {
+        ops.launch_1d(
+            stream,
+            "train_sum_rows",
+            config(&[("rows", x.rows()), ("cols", x.cols()), ("size", x.size())]),
+            &Scalars::new().index(x.cols()),
+            &[x.binding()?, dst.binding().slice(row * x.cols() * 4, x.cols() * 4)?],
+            x.cols(),
+        )
+    }
+}
+
+/// Sum a broadcast gradient in FP32, rounding once at the activation boundary.
+pub fn sum_rows(ops: &Ops, stream: &Stream, x: &Tensor) -> Result<Tensor> {
+    let sum = FloatTensor::scratch(ops, stream, 1, x.cols())?;
+    sum.clear(stream)?;
+    sum_rows_accumulate(ops, stream, x, &sum, 0)?;
+    cast(ops, stream, &sum)
+}
+
+/// Derivative of the same tanh GELU used in Krea's time/text projections.
+pub fn gelu_backward(ops: &Ops, stream: &Stream, x: &Tensor, grad: &Tensor) -> Result<Tensor> {
+    if (x.rows(), x.cols()) != (grad.rows(), grad.cols()) {
+        return Err(Error::invalid("GELU gradient dimensions"));
+    }
+    let out = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: equal-sized BF16 operands and a guarded pointwise output.
+    unsafe {
+        ops.launch_1d(
+            stream,
+            "train_gelu_backward",
+            config(&[]),
+            &Scalars::new().index(x.size()),
+            &[x.binding()?, grad.binding()?, out.binding()?],
+            x.size(),
+        )?;
+    }
+    Ok(out)
+}
+
+/// Exchange the layer/channel axes of token-major Qwen taps without rounding.
+pub fn permute_taps(ops: &Ops, stream: &Stream, x: &Tensor, reverse: bool) -> Result<Tensor> {
+    if !x.size().is_multiple_of(12 * 2560) {
+        return Err(Error::invalid("tap permutation dimensions"));
+    }
+    let tokens = x.size() / (12 * 2560);
+    let out = if reverse {
+        ops.tensor(stream, tokens * 12, 2560)?
+    } else {
+        ops.tensor(stream, tokens * 2560, 12)?
+    };
+    // SAFETY: the permutation maps every element bijectively within a token's 12x2560 slab.
+    unsafe {
+        ops.launch_1d(
+            stream,
+            "train_taps",
+            config(&[("reverse", if reverse { 2 } else { 1 })]),
+            &Scalars::new().index(x.size()),
+            &[x.binding()?, out.binding()?],
+            x.size(),
+        )?;
+    }
+    Ok(out)
 }

@@ -635,7 +635,7 @@ impl Models {
     }
 }
 
-fn timestep_features(timestep: f32) -> [u16; 256] {
+pub(crate) fn timestep_features(timestep: f32) -> [u16; 256] {
     let mut values = [0u16; 256];
     for index in 0..128 {
         let angle = timestep * 1000.0 * (-(10000f32.ln()) * index as f32 / 128.0).exp();

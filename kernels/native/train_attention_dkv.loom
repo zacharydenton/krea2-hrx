@@ -1,4 +1,5 @@
 amdgpu.target<gfx11-generic> @krea2_train_attention_dkv_target {subgroup_size = 32}
+config.decl @krea2.train_attention_dkv.sequence : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_attention_dkv.tokens : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_attention_dkv.heads : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_attention_dkv.kv : %value: index where [range(%value, 1, 1073741824)]
@@ -50,6 +51,10 @@ kernel.def target(@krea2_train_attention_dkv_target) export("krea2_train_attenti
 %outv_view = buffer.view %outvg[%zero_offset] : buffer -> view<[%ksize]xbf16>
 %v1 = index.rem %group, %kv : index
 %v2 = index.div %group, %kv : index
+%sequence = config.get @krea2.train_attention_dkv.sequence : index
+%batch = index.div %v2, %sequence : index
+%start = index.mul %batch, %sequence : index
+%end = index.add %start, %sequence : index
 %v3 = index.mul %v2, %kv : index
 %v4 = index.add %v3, %v1 : index
 %v5 = index.mul %v4, %hsize : index
@@ -89,8 +94,9 @@ kernel.def target(@krea2_train_attention_dkv_target) export("krea2_train_attenti
 %v39 = index.assume %v17 [range(%v17, 0, 1073741824), lt(%v17, %ksize)] : index
 %v40 = view.load %v_view[%v39] : view<[%ksize]xbf16> -> bf16
 %v41 = scalar.extf %v40 : bf16 to f32
-%v42 = index.mul %tokens, %repeat : index
-%a0, %a1, %a2, %a3, %a4, %a5, %a6, %a7 = scf.for %j = [%zero to %v42 step %one](%c0 = %zf, %c1 = %zf, %c2 = %zf, %c3 = %zf, %c4 = %zf, %c5 = %zf, %c6 = %zf, %c7 = %zf : f32, f32, f32, f32, f32, f32, f32, f32) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
+%begin = index.mul %start, %repeat : index
+%v42 = index.mul %end, %repeat : index
+%a0, %a1, %a2, %a3, %a4, %a5, %a6, %a7 = scf.for %j = [%begin to %v42 step %one](%c0 = %zf, %c1 = %zf, %c2 = %zf, %c3 = %zf, %c4 = %zf, %c5 = %zf, %c6 = %zf, %c7 = %zf : f32, f32, f32, f32, f32, f32, f32, f32) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
 %v43 = index.div %j, %repeat : index
 %v44 = index.mul %v1, %repeat : index
 %v45 = index.rem %j, %repeat : index

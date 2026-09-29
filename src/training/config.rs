@@ -23,6 +23,8 @@ pub struct TrainConfig {
     pub resolution: usize,
     /// Adapter rank, 1 through 128.
     pub rank: usize,
+    /// Adapter targets: `main_blocks` (224) or `all` (264).
+    pub targets: crate::lora::Targets,
     /// Adapter alpha; effective scale is alpha/rank.
     pub alpha: f32,
     /// Number of optimizer updates.
@@ -71,6 +73,7 @@ impl Default for TrainConfig {
             output: PathBuf::new(),
             resolution: 1024,
             rank: 32,
+            targets: crate::lora::Targets::MainBlocks,
             alpha: 32.0,
             steps: 1500,
             accumulation: 1,
@@ -160,6 +163,15 @@ mod tests {
     use super::*;
     #[test]
     fn rejects_typos_and_nonfinite_or_empty_training_settings() {
+        assert_eq!(
+            serde_json::from_str::<TrainConfig>(r#"{}"#).unwrap().targets,
+            crate::lora::Targets::MainBlocks
+        );
+        assert_eq!(
+            serde_json::from_str::<TrainConfig>(r#"{"targets":"all"}"#).unwrap().targets,
+            crate::lora::Targets::All
+        );
+        assert!(serde_json::from_str::<TrainConfig>(r#"{"targets":"typo"}"#).is_err());
         assert!(serde_json::from_str::<TrainConfig>(r#"{"train_text_encoder":true}"#).is_err());
         assert!(TrainConfig::default().validate().is_err());
         let mut c = TrainConfig {

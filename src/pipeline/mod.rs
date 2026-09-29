@@ -253,7 +253,7 @@ impl Pipeline {
         let State { stream, weights, blocks } = &mut *state;
         self.bridge.check()?;
         let taps = self.upload(stream, text, text_tokens * 12, 2560)?;
-        let conditioning = self.models.text_fusion(stream, &taps)?;
+        let conditioning = self.fuse_text(stream, &taps)?;
         let packed = self.upload(stream, latents, width / PATCH * (height / PATCH), 64)?;
         let inputs = self.step_inputs(stream, &packed, timestep)?;
         let velocity =
@@ -335,7 +335,21 @@ impl Pipeline {
     fn conditioning(&self, stream: &mut Stream, prompt: &str) -> Result<Tensor> {
         let ids = self.models.tokenizer.prompt(prompt)?;
         let taps = self.models.encode(stream, &ids)?;
-        self.models.text_fusion(stream, &taps)
+        self.fuse_text(stream, &taps)
+    }
+
+    fn fuse_text(&self, stream: &mut Stream, taps: &Tensor) -> Result<Tensor> {
+        if let Some(dense) = self.dense.as_ref().filter(|d| d.has_auxiliary()) {
+            let mut tape = crate::training::auxiliary::Tape::new(
+                &self.models,
+                dense,
+                self.adapter_strength,
+            );
+            let id = tape.text(stream, taps)?;
+            Ok(tape.value(id).clone())
+        } else {
+            self.models.text_fusion(stream, taps)
+        }
     }
 
     /// What one step's forwards share: the timestep embedding, the image
@@ -347,8 +361,22 @@ impl Pipeline {
         timestep: f32,
     ) -> Result<StepInputs> {
         let mut timing = Profile::new(stream, "step");
-        let (embedding, modulation) = self.models.time(stream, timestep)?;
-        let image = self.models.image_in(stream, latents)?;
+        let (embedding, modulation, image) =
+            if let Some(dense) = self.dense.as_ref().filter(|d| d.has_auxiliary()) {
+                let mut tape = crate::training::auxiliary::Tape::new(
+                    &self.models,
+                    dense,
+                    self.adapter_strength,
+                );
+                // Preserve inference's established timestep rounding boundary.
+                let timestep = crate::numerics::to_f32(crate::numerics::from_f32(timestep));
+                let (e, m) = tape.time(stream, timestep)?;
+                let i = tape.image(stream, latents)?;
+                (tape.value(e).clone(), tape.value(m).clone(), tape.value(i).clone())
+            } else {
+                let (e, m) = self.models.time(stream, timestep)?;
+                (e, m, self.models.image_in(stream, latents)?)
+            };
         let modulation = Arc::new(self.models.modulation(stream, &modulation)?);
         timing.mark(stream, "embeddings")?;
         Ok(StepInputs { embedding, image, modulation })
@@ -401,6 +429,17 @@ impl Pipeline {
                 // Dispatches retain temporary bindings until completion. Keep
                 // the unfused adapter path bounded to one block's workspace.
                 stream.synchronize()?;
+            }
+            if dense.has_auxiliary() {
+                let mut tape = crate::training::auxiliary::Tape::new(
+                    &self.models,
+                    dense,
+                    self.adapter_strength,
+                );
+                let x = tape.input(&x.view(inputs.image.rows(), WIDTH, text.size())?);
+                let embedding = tape.input(&inputs.embedding);
+                let output = tape.last(stream, x, embedding)?;
+                return Ok(tape.value(output).clone());
             }
             return self.models.last(
                 stream,
