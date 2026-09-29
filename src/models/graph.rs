@@ -355,13 +355,17 @@ impl Models {
     /// The sinusoids are worked out on the host at float precision and rounded
     /// to bf16, which is where the reference implementation rounds them.
     pub fn time(&self, stream: &mut Stream, timestep: f32) -> Result<(Tensor, Tensor)> {
-        let timestep = to_f32(from_f32(timestep));
-        let mut values = vec![0u16; 256];
-        for index in 0..128 {
-            let angle = timestep * 1000.0 * (-(10000f32.ln()) * index as f32 / 128.0).exp();
-            values[index] = from_f32(angle.cos());
-            values[index + 128] = from_f32(angle.sin());
-        }
+        self.time_continuous(stream, to_f32(from_f32(timestep)))
+    }
+
+    /// Training keeps flow time in FP32 until the sinusoidal features are formed.
+    /// Inference retains its established BF16 timestep boundary through `time`.
+    pub fn time_continuous(
+        &self,
+        stream: &mut Stream,
+        timestep: f32,
+    ) -> Result<(Tensor, Tensor)> {
+        let values = timestep_features(timestep);
         let sinusoids = Tensor::from_slice(self.ops.pool(), stream, &values, 1, 256)?;
         let hidden = self.ops.unary(
             stream,
@@ -632,6 +636,16 @@ impl Models {
 }
 
 /// A linear layer's weight and optional bias, named by its prefix.
+fn timestep_features(timestep: f32) -> [u16; 256] {
+    let mut values = [0u16; 256];
+    for index in 0..128 {
+        let angle = timestep * 1000.0 * (-(10000f32.ln()) * index as f32 / 128.0).exp();
+        values[index] = from_f32(angle.cos());
+        values[index + 128] = from_f32(angle.sin());
+    }
+    values
+}
+
 fn linear_layer<'w>(w: &'w Weights, prefix: &str) -> Result<(&'w Weight, Option<View<'w>>)> {
     let weight = w.get(&format!("{prefix}.weight"))?;
     let bias = w.find(&format!("{prefix}.bias")).map(Weight::values).transpose()?;
@@ -859,6 +873,30 @@ fn vae_name(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_time_preserves_sub_bf16_noise_levels() {
+        let a = 0.5f32;
+        let b = 0.501f32;
+        assert_eq!(from_f32(a), from_f32(b));
+        assert_ne!(timestep_features(a), timestep_features(b));
+        // Independent f64 trigonometry checks all frequency bands and endpoints.
+        for t in [0.0f32, 0.1234567, a, b, 0.999, 1.0] {
+            let features = timestep_features(t);
+            for i in 0..128 {
+                let angle = f64::from(t) * 1000.0 * 10000f64.powf(-(i as f64) / 128.0);
+                for (got, expected) in
+                    [(features[i], angle.cos()), (features[i + 128], angle.sin())]
+                {
+                    assert!(
+                        (f64::from(to_f32(got)) - expected).abs() < 0.0021,
+                        "t={t}, frequency={i}, got={}, expected={expected}",
+                        to_f32(got)
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_transformer_keeps_its_modulation_tables_and_drops_the_block_linears() {

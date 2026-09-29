@@ -333,7 +333,7 @@ impl Trainer {
         let textbits: Vec<u16> =
             text.bytes.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
         let text = Tensor::from_slice(ops.pool(), stream, &textbits, text.shape[0], 6144)?;
-        let (embedding, modvec) = self.models.time(stream, sigma)?;
+        let (embedding, modvec) = self.models.time_continuous(stream, sigma)?;
         let image = self.models.image_in(stream, &noisy)?;
         let mods_f32 = self.models.modulation(stream, &modvec)?;
         let mods = ops::cast_view(ops, stream, mods_f32.binding(), 28 * 6, 6144)?;
