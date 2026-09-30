@@ -615,7 +615,7 @@ fn tiled_attention_real_shapes_match_uniform_attention() {
     // tokens give a closed-form FP64 oracle, including nonzero dK and dV, at
     // full model dimensions without constructing a quadratic CPU reference.
     let (heads, kv, d) = (48, 12, 128);
-    for t in [1024, 1043, 4096, 4115] {
+    for t in [1024, 1043, 1536, 1537, 4096, 4115] {
         let mut stream = Stream::open().unwrap();
         let ops = Ops::new(BufferPool::new());
         let qrow = values(heads * d, 3);

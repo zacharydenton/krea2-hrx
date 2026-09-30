@@ -3,7 +3,9 @@
 // and residual parts before gradient products. No score matrix or atomics.
 // Inputs are zero-padded to token_capacity; transposed operands have layout
 // [channel][token_capacity]. dKV sums all four query heads in FP32.
-// Keep this wave's K and V in LDS across every query tile and query head.
+// Cache the low half of K in registers, its high half and V in LDS.
+// Up to 1536 tokens, the 7680-byte cache permits five resident waves per SIMD.
+// Longer sequences use the original shared tile to limit register pressure.
 // Rolled channel dot products bound SGPR pressure and avoid private spills.
 amdgpu.target<gfx11-generic> @krea2_train_attention_flash_dkv_target {subgroup_size = 32}
 config.decl @krea2.train_attention_flash_dkv.tokens : %value: index where [range(%value, 1, 1073741824)]
@@ -42,7 +44,12 @@ kernel.def target(@krea2_train_attention_flash_dkv_target) export("krea2_train_a
  %heads = config.get @krea2.train_attention_flash_dkv.heads : index
  %kv = config.get @krea2.train_attention_flash_dkv.kv : index
  %offset = index.constant 0 : offset
- %bytes = index.constant 9728 : offset
+ %cache_limit = index.constant 1536 : index
+ %register_cache = index.cmp ule, %tokens, %cache_limit : index
+ %shared_cache = index.cmp ugt, %tokens, %cache_limit : index
+ %bytes_register = index.constant 7680 : offset
+ %bytes_shared = index.constant 9728 : offset
+ %bytes = scf.select %register_cache, %bytes_register, %bytes_shared : offset
  %lds = buffer.alloca<workgroup> align(16) %bytes : buffer
  %scratch = buffer.view %lds[%offset] : buffer -> view<16x16xbf16>
  %result = buffer.view %lds[%offset] : buffer -> view<16x16xf32>
@@ -82,8 +89,14 @@ kernel.def target(@krea2_train_attention_flash_dkv_target) export("krea2_train_a
  %outv_global = buffer.assume.memory_space<global> %outv : buffer
  %outv_view = buffer.view %outv_global[%offset] : buffer -> view<[%tokens]x[%kv_stride]xbf16>
  %left_offset = index.constant 1024 : offset
- %grad_offset = index.constant 5376 : offset
- %left_tile = buffer.view %lds[%left_offset] : buffer -> view<16x136xbf16>
+ %grad_offset_register = index.constant 3328 : offset
+ %grad_offset_shared = index.constant 5376 : offset
+ %grad_offset = scf.select %register_cache, %grad_offset_register, %grad_offset_shared : offset
+ %left_stride_register = index.constant 72 : index
+ %left_stride_shared = index.constant 136 : index
+ %left_stride = scf.select %register_cache, %left_stride_register, %left_stride_shared : index
+ %cached_width = scf.select %register_cache, %c64, %c0 : index
+ %left_tile = buffer.view %lds[%left_offset] : buffer -> view<16x[%left_stride]xbf16>
  %grad_tile = buffer.view %lds[%grad_offset] : buffer -> view<16x136xbf16>
  %stage_row = index.div %lane, %c8 : index
  %stage_chunk = index.rem %lane, %c8 : index
@@ -93,12 +106,35 @@ kernel.def target(@krea2_train_attention_flash_dkv_target) export("krea2_train_a
  %stage_offset = index.mul %stage, %c4 : index
  %stage_local_row = index.add %stage_row, %stage_offset : index
  %stage_global_row = index.add %origin, %stage_local_row : index
+ %stage_high = index.cmp uge, %stage_col, %cached_width : index
+ scf.if %stage_high {
  %stage_left = vector.load %k_view[%stage_global_row, %stage_global_col] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
- vector.store %stage_left, %left_tile[%stage_local_row, %stage_col] : vector<16xbf16>, view<16x136xbf16>
+ %stage_local_col = index.sub %stage_col, %cached_width : index
+ vector.store %stage_left, %left_tile[%stage_local_row, %stage_local_col] : vector<16xbf16>, view<16x[%left_stride]xbf16>
+ }
  %stage_grad = vector.load %v_view[%stage_global_row, %stage_global_col] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
  vector.store %stage_grad, %grad_tile[%stage_local_row, %stage_col] : vector<16xbf16>, view<16x136xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+ %cached_lhs0, %cached_lhs1, %cached_lhs2, %cached_lhs3 = scf.if %register_cache -> (vector<16xbf16>, vector<16xbf16>, vector<16xbf16>, vector<16xbf16>) {
+ %cached_row = index.add %origin, %col : index
+ %cached_col0 = index.add %base, %c0 : index
+ %cached_raw0 = vector.load %k_view[%cached_row, %cached_col0] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
+ %loaded_lhs0 = vector.fragment<lhs> %cached_raw0 shape [%c16, %c16] : vector<16xbf16>
+ %cached_col1 = index.add %base, %c16 : index
+ %cached_raw1 = vector.load %k_view[%cached_row, %cached_col1] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
+ %loaded_lhs1 = vector.fragment<lhs> %cached_raw1 shape [%c16, %c16] : vector<16xbf16>
+ %cached_col2 = index.add %base, %c32 : index
+ %cached_raw2 = vector.load %k_view[%cached_row, %cached_col2] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
+ %loaded_lhs2 = vector.fragment<lhs> %cached_raw2 shape [%c16, %c16] : vector<16xbf16>
+ %cached_col3 = index.add %base, %c48 : index
+ %cached_raw3 = vector.load %k_view[%cached_row, %cached_col3] : view<[%token_capacity]x[%kv_stride]xbf16> -> vector<16xbf16>
+ %loaded_lhs3 = vector.fragment<lhs> %cached_raw3 shape [%c16, %c16] : vector<16xbf16>
+ scf.yield %loaded_lhs0, %loaded_lhs1, %loaded_lhs2, %loaded_lhs3 : vector<16xbf16>, vector<16xbf16>, vector<16xbf16>, vector<16xbf16>
+ } else {
+ %cache_zero = vector.constant 0.0 : vector<16xbf16>
+ scf.yield %cache_zero, %cache_zero, %cache_zero, %cache_zero : vector<16xbf16>, vector<16xbf16>, vector<16xbf16>, vector<16xbf16>
+ }
  %iterations = index.mul %tiles, %c4 : index
  %final0, %final1, %final2, %final3, %final4, %final5, %final6, %final7, %final8, %final9, %final10, %final11, %final12, %final13, %final14, %final15 = scf.for %it = [%c0 to %iterations step %c1](%acc0 = %init : vector<8xf32>, %acc1 = %init : vector<8xf32>, %acc2 = %init : vector<8xf32>, %acc3 = %init : vector<8xf32>, %acc4 = %init : vector<8xf32>, %acc5 = %init : vector<8xf32>, %acc6 = %init : vector<8xf32>, %acc7 = %init : vector<8xf32>, %acc8 = %init : vector<8xf32>, %acc9 = %init : vector<8xf32>, %acc10 = %init : vector<8xf32>, %acc11 = %init : vector<8xf32>, %acc12 = %init : vector<8xf32>, %acc13 = %init : vector<8xf32>, %acc14 = %init : vector<8xf32>, %acc15 = %init : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
  %keytile = index.rem %it, %tiles : index
@@ -121,16 +157,49 @@ kernel.def target(@krea2_train_attention_flash_dkv_target) export("krea2_train_a
  }
  %ls = vector.splat %lv : vector<8xf32>
  %ds = vector.splat %dv : vector<8xf32>
- %score7 = scf.for %channel_score = [%c0 to %c128 step %c16](%dot_score = %init : vector<8xf32>) -> (vector<8xf32>) {
+ %score7 = scf.if %register_cache -> (vector<8xf32>) {
+ %cached_rc0 = index.add %qbase, %c0 : index
+ %cached_rhs_raw0 = vector.load %q_view[%other_row, %cached_rc0] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ %cached_rhs0 = vector.fragment<rhs> %cached_rhs_raw0 shape [%c16, %c16] : vector<16xbf16>
+ %cached_dot0 = vector.mma %cached_lhs0, %cached_rhs0, %init : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %cached_rc1 = index.add %qbase, %c16 : index
+ %cached_rhs_raw1 = vector.load %q_view[%other_row, %cached_rc1] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ %cached_rhs1 = vector.fragment<rhs> %cached_rhs_raw1 shape [%c16, %c16] : vector<16xbf16>
+ %cached_dot1 = vector.mma %cached_lhs1, %cached_rhs1, %cached_dot0 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %cached_rc2 = index.add %qbase, %c32 : index
+ %cached_rhs_raw2 = vector.load %q_view[%other_row, %cached_rc2] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ %cached_rhs2 = vector.fragment<rhs> %cached_rhs_raw2 shape [%c16, %c16] : vector<16xbf16>
+ %cached_dot2 = vector.mma %cached_lhs2, %cached_rhs2, %cached_dot1 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %cached_rc3 = index.add %qbase, %c48 : index
+ %cached_rhs_raw3 = vector.load %q_view[%other_row, %cached_rc3] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ %cached_rhs3 = vector.fragment<rhs> %cached_rhs_raw3 shape [%c16, %c16] : vector<16xbf16>
+ %cached_dot3 = vector.mma %cached_lhs3, %cached_rhs3, %cached_dot2 : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ %register_score = scf.for %channel_score = [%c64 to %c128 step %c16](%dot_score = %cached_dot3 : vector<8xf32>) -> (vector<8xf32>) {
  %score_lc = index.add %base, %channel_score : index
  %score_rc = index.add %qbase, %channel_score : index
  %score_lr = index.add %origin, %col : index
- %score_ld = vector.load %left_tile[%col, %channel_score] : view<16x136xbf16> -> vector<16xbf16>
+ %score_local_col = index.sub %channel_score, %cached_width : index
+ %score_ld = vector.load %left_tile[%col, %score_local_col] : view<16x[%left_stride]xbf16> -> vector<16xbf16>
  %score_l = vector.fragment<lhs> %score_ld shape [%c16, %c16] : vector<16xbf16>
  %score_raw = vector.load %q_view[%other_row, %score_rc] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
  %score_r = vector.fragment<rhs> %score_raw shape [%c16, %c16] : vector<16xbf16>
  %score_next = vector.mma %score_l, %score_r, %dot_score : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
  scf.yield %score_next : vector<8xf32>
+ }
+ scf.yield %register_score : vector<8xf32>
+ } else {
+ %shared_score = scf.for %channel_score = [%c0 to %c128 step %c16](%dot_score = %init : vector<8xf32>) -> (vector<8xf32>) {
+ %score_lc = index.add %base, %channel_score : index
+ %score_rc = index.add %qbase, %channel_score : index
+ %score_lr = index.add %origin, %col : index
+ %score_ld = vector.load %left_tile[%col, %channel_score] : view<16x[%left_stride]xbf16> -> vector<16xbf16>
+ %score_l = vector.fragment<lhs> %score_ld shape [%c16, %c16] : vector<16xbf16>
+ %score_raw = vector.load %q_view[%other_row, %score_rc] : view<[%token_capacity]x[%q_stride]xbf16> -> vector<16xbf16>
+ %score_r = vector.fragment<rhs> %score_raw shape [%c16, %c16] : vector<16xbf16>
+ %score_next = vector.mma %score_l, %score_r, %dot_score : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+ scf.yield %score_next : vector<8xf32>
+ }
+ scf.yield %shared_score : vector<8xf32>
  }
  %dp7 = scf.for %channel_dp = [%c0 to %c128 step %c16](%dot_dp = %init : vector<8xf32>) -> (vector<8xf32>) {
  %dp_lc = index.add %base, %channel_dp : index

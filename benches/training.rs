@@ -227,7 +227,7 @@ fn projection_backward_transposed(
 fn attention(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/attention");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
-    for tokens in [1024, 1043, 4096, 4115] {
+    for tokens in [1024, 1043, 1536, 1537, 4096, 4115] {
         for pass in ["forward", "backward", "forward_backward"] {
             let mut prepared = None;
             group.bench_function(format!("{pass}/{tokens}"), |b| {

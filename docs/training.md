@@ -135,6 +135,11 @@ reverse pass. A fused packing kernel writes both layouts and zeroes tail rows
 without changing BF16 bits; backward only packs the incoming gradient. The
 allocation estimate includes these cached layouts. This reuses forward data
 without quantizing attention or changing the gradient arithmetic.
+For sequences up to 1536 tokens, dQ keeps its Q tile in registers; dK/dV
+splits its K tile between registers and shared memory. This avoids repeated
+tile loads from shared memory and allows more resident waves without spilling
+registers. Longer sequences keep both tiles in shared memory, which benchmarks
+favor at larger working sets. Loom specializes this choice at compile time.
 
 Optimizer updates replay prepared HRX graphs for all parameter norms and AdamW
 operations. The complete global norm is read and checked before any parameter

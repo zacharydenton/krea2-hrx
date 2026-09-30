@@ -46,7 +46,8 @@ fn training_kernels_compile_without_a_device() {
 fn real_training_attention_shapes_compile_without_spills() {
     let compiler = compiler(None).unwrap();
     // Include actual 512-area buckets with text tokens, not only round lengths.
-    for tokens in [1015usize, 1023, 1024, 1025, 1043, 1067, 1070, 1074, 4096, 4115] {
+    for tokens in [1015usize, 1023, 1024, 1025, 1043, 1067, 1070, 1074, 1536, 1537, 4096, 4115]
+    {
         for name in [
             "train_attention_pack",
             "train_attention",
