@@ -179,7 +179,7 @@ fn dense(c: &mut Criterion) {
                         }
                         (stream, kernel, constants, reference, a, w, out, grid)
                     });
-                let mut dispatch = |kernel, constants| {
+                let dispatch = |stream: &mut Stream, kernel, constants| {
                     // SAFETY: bindings and constants are the same validated resident matrices as above.
                     unsafe {
                         stream
@@ -199,17 +199,26 @@ fn dense(c: &mut Criterion) {
                     stream.synchronize().unwrap();
                 };
                 if let Some((reference, reference_constants)) = reference {
+                    dispatch(stream, reference, reference_constants);
+                    let expected = out.download(stream).unwrap();
+                    // Poison the destination so omitted writes cannot reuse reference values.
+                    stream.fill(out.binding().unwrap(), 0xff).unwrap();
+                    dispatch(stream, kernel, constants);
+                    assert!(
+                        out.download(stream).unwrap() == expected,
+                        "dense GEMM parity: {label}"
+                    );
                     b.iter_custom(|iterations| {
                         paired.measure(iterations, |candidate| {
                             if candidate {
-                                dispatch(kernel, constants);
+                                dispatch(stream, kernel, constants);
                             } else {
-                                dispatch(reference, reference_constants);
+                                dispatch(stream, reference, reference_constants);
                             }
                         })
                     });
                 } else {
-                    b.iter(|| dispatch(kernel, constants));
+                    b.iter(|| dispatch(stream, kernel, constants));
                 }
             });
             paired.report(&label);

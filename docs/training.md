@@ -232,6 +232,8 @@ direct FP32 parameter-gradient accumulation in both projection directions.
 
 For dense kernels, `KREA2_BENCH_REFERENCE_DIR` adds a reference source directory.
 Reference kernels must use the same names, binding ABI and launch tile geometry.
+Before timing, paired dense benchmarks require exact BF16 output agreement on
+the resident inputs; comparison and readback are outside the measured interval.
 Each iteration runs the reference and candidate on the same resident tensors,
 alternating their order. Criterion records candidate time; a paired summary
 reports both averages and their ratio across warm-up and measured iterations.
