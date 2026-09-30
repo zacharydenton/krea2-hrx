@@ -789,6 +789,80 @@ fn norm_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn modulated_norm_forward(c: &mut Criterion) {
+    use krea2::ops::{Binary, Norm, Weight};
+    use std::sync::Arc;
+    let mut group = c.benchmark_group("training/modulated_norm_forward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for rows in [1usize, 1043, 4115] {
+        let cols = 6144;
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let label = format!("{rows}x{cols}");
+        group.bench_function(&label, |b| {
+            let (stream, ops, x, modulation, shift, weight) =
+                prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let x = tensor(&ops, &mut stream, rows, cols);
+                    let modulation = tensor(&ops, &mut stream, 1, cols);
+                    let shift = tensor(&ops, &mut stream, 1, cols);
+                    let weights: Vec<_> = (0..cols).map(|i| (i % 113) as f32 * 0.001).collect();
+                    let bf = Arc::new(stream.allocate(cols * 2).unwrap());
+                    let fp = Arc::new(stream.allocate(cols * 4).unwrap());
+                    stream
+                        .upload(
+                            bf.binding(),
+                            &weights
+                                .iter()
+                                .flat_map(|&v| from_f32(v).to_le_bytes())
+                                .collect::<Vec<_>>(),
+                        )
+                        .unwrap();
+                    stream
+                        .upload(
+                            fp.binding(),
+                            &weights.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+                        )
+                        .unwrap();
+                    let weight = Weight::new(&bf, 0, vec![cols], cols, Some((fp, 0)));
+                    (stream, ops, x, modulation, shift, weight)
+                });
+            let run = |stream: &mut Stream, candidate| {
+                if candidate {
+                    train::norm_modulated(ops, stream, x, weight, modulation, shift, 1e-5)
+                        .unwrap()
+                } else {
+                    let norm = ops.norm(stream, x, weight, Norm::OnePlusScale, 1e-5).unwrap();
+                    let plus = train::one_plus(ops, stream, modulation).unwrap();
+                    let product = ops.binary(stream, &norm, &plus, Binary::Mul).unwrap();
+                    let output = ops.binary(stream, &product, shift, Binary::Add).unwrap();
+                    (norm, output)
+                }
+            };
+            let reference = run(stream, false);
+            let candidate = run(stream, true);
+            assert_eq!(
+                reference.0.download(stream).unwrap(),
+                candidate.0.download(stream).unwrap()
+            );
+            assert_eq!(
+                reference.1.download(stream).unwrap(),
+                candidate.1.download(stream).unwrap()
+            );
+            b.iter_custom(|iterations| {
+                paired.measure(iterations, |candidate| {
+                    let result = run(stream, candidate);
+                    stream.synchronize().unwrap();
+                    black_box(result);
+                })
+            });
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 fn modulated_norm_backward(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/modulated_norm_backward");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -1089,6 +1163,7 @@ criterion_group!(
     gated_backward,
     modulation_backward,
     norm_backward,
+    modulated_norm_forward,
     modulated_norm_backward,
     rope_norm_backward,
     adamw,

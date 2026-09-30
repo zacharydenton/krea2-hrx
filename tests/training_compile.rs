@@ -19,6 +19,7 @@ fn training_kernels_compile_without_a_device() {
             ("capacity", 32),
             ("cols", 128),
             ("size", 896),
+            ("xsize", 896),
             ("tokens", 7),
             ("sequence", 7),
             ("heads", 8),
@@ -276,6 +277,35 @@ fn lora_gemm_add_compiles_without_spills() {
                 std::fs::create_dir_all(&directory).unwrap();
                 std::fs::write(
                     directory.join(format!("{name}-{m}x{n}x{k}-{transposed}.json")),
+                    artifact.report().unwrap().json().to_string(),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
+fn modulated_norm_forward_compiles_without_spills() {
+    let compiler = compiler(None).unwrap();
+    for rows in [1usize, 1043, 4115] {
+        for name in ["norm_0", "train_norm_modulated"] {
+            let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+            for (key, value) in
+                [("xsize", rows * 6144), ("cols", 6144), ("grid_x", rows), ("grid_y", 1)]
+            {
+                request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+            }
+            request.set_report(hrx::loom::ReportMode::Details);
+            let artifact =
+                compiler.module(sources::auxiliary(name).unwrap()).compile(&request).unwrap();
+            assert!(artifact.diagnostics().iter().all(|d| d.code != "BACKEND/009"));
+            if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join(format!("{name}-{rows}x6144.json")),
                     artifact.report().unwrap().json().to_string(),
                 )
                 .unwrap();

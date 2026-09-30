@@ -45,6 +45,95 @@ fn close(got: &[f32], expected: &[f32], relative: f64, absolute: f64) {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn modulated_norm_forward_preserves_rounding_and_matches_cpu() {
+    use krea2::ops::{Binary, Norm, Weight};
+    use std::sync::Arc;
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (rows, cols) in [(1, 1), (7, 19), (33, 257), (1, 6144), (1043, 6144), (4115, 6144)] {
+        let x = values(rows * cols, 3);
+        let w: Vec<_> = (0..cols).map(|i| (i % 29) as f32 * 0.013 - 0.2).collect();
+        let m = values(cols, 7);
+        let s = values(cols, 13);
+        let xt = upload(&ops, &mut stream, rows, cols, &x);
+        let mt = upload(&ops, &mut stream, 1, cols, &m);
+        let st = upload(&ops, &mut stream, 1, cols, &s);
+        let bf = Arc::new(stream.allocate(cols * 2).unwrap());
+        let fp = Arc::new(stream.allocate(cols * 4).unwrap());
+        stream
+            .upload(
+                bf.binding(),
+                bytemuck::cast_slice(&w.iter().copied().map(from_f32).collect::<Vec<_>>()),
+            )
+            .unwrap();
+        stream.upload(fp.binding(), bytemuck::cast_slice(&w)).unwrap();
+        let weight = Weight::new(&bf, 0, vec![cols], cols, Some((fp, 0)));
+        for eps in [1e-5, 0.01] {
+            let norm = ops.norm(&mut stream, &xt, &weight, Norm::OnePlusScale, eps).unwrap();
+            let plus = ops::one_plus(&ops, &stream, &mt).unwrap();
+            let product = ops.binary(&stream, &norm, &plus, Binary::Mul).unwrap();
+            let reference = ops.binary(&stream, &product, &st, Binary::Add).unwrap();
+            let (fused_norm, fused) =
+                ops::norm_modulated(&ops, &mut stream, &xt, &weight, &mt, &st, eps).unwrap();
+            let actual = fused.download(&mut stream).unwrap();
+            assert!(
+                actual == reference.download(&mut stream).unwrap(),
+                "{rows}x{cols}, eps={eps}"
+            );
+            assert!(
+                fused_norm.download(&mut stream).unwrap()
+                    == norm.download(&mut stream).unwrap()
+            );
+            if rows < 40 {
+                let bf = |v| to_f32(from_f32(v));
+                let expected: Vec<_> = (0..rows)
+                    .flat_map(|row| {
+                        let inv = (x[row * cols..(row + 1) * cols]
+                            .iter()
+                            .map(|&v| f64::from(v).powi(2))
+                            .sum::<f64>()
+                            / cols as f64
+                            + f64::from(eps))
+                        .sqrt()
+                        .recip();
+                        (0..cols)
+                            .map(|c| {
+                                let n = bf((f64::from(x[row * cols + c])
+                                    * inv
+                                    * f64::from(1.0 + w[c]))
+                                    as f32);
+                                bf(bf(n * bf(1.0 + m[c])) + s[c])
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                close(
+                    &actual.into_iter().map(to_f32).collect::<Vec<_>>(),
+                    &expected,
+                    0.005,
+                    1e-5,
+                );
+            }
+        }
+        let bad = xt.view(1, 1, 0).unwrap();
+        if cols != 1 {
+            assert!(
+                ops::norm_modulated(&ops, &mut stream, &xt, &weight, &bad, &st, 1e-5).is_err()
+            );
+            assert!(
+                ops::norm_modulated(&ops, &mut stream, &xt, &weight, &mt, &bad, 1e-5).is_err()
+            );
+        }
+        for eps in [0.0, -1.0, f32::NAN] {
+            assert!(
+                ops::norm_modulated(&ops, &mut stream, &xt, &weight, &mt, &st, eps).is_err()
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn modulation_backward_matches_separate_reductions_and_preserves_other_rows() {
     use krea2::ops::Binary;
     let mut stream = Stream::open().unwrap();

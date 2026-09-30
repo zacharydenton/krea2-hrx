@@ -161,6 +161,9 @@ The main-block norm reverse paths fuse broadcast modulation scaling and residual
 addition into the norm dispatch. BF16 rounding still occurs after adding one to
 the modulation, scaling the gradient, computing the norm gradient and adding the
 residual; the temporary vectors and matrices are not materialized.
+The main-block forward path also fuses RMSNorm, modulation scaling and shift.
+It retains the normalized BF16 values needed by modulation gradients, preserving
+the original FP32 reduction tree and all intermediate BF16 roundings.
 
 Both main-block and auxiliary tapes retain each adapter's rank-sized forward
 activation for its parameter gradient, avoiding a duplicate input projection in
@@ -236,6 +239,8 @@ per-row kernel, checks exact BF16 output agreement and exports both compiler
 reports through `KREA2_BENCH_REPORT_DIR`.
 `training/modulated_norm_backward` pairs the fused main-block path with its
 original four-operation sequence, including allocation and dispatch overhead.
+`training/modulated_norm_forward` compares fused normalization/modulation with
+the separate forward operations and checks both outputs for exact agreement.
 `training/rope_norm_backward` pairs fused inverse rotary and Q/K norm backward
 with the separate operations for both head counts. It checks exact BF16 agreement
 and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.

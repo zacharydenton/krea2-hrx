@@ -4,7 +4,7 @@ use std::sync::Arc;
 use hrx::{Buffer, PooledBuffer, Stream, View};
 
 use crate::kernels::Scalars;
-use crate::ops::{Ops, Tensor, config};
+use crate::ops::{Ops, Tensor, Weight, config};
 use crate::{Error, Result};
 
 #[derive(Default, serde::Serialize)]
@@ -746,6 +746,51 @@ pub fn norm_backward(
         )?;
     }
     Ok(out)
+}
+
+/// RMSNorm with broadcast modulation, retaining normalized values for modulation gradients.
+/// Preserve the separate normalization, one-plus, multiplication and addition roundings.
+pub fn norm_modulated(
+    ops: &Ops,
+    stream: &mut Stream,
+    x: &Tensor,
+    weight: &Weight,
+    modulation: &Tensor,
+    shift: &Tensor,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
+    if weight.count != x.cols()
+        || [modulation, shift].iter().any(|t| (t.rows(), t.cols()) != (1, x.cols()))
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(Error::invalid("modulated RMSNorm dimensions"));
+    }
+    let scale = weight.f32_values(stream)?;
+    let norm = ops.tensor(stream, x.rows(), x.cols())?;
+    let out = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: one workgroup per row, three matching BF16 matrices, and three
+    // per-column vectors: FP32 norm weights and BF16 modulation/shift.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_norm_modulated",
+            config(&[("cols", x.cols()), ("xsize", x.size())]),
+            &Scalars::new().index(x.rows()).float(eps),
+            &[
+                x.binding()?,
+                scale,
+                norm.binding()?,
+                modulation.binding()?,
+                shift.binding()?,
+                out.binding()?,
+            ],
+            x.rows(),
+            1,
+            256,
+        )?;
+    }
+    Ok((norm, out))
 }
 
 /// Apply modulation scaling, RMSNorm backward and a residual gradient in one dispatch.

@@ -381,13 +381,14 @@ impl Transformer {
         }
         let p = format!("blocks.{index}");
         let row = |i: usize| mods.view(1, 6144, i * 6144);
-        let scale1 = train::one_plus(ops, stream, &row(0)?)?;
-        let norm1 = self.norm(ops, stream, x, &format!("{p}.prenorm.scale"))?;
-        let pre = ops.binary(
+        let (norm1, pre) = train::norm_modulated(
+            ops,
             stream,
-            &ops.binary(stream, &norm1, &scale1, Binary::Mul)?,
+            x,
+            self.weights.get(&format!("{p}.prenorm.scale"))?,
+            &row(0)?,
             &row(1)?,
-            Binary::Add,
+            1e-5,
         )?;
         let (q0, low0) = self.linear(ops, stream, &pre, &format!("{p}.attn.wq"), strength)?;
         let (k0, low1) = self.linear(ops, stream, &pre, &format!("{p}.attn.wk"), strength)?;
@@ -423,13 +424,14 @@ impl Transformer {
             &ops.binary(stream, &projected, &row(2)?, Binary::Mul)?,
             Binary::Add,
         )?;
-        let scale2 = train::one_plus(ops, stream, &row(3)?)?;
-        let norm2 = self.norm(ops, stream, &residual, &format!("{p}.postnorm.scale"))?;
-        let post = ops.binary(
+        let (norm2, post) = train::norm_modulated(
+            ops,
             stream,
-            &ops.binary(stream, &norm2, &scale2, Binary::Mul)?,
+            &residual,
+            self.weights.get(&format!("{p}.postnorm.scale"))?,
+            &row(3)?,
             &row(4)?,
-            Binary::Add,
+            1e-5,
         )?;
         let (mlp_gate0, low5) =
             self.linear(ops, stream, &post, &format!("{p}.mlp.gate"), strength)?;
