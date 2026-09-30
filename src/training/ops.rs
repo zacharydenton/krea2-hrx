@@ -292,9 +292,29 @@ pub fn matmul_add(
     scale: f32,
     transposed: bool,
 ) -> Result<Tensor> {
+    matmul_add_residual(ops, stream, a, b, base, scale, transposed, None)
+}
+
+/// Add an optional residual after rounding the scaled product plus base to BF16.
+/// This preserves `residual + BF16(base + scale * BF16(a * b))` without an intermediate.
+#[allow(clippy::too_many_arguments)]
+pub fn matmul_add_residual(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    base: &Tensor,
+    scale: f32,
+    transposed: bool,
+    residual: Option<&Tensor>,
+) -> Result<Tensor> {
     let (m, k) = (a.rows(), a.cols());
     let (bk, n) = if transposed { (b.cols(), b.rows()) } else { (b.rows(), b.cols()) };
-    if k != bk || (base.rows(), base.cols()) != (m, n) || !scale.is_finite() {
+    if k != bk
+        || (base.rows(), base.cols()) != (m, n)
+        || !scale.is_finite()
+        || residual.is_some_and(|r| (r.rows(), r.cols()) != (m, n))
+    {
         return Err(Error::invalid("training GEMM add dimensions"));
     }
     if !n.is_multiple_of(64) || !k.is_multiple_of(32) || k > 64 {
@@ -303,7 +323,11 @@ pub fn matmul_add(
         } else {
             matmul_nn(ops, stream, a, b, 1.0)?
         };
-        return add_scaled(ops, stream, base, &product, scale);
+        let output = add_scaled(ops, stream, base, &product, scale)?;
+        return match residual {
+            Some(r) => add_scaled(ops, stream, r, &output, 1.0),
+            None => Ok(output),
+        };
     }
     let out = ops.tensor(stream, m, n)?;
     // SAFETY: full N/K tiles, guarded ragged M; base/out are M x N, A is M x K,
@@ -320,9 +344,16 @@ pub fn matmul_add(
                 ("bsize", b.size()),
                 ("csize", out.size()),
                 ("transposed", usize::from(transposed)),
+                ("residual", usize::from(residual.is_some())),
             ]),
             &Scalars::new().index(m).float(scale),
-            &[a.binding()?, b.binding()?, base.binding()?, out.binding()?],
+            &[
+                a.binding()?,
+                b.binding()?,
+                base.binding()?,
+                out.binding()?,
+                residual.unwrap_or(base).binding()?,
+            ],
             n / 64,
             m.div_ceil(64),
             256,

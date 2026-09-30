@@ -183,6 +183,10 @@ the memory estimate includes them for retained and recomputed blocks.
 Rank-32/64 adapter output projections and input gradients fuse their matrix
 product with the base-result addition. Vector loads stage both weight layouts
 directly, and the product still rounds to BF16 before scaling and adding.
+When input gradients from multiple branches meet, the same output stage adds
+the preceding gradient after rounding the current branch to BF16. This avoids
+four full-size intermediate gradient tensors and four dispatches per main block,
+without changing the branch addition order or parameter-gradient accumulation.
 Other ranks and dimensions retain the separate operations.
 
 The memory budget limits HRX allocations during preparation and training. A
@@ -265,6 +269,8 @@ checks exact BF16 agreement, and exports Details-mode compiler reports through
 adapter forward/backward passes against separate matrix products and additions,
 with cached forward activations on both sides. Parameter-gradient accumulation
 is included; frozen-base GEMMs are outside these measurements.
+`training/projection_residual` and its `_rank64` variant compare folding the
+preceding input gradient into that output stage against a separate addition.
 `training/projection_cached` pairs complete LoRA forward/backward passes with and
 without retaining the rank-sized activation, using the same resident inputs.
 

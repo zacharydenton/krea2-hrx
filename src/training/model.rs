@@ -122,17 +122,43 @@ impl Projection {
         base_grad: &Tensor,
         low: &Tensor,
     ) -> Result<Tensor> {
+        self.backward_cached_with_residual(ops, stream, x, grad, base_grad, low, None)
+    }
+
+    /// Accumulate parameter gradients and add an optional existing input gradient.
+    /// The branch is rounded to BF16 before the residual addition; inputs stay immutable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward_cached_with_residual(
+        &self,
+        ops: &Ops,
+        stream: &Stream,
+        x: &Tensor,
+        grad: &Tensor,
+        base_grad: &Tensor,
+        low: &Tensor,
+        residual: Option<&Tensor>,
+    ) -> Result<Tensor> {
         if (low.rows(), low.cols()) != (x.rows(), self.a.value.rows())
             || x.cols() != self.a.value.cols()
             || (grad.rows(), grad.cols()) != (x.rows(), self.b.value.rows())
             || (base_grad.rows(), base_grad.cols()) != (x.rows(), x.cols())
+            || residual.is_some_and(|r| (r.rows(), r.cols()) != (x.rows(), x.cols()))
         {
             return Err(Error::invalid("cached LoRA backward dimensions"));
         }
         train::matmul_tn_accumulate(ops, stream, grad, low, &self.b.grad, self.scale())?;
         let dl = train::matmul_nn(ops, stream, grad, &self.b.value, self.scale())?;
         train::matmul_tn_accumulate(ops, stream, &dl, x, &self.a.grad, 1.0)?;
-        train::matmul_add(ops, stream, &dl, &self.a.value, base_grad, 1.0, false)
+        train::matmul_add_residual(
+            ops,
+            stream,
+            &dl,
+            &self.a.value,
+            base_grad,
+            1.0,
+            false,
+            residual,
+        )
     }
 }
 
@@ -346,16 +372,27 @@ impl Transformer {
         grad: &Tensor,
         name: &str,
         low: Option<&Tensor>,
+        residual: Option<&Tensor>,
     ) -> Result<Tensor> {
         let w = self.weight(name)?;
         let base_grad =
             train::matmul_nn(ops, stream, grad, &w.tensor(w.shape[0], w.shape[1])?, 1.0)?;
-        match (self.adapters.get(name), low) {
-            (Some(adapter), Some(low)) => {
-                adapter.backward_cached(ops, stream, x, grad, &base_grad, low)
+        if let Some(adapter) = self.adapters.get(name) {
+            let recomputed;
+            let low = match low {
+                Some(low) => low,
+                None => {
+                    recomputed = train::matmul(ops, stream, x, &adapter.a.value, 1.0)?;
+                    &recomputed
+                }
+            };
+            adapter
+                .backward_cached_with_residual(ops, stream, x, grad, &base_grad, low, residual)
+        } else {
+            match residual {
+                Some(r) => train::add_scaled(ops, stream, r, &base_grad, 1.0),
+                None => Ok(base_grad),
             }
-            (Some(adapter), None) => adapter.backward(ops, stream, x, grad, &base_grad),
-            (None, _) => Ok(base_grad),
         }
     }
 
@@ -501,6 +538,7 @@ impl Transformer {
             &gd,
             &format!("{p}.mlp.down"),
             t.adapter_lows[7].as_ref(),
+            None,
         )?;
         let (gg, gu) =
             train::gated_backward(ops, stream, &t.mlp_gate0, &t.mlp_gate, &t.up, &gm, false)?;
@@ -511,16 +549,17 @@ impl Transformer {
             &gg,
             &format!("{p}.mlp.gate"),
             t.adapter_lows[5].as_ref(),
+            None,
         )?;
-        let gp2 = self.linear_backward(
+        let gp = self.linear_backward(
             ops,
             stream,
             &t.post,
             &gu,
             &format!("{p}.mlp.up"),
             t.adapter_lows[6].as_ref(),
+            Some(&gp1),
         )?;
-        let gp = train::add_scaled(ops, stream, &gp1, &gp2, 1.0)?;
         if let Some(dst) = modulation_grad {
             let [_, _, norm2, down] = t
                 .modulation
@@ -548,6 +587,7 @@ impl Transformer {
             &go,
             &format!("{p}.attn.wo"),
             t.adapter_lows[4].as_ref(),
+            None,
         )?;
         let (gg, gat) = train::gated_backward(
             ops,
@@ -573,18 +613,19 @@ impl Transformer {
             &gq,
             &format!("{p}.attn.wq"),
             t.adapter_lows[0].as_ref(),
+            None,
         )?;
         for (i, (name, g)) in [("wk", &gk), ("wv", &gv), ("gate", &gg)].into_iter().enumerate()
         {
-            let part = self.linear_backward(
+            pre_grad = self.linear_backward(
                 ops,
                 stream,
                 &t.pre,
                 g,
                 &format!("{p}.attn.{name}"),
                 t.adapter_lows[i + 1].as_ref(),
+                Some(&pre_grad),
             )?;
-            pre_grad = train::add_scaled(ops, stream, &pre_grad, &part, 1.0)?;
         }
         if let Some(dst) = modulation_grad {
             let [norm1, projected, _, _] = t

@@ -356,16 +356,20 @@ fn projections(c: &mut Criterion) {
 }
 
 fn cached_projections(c: &mut Criterion) {
-    projection_comparison(c, false, 32);
-    projection_comparison(c, true, 32);
-    projection_comparison(c, true, 64);
+    projection_comparison(c, false, 32, false);
+    projection_comparison(c, true, 32, false);
+    projection_comparison(c, true, 64, false);
+    projection_comparison(c, true, 32, true);
+    projection_comparison(c, true, 64, true);
 }
 
-fn projection_comparison(c: &mut Criterion, fused: bool, rank: usize) {
-    let name = match (fused, rank) {
-        (false, _) => "training/projection_cached",
-        (true, 32) => "training/projection_fused",
-        (true, _) => "training/projection_fused_rank64",
+fn projection_comparison(c: &mut Criterion, fused: bool, rank: usize, residual: bool) {
+    let name = match (fused, rank, residual) {
+        (_, 32, true) => "training/projection_residual",
+        (_, _, true) => "training/projection_residual_rank64",
+        (false, _, false) => "training/projection_cached",
+        (true, 32, false) => "training/projection_fused",
+        (true, _, false) => "training/projection_fused_rank64",
     };
     let mut group = c.benchmark_group(name);
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -381,35 +385,54 @@ fn projection_comparison(c: &mut Criterion, fused: bool, rank: usize) {
         let mut paired = PairedTimings::default();
         let label = format!("{tokens}x{inputs}x{outputs}");
         group.bench_function(&label, |b| {
-            let (stream, ops, p, x, grad, base, dx) = prepared.get_or_insert_with(|| {
-                let mut stream = Stream::open().unwrap();
-                let ops = Ops::new(BufferPool::new());
-                let p = Projection::new(
-                    &ops,
-                    &mut stream,
-                    &Factors {
-                        rank,
-                        inputs,
-                        outputs,
-                        alpha: rank as f32,
-                        a: vec![0.01; rank * inputs],
-                        b: vec![0.01; outputs * rank],
-                    },
-                )
-                .unwrap();
-                let x = tensor(&ops, &mut stream, tokens, inputs);
-                let grad = tensor(&ops, &mut stream, tokens, outputs);
-                let base = tensor(&ops, &mut stream, tokens, outputs);
-                let dx = tensor(&ops, &mut stream, tokens, inputs);
-                stream.synchronize().unwrap();
-                (stream, ops, p, x, grad, base, dx)
-            });
+            let (stream, ops, p, x, grad, base, dx, previous) =
+                prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let p = Projection::new(
+                        &ops,
+                        &mut stream,
+                        &Factors {
+                            rank,
+                            inputs,
+                            outputs,
+                            alpha: rank as f32,
+                            a: vec![0.01; rank * inputs],
+                            b: vec![0.01; outputs * rank],
+                        },
+                    )
+                    .unwrap();
+                    let x = tensor(&ops, &mut stream, tokens, inputs);
+                    let grad = tensor(&ops, &mut stream, tokens, outputs);
+                    let base = tensor(&ops, &mut stream, tokens, outputs);
+                    let dx = tensor(&ops, &mut stream, tokens, inputs);
+                    let previous = residual.then(|| tensor(&ops, &mut stream, tokens, inputs));
+                    stream.synchronize().unwrap();
+                    (stream, ops, p, x, grad, base, dx, previous)
+                });
             let mut run = |candidate| {
                 p.a.grad.clear(stream).unwrap();
                 p.b.grad.clear(stream).unwrap();
                 let (y, g) = if candidate {
                     let (y, low) = p.forward_cached(ops, stream, x, base, 1.0).unwrap();
-                    let g = p.backward_cached(ops, stream, x, grad, dx, &low).unwrap();
+                    let g = p
+                        .backward_cached_with_residual(
+                            ops,
+                            stream,
+                            x,
+                            grad,
+                            dx,
+                            &low,
+                            previous.as_ref(),
+                        )
+                        .unwrap();
+                    (y, g)
+                } else if residual {
+                    let (y, low) = p.forward_cached(ops, stream, x, base, 1.0).unwrap();
+                    let part = p.backward_cached(ops, stream, x, grad, dx, &low).unwrap();
+                    let g =
+                        train::add_scaled(ops, stream, previous.as_ref().unwrap(), &part, 1.0)
+                            .unwrap();
                     (y, g)
                 } else if fused {
                     let low = train::matmul(ops, stream, x, &p.a.value, 1.0).unwrap();

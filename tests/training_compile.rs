@@ -264,7 +264,7 @@ fn lora_gemm_add_compiles_without_spills() {
     let compiler = compiler(None).unwrap();
     let name = "train_gemm_lora_add";
     for (m, n, k) in [(1usize, 64usize, 32usize), (1043, 6144, 32), (4115, 16384, 64)] {
-        for transposed in [0, 1] {
+        for (transposed, residual) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
             let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
             for (key, value) in [
                 ("m", m),
@@ -276,6 +276,7 @@ fn lora_gemm_add_compiles_without_spills() {
                 ("grid_x", n / 64),
                 ("grid_y", m.div_ceil(64)),
                 ("transposed", transposed),
+                ("residual", residual),
             ] {
                 request.set_config(format!("krea2.{name}.{key}"), value.to_string());
             }
@@ -287,7 +288,7 @@ fn lora_gemm_add_compiles_without_spills() {
                 let directory = std::path::PathBuf::from(directory);
                 std::fs::create_dir_all(&directory).unwrap();
                 std::fs::write(
-                    directory.join(format!("{name}-{m}x{n}x{k}-{transposed}.json")),
+                    directory.join(format!("{name}-{m}x{n}x{k}-{transposed}-{residual}.json")),
                     artifact.report().unwrap().json().to_string(),
                 )
                 .unwrap();

@@ -1,6 +1,7 @@
 // Rank-sized BF16 GEMM followed by a scaled residual add. No full-size intermediate.
 // 64x64 output tile, K in full 32-element tiles, ragged M, full N tiles.
 // Round the product to BF16 BEFORE scaling/adding, matching the unfused operations.
+// Optional outer residual is added after a second BF16 rounding.
 amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
 config.decl @krea2.train_gemm_lora_add.m : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_gemm_lora_add.n : %value: index where [range(%value, 1, 1073741824)]
@@ -10,6 +11,7 @@ config.decl @krea2.train_gemm_lora_add.bsize : %value: index where [range(%value
 config.decl @krea2.train_gemm_lora_add.csize : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_gemm_lora_add.grid_x : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_gemm_lora_add.grid_y : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gemm_lora_add.residual : %value: index where [range(%value, 0, 1)]
 config.decl @krea2.train_gemm_lora_add.transposed : %value: index where [range(%value, 0, 1)]
 kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm_lora_add(%count: index) {
  %one = index.constant 1 : index
@@ -17,7 +19,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %gx = config.get @krea2.train_gemm_lora_add.grid_x : index
  %gy = config.get @krea2.train_gemm_lora_add.grid_y : index
  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
-} launch(%count: index, %scale: f32, %a: buffer, %b: buffer, %base: buffer, %out: buffer) {
+} launch(%count: index, %scale: f32, %a: buffer, %b: buffer, %base: buffer, %out: buffer, %residual: buffer) {
  %c0 = index.constant 0 : index
  %c1 = index.constant 1 : index
  %c2 = index.constant 2 : index
@@ -67,6 +69,10 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %bv = buffer.view %bg[%off0] : buffer -> view<[%bsize]xbf16>
  %baseg = buffer.assume.memory_space<global> %base : buffer
  %basev = buffer.view %baseg[%off0] : buffer -> view<[%csize]xbf16>
+ %residual_mode = config.get @krea2.train_gemm_lora_add.residual : index
+ %has_residual = index.cmp ne, %residual_mode, %c0 : index
+ %residualg = buffer.assume.memory_space<global> %residual : buffer
+ %residualv = buffer.view %residualg[%off0] : buffer -> view<[%csize]xbf16>
  %outg = buffer.assume.memory_space<global> %out : buffer
  %outv = buffer.view %outg[%off0] : buffer -> view<[%csize]xbf16>
  %lds = buffer.alloca<workgroup> align(16) %bytes : buffer
@@ -175,7 +181,17 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p0_0scaled = vector.mulf %p0_0rounded, %scalev : vector<4xf32>
  %p0_0sum = vector.addf %p0_0basef, %p0_0scaled : vector<4xf32>
  %p0_0out = vector.fptrunc %p0_0sum : vector<4xf32> to vector<4xbf16>
- vector.store %p0_0out, %outv[%p0_0off] : vector<4xbf16>, view<[%csize]xbf16>
+ %p0_0final = scf.if %has_residual -> (vector<4xbf16>) {
+ %p0_0residual = vector.load %residualv[%p0_0off] : view<[%csize]xbf16> -> vector<4xbf16>
+ %p0_0residualf = vector.extf %p0_0residual : vector<4xbf16> to vector<4xf32>
+ %p0_0outf = vector.extf %p0_0out : vector<4xbf16> to vector<4xf32>
+ %p0_0total = vector.addf %p0_0residualf, %p0_0outf : vector<4xf32>
+ %p0_0rounded_total = vector.fptrunc %p0_0total : vector<4xf32> to vector<4xbf16>
+ scf.yield %p0_0rounded_total : vector<4xbf16>
+ } else {
+ scf.yield %p0_0out : vector<4xbf16>
+ }
+ vector.store %p0_0final, %outv[%p0_0off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  %p0_8lr = index.add %pr, %c8 : index
  %p0_8r0 = index.add %wr, %p0_8lr : index
@@ -196,7 +212,17 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p0_8scaled = vector.mulf %p0_8rounded, %scalev : vector<4xf32>
  %p0_8sum = vector.addf %p0_8basef, %p0_8scaled : vector<4xf32>
  %p0_8out = vector.fptrunc %p0_8sum : vector<4xf32> to vector<4xbf16>
- vector.store %p0_8out, %outv[%p0_8off] : vector<4xbf16>, view<[%csize]xbf16>
+ %p0_8final = scf.if %has_residual -> (vector<4xbf16>) {
+ %p0_8residual = vector.load %residualv[%p0_8off] : view<[%csize]xbf16> -> vector<4xbf16>
+ %p0_8residualf = vector.extf %p0_8residual : vector<4xbf16> to vector<4xf32>
+ %p0_8outf = vector.extf %p0_8out : vector<4xbf16> to vector<4xf32>
+ %p0_8total = vector.addf %p0_8residualf, %p0_8outf : vector<4xf32>
+ %p0_8rounded_total = vector.fptrunc %p0_8total : vector<4xf32> to vector<4xbf16>
+ scf.yield %p0_8rounded_total : vector<4xbf16>
+ } else {
+ scf.yield %p0_8out : vector<4xbf16>
+ }
+ vector.store %p0_8final, %outv[%p0_8off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
  vector.fragment.store<result> %o1, %rv[%c0, %c0] shape [%c16, %c16] : vector<8xf32>, view<16x16xf32>
@@ -220,7 +246,17 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p1_0scaled = vector.mulf %p1_0rounded, %scalev : vector<4xf32>
  %p1_0sum = vector.addf %p1_0basef, %p1_0scaled : vector<4xf32>
  %p1_0out = vector.fptrunc %p1_0sum : vector<4xf32> to vector<4xbf16>
- vector.store %p1_0out, %outv[%p1_0off] : vector<4xbf16>, view<[%csize]xbf16>
+ %p1_0final = scf.if %has_residual -> (vector<4xbf16>) {
+ %p1_0residual = vector.load %residualv[%p1_0off] : view<[%csize]xbf16> -> vector<4xbf16>
+ %p1_0residualf = vector.extf %p1_0residual : vector<4xbf16> to vector<4xf32>
+ %p1_0outf = vector.extf %p1_0out : vector<4xbf16> to vector<4xf32>
+ %p1_0total = vector.addf %p1_0residualf, %p1_0outf : vector<4xf32>
+ %p1_0rounded_total = vector.fptrunc %p1_0total : vector<4xf32> to vector<4xbf16>
+ scf.yield %p1_0rounded_total : vector<4xbf16>
+ } else {
+ scf.yield %p1_0out : vector<4xbf16>
+ }
+ vector.store %p1_0final, %outv[%p1_0off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  %p1_8lr = index.add %pr, %c8 : index
  %p1_8r0 = index.add %wr, %p1_8lr : index
@@ -241,7 +277,17 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p1_8scaled = vector.mulf %p1_8rounded, %scalev : vector<4xf32>
  %p1_8sum = vector.addf %p1_8basef, %p1_8scaled : vector<4xf32>
  %p1_8out = vector.fptrunc %p1_8sum : vector<4xf32> to vector<4xbf16>
- vector.store %p1_8out, %outv[%p1_8off] : vector<4xbf16>, view<[%csize]xbf16>
+ %p1_8final = scf.if %has_residual -> (vector<4xbf16>) {
+ %p1_8residual = vector.load %residualv[%p1_8off] : view<[%csize]xbf16> -> vector<4xbf16>
+ %p1_8residualf = vector.extf %p1_8residual : vector<4xbf16> to vector<4xf32>
+ %p1_8outf = vector.extf %p1_8out : vector<4xbf16> to vector<4xf32>
+ %p1_8total = vector.addf %p1_8residualf, %p1_8outf : vector<4xf32>
+ %p1_8rounded_total = vector.fptrunc %p1_8total : vector<4xf32> to vector<4xbf16>
+ scf.yield %p1_8rounded_total : vector<4xbf16>
+ } else {
+ scf.yield %p1_8out : vector<4xbf16>
+ }
+ vector.store %p1_8final, %outv[%p1_8off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
  kernel.return

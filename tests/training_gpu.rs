@@ -538,48 +538,72 @@ fn lora_gemm_add_preserves_bf16_rounding_and_matches_dense_algebra() {
             let (br, bc) = if transposed { (n, k) } else { (k, n) };
             let b = upload(&ops, &mut stream, br, bc, &bv);
             let base = upload(&ops, &mut stream, m, n, &basev);
+            let residualv = values(m * n, 17);
+            let residual = upload(&ops, &mut stream, m, n, &residualv);
             let product = if transposed {
                 ops::matmul(&ops, &stream, &a, &b, 1.0).unwrap()
             } else {
                 ops::matmul_nn(&ops, &stream, &a, &b, 1.0).unwrap()
             };
-            for scale in [-0.55, 0.0, 0.5, 1.0, 1.1] {
-                let reference = ops::add_scaled(&ops, &stream, &base, &product, scale).unwrap();
-                let fused =
-                    ops::matmul_add(&ops, &stream, &a, &b, &base, scale, transposed).unwrap();
-                let got = fused.download(&mut stream).unwrap();
-                assert_eq!(
-                    got,
-                    reference.download(&mut stream).unwrap(),
-                    "{m}x{n}x{k}, transposed={transposed}, scale={scale}"
-                );
-                if m < 100 {
-                    // Independent FP64 dot product; explicitly model the two BF16 roundings.
-                    let expected = (0..m * n)
-                        .map(|index| {
-                            let (row, col) = (index / n, index % n);
-                            let sum: f64 = (0..k)
-                                .map(|j| {
-                                    f64::from(av[row * k + j])
-                                        * f64::from(
-                                            bv[if transposed {
-                                                col * k + j
-                                            } else {
-                                                j * n + col
-                                            }],
-                                        )
-                                })
-                                .sum();
-                            let product = to_f32(from_f32(sum as f32));
-                            to_f32(from_f32(basev[index] + scale * product))
-                        })
-                        .collect::<Vec<_>>();
-                    close(
-                        &got.into_iter().map(to_f32).collect::<Vec<_>>(),
-                        &expected,
-                        0.005,
-                        1e-5,
+            for with_residual in [false, true] {
+                for scale in [-0.55, 0.0, 0.5, 1.0, 1.1] {
+                    let reference =
+                        ops::add_scaled(&ops, &stream, &base, &product, scale).unwrap();
+                    let reference = if with_residual {
+                        ops::add_scaled(&ops, &stream, &residual, &reference, 1.0).unwrap()
+                    } else {
+                        reference
+                    };
+                    let fused = ops::matmul_add_residual(
+                        &ops,
+                        &stream,
+                        &a,
+                        &b,
+                        &base,
+                        scale,
+                        transposed,
+                        with_residual.then_some(&residual),
+                    )
+                    .unwrap();
+                    let got = fused.download(&mut stream).unwrap();
+                    assert_eq!(
+                        got,
+                        reference.download(&mut stream).unwrap(),
+                        "{m}x{n}x{k}, transposed={transposed}, scale={scale}"
                     );
+                    if m < 100 {
+                        // Independent FP64 dot product; explicitly model the two BF16 roundings.
+                        let expected = (0..m * n)
+                            .map(|index| {
+                                let (row, col) = (index / n, index % n);
+                                let sum: f64 = (0..k)
+                                    .map(|j| {
+                                        f64::from(av[row * k + j])
+                                            * f64::from(
+                                                bv[if transposed {
+                                                    col * k + j
+                                                } else {
+                                                    j * n + col
+                                                }],
+                                            )
+                                    })
+                                    .sum();
+                                let product = to_f32(from_f32(sum as f32));
+                                let branch = to_f32(from_f32(basev[index] + scale * product));
+                                if with_residual {
+                                    to_f32(from_f32(residualv[index] + branch))
+                                } else {
+                                    branch
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        close(
+                            &got.into_iter().map(to_f32).collect::<Vec<_>>(),
+                            &expected,
+                            0.005,
+                            1e-5,
+                        );
+                    }
                 }
             }
             assert!(
@@ -589,7 +613,21 @@ fn lora_gemm_add_preserves_bf16_rounding_and_matches_dense_algebra() {
             assert!(
                 ops::matmul_add(&ops, &stream, &a, &b, &bad_base, 1.0, transposed).is_err()
             );
+            assert!(
+                ops::matmul_add_residual(
+                    &ops,
+                    &stream,
+                    &a,
+                    &b,
+                    &base,
+                    1.0,
+                    transposed,
+                    Some(&bad_base)
+                )
+                .is_err()
+            );
             assert_eq!(read(&base, &mut stream), basev);
+            assert_eq!(read(&residual, &mut stream), residualv);
         }
     }
 }
@@ -724,22 +762,45 @@ fn lora_cached_activation_preserves_outputs_and_accumulated_gradients() {
         }
         let a = p.a.grad.download(&mut stream).unwrap();
         let b = p.b.grad.download(&mut stream).unwrap();
-        p.a.grad.clear(&stream).unwrap();
-        p.b.grad.clear(&stream).unwrap();
-        for _ in 0..2 {
-            let candidate = p.backward_cached(&ops, &stream, &x, &grad, &dx, &low).unwrap();
-            // Recompute dX without changing the accumulated parameter gradients.
-            let dl = ops::matmul_nn(&ops, &stream, &grad, &p.b.value, 0.5).unwrap();
-            let branch = ops::matmul_nn(&ops, &stream, &dl, &p.a.value, 1.0).unwrap();
-            let reference = ops::add_scaled(&ops, &stream, &dx, &branch, 1.0).unwrap();
-            assert_eq!(
-                candidate.download(&mut stream).unwrap(),
-                reference.download(&mut stream).unwrap()
-            );
+        let previous = upload(&ops, &mut stream, m, k, &values(m * k, 23));
+        for residual in [None, Some(&previous)] {
+            p.a.grad.clear(&stream).unwrap();
+            p.b.grad.clear(&stream).unwrap();
+            for _ in 0..2 {
+                let candidate = p
+                    .backward_cached_with_residual(
+                        &ops, &stream, &x, &grad, &dx, &low, residual,
+                    )
+                    .unwrap();
+                // Recompute dX without changing the accumulated parameter gradients.
+                let dl = ops::matmul_nn(&ops, &stream, &grad, &p.b.value, 0.5).unwrap();
+                let branch = ops::matmul_nn(&ops, &stream, &dl, &p.a.value, 1.0).unwrap();
+                let reference = ops::add_scaled(&ops, &stream, &dx, &branch, 1.0).unwrap();
+                let reference = match residual {
+                    Some(r) => ops::add_scaled(&ops, &stream, r, &reference, 1.0).unwrap(),
+                    None => reference,
+                };
+                assert_eq!(
+                    candidate.download(&mut stream).unwrap(),
+                    reference.download(&mut stream).unwrap()
+                );
+            }
+            assert_eq!(p.a.grad.download(&mut stream).unwrap(), a);
+            assert_eq!(p.b.grad.download(&mut stream).unwrap(), b);
         }
-        assert_eq!(p.a.grad.download(&mut stream).unwrap(), a);
-        assert_eq!(p.b.grad.download(&mut stream).unwrap(), b);
         let bad_low = upload(&ops, &mut stream, m, rank + 1, &vec![0.0; m * (rank + 1)]);
+        assert!(
+            p.backward_cached_with_residual(
+                &ops,
+                &stream,
+                &x,
+                &grad,
+                &dx,
+                &low,
+                Some(&bad_low)
+            )
+            .is_err()
+        );
         assert!(p.backward_cached(&ops, &stream, &x, &grad, &dx, &bad_low).is_err());
         assert!(p.backward_cached(&ops, &stream, &x, &grad, &bad_low, &low).is_err());
         assert!(p.backward_cached(&ops, &stream, &x, &bad_low, &dx, &low).is_err());
