@@ -655,6 +655,168 @@ fn projection_backward_transposed(
     train::add_scaled(ops, stream, base_grad, &dx, 1.0).unwrap()
 }
 
+fn attention_packing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/attention_pack");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (rows, cols, capacity) in [
+        (7usize, 31usize, 32usize),
+        (17, 128, 33),
+        (1043, 6144, 1072),
+        (1043, 1536, 1072),
+        (4115, 6144, 4144),
+        (4115, 1536, 4144),
+    ] {
+        let label = format!("{rows}x{cols}/{capacity}");
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        group.bench_function(&label, |b| {
+            let (s, input, out, trans, kernels, grid) = prepared.get_or_insert_with(|| {
+                let mut s = Stream::open().unwrap();
+                let input = s.allocate(rows * cols * 2).unwrap();
+                let out = s.allocate(capacity * cols * 2).unwrap();
+                let trans = s.allocate(capacity * cols * 2).unwrap();
+                let values: Vec<_> = (0..rows * cols)
+                    .flat_map(|i| ((i * 7919 + 13) as u16).to_le_bytes())
+                    .collect();
+                s.upload(input.binding(), &values).unwrap();
+                let grid = [(capacity.div_ceil(32) * cols.div_ceil(32)) as u32, 1, 1];
+                let name = "train_attention_pack";
+                let kernels = std::array::from_fn::<_, 2, _>(|side| {
+                    let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+                    for (key, v) in [
+                        ("rows", rows),
+                        ("cols", cols),
+                        ("capacity", capacity),
+                        ("grid_x", grid[0] as usize),
+                        ("grid_y", 1),
+                    ] {
+                        request.set_config(format!("krea2.{name}.{key}"), v.to_string());
+                    }
+                    request.set_report(hrx::loom::ReportMode::Details);
+                    let source = if side == 0 {
+                        std::env::var_os("KREA2_BENCH_REFERENCE_DIR")
+                            .map(|dir| {
+                                std::fs::read_to_string(
+                                    Path::new(&dir).join(format!("{name}.loom")),
+                                )
+                                .unwrap()
+                            })
+                            .unwrap_or_else(|| {
+                                krea2::kernels::sources::auxiliary(name).unwrap().to_owned()
+                            })
+                    } else {
+                        kernel_source(name)
+                    };
+                    let a = krea2::kernels::compiler(None)
+                        .unwrap()
+                        .module(&source)
+                        .compile(&request)
+                        .unwrap();
+                    if let Some(dir) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                        let dir = std::path::PathBuf::from(dir);
+                        std::fs::create_dir_all(&dir).unwrap();
+                        std::fs::write(
+                            dir.join(format!("pack-{rows}x{cols}-{capacity}-{side}.json")),
+                            a.report().unwrap().json().to_string(),
+                        )
+                        .unwrap();
+                    }
+                    // SAFETY: both sources use the same packing ABI and 32x32 tile geometry.
+                    let kernel = unsafe { s.load_artifact(&a).unwrap() };
+                    let constants = krea2::kernels::Scalars::new()
+                        .index(rows * cols)
+                        .pack(name, &kernel)
+                        .unwrap();
+                    (kernel, constants)
+                });
+                let mut expected = vec![];
+                for (side, (k, c)) in kernels.iter().enumerate() {
+                    s.fill(out.binding(), 0xff).unwrap();
+                    s.fill(trans.binding(), 0xff).unwrap();
+                    // SAFETY: configured extents and grid cover both complete padded outputs.
+                    unsafe {
+                        s.dispatch(
+                            k,
+                            grid,
+                            [256, 1, 1],
+                            c,
+                            &[input.binding(), out.binding(), trans.binding()],
+                        )
+                        .unwrap();
+                    }
+                    let got: Vec<_> = [&out, &trans]
+                        .into_iter()
+                        .map(|buffer| {
+                            let mut bytes = vec![0u8; capacity * cols * 2];
+                            s.read_blocking(buffer.binding(), &mut bytes).unwrap();
+                            bytes
+                        })
+                        .collect();
+                    for r in 0..capacity {
+                        for col in 0..cols {
+                            let v = if r < rows {
+                                &values[(r * cols + col) * 2..(r * cols + col + 1) * 2]
+                            } else {
+                                &[0, 0]
+                            };
+                            assert_eq!(
+                                &got[0][(r * cols + col) * 2..(r * cols + col + 1) * 2],
+                                v
+                            );
+                            assert_eq!(
+                                &got[1][(col * capacity + r) * 2..(col * capacity + r + 1) * 2],
+                                v
+                            );
+                        }
+                    }
+                    if side == 0 {
+                        expected = got;
+                    } else {
+                        assert!(got == expected);
+                    }
+                }
+                (s, input, out, trans, kernels, grid)
+            });
+            if std::env::var_os("KREA2_BENCH_REFERENCE_DIR").is_some() {
+                b.iter_custom(|iterations| {
+                    paired.measure(iterations, |candidate| {
+                        let (k, c) = &kernels[usize::from(candidate)];
+                        // SAFETY: the resident matrices and launch dimensions are those validated during setup.
+                        unsafe {
+                            s.dispatch(
+                                k,
+                                *grid,
+                                [256, 1, 1],
+                                c,
+                                &[input.binding(), out.binding(), trans.binding()],
+                            )
+                            .unwrap();
+                        }
+                        s.synchronize().unwrap();
+                    })
+                });
+            } else {
+                b.iter(|| {
+                    let (k, c) = &kernels[1];
+                    // SAFETY: the resident matrices and launch dimensions are those validated during setup.
+                    unsafe {
+                        s.dispatch(
+                            k,
+                            *grid,
+                            [256, 1, 1],
+                            c,
+                            &[input.binding(), out.binding(), trans.binding()],
+                        )
+                        .unwrap();
+                    }
+                    s.synchronize().unwrap();
+                });
+            }
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
 fn attention(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/attention");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -1563,6 +1725,7 @@ criterion_group!(
     projections,
     cached_projections,
     attention,
+    attention_packing,
     fusion_attention,
     frozen_backward,
     gated_backward,

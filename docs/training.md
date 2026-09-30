@@ -242,6 +242,13 @@ sources and swap reference/candidate roles when investigating small differences.
 This helps compare kernels under changing GPU contention, but does not replace an
 uncontended end-to-end measurement.
 
+`training/attention_pack` measures the bit-preserving padded row-major and
+transposed layouts used by attention. It checks both complete outputs against
+CPU indexing before timing, including zero headroom. It accepts the same
+candidate and reference directory settings for `train_attention_pack.loom`.
+Four-value transfers cover aligned columns and capacities; scalar guards handle
+other shapes.
+
 `training/narrow` compares the rank-32/64 output GEMM with the previous general
 tiles in both operand layouts. It checks exact BF16 parity before alternating
 timings, and accepts `KREA2_BENCH_KERNEL_DIR` for a candidate
@@ -344,6 +351,7 @@ KREA2_TRAIN_TEST_CONFIG=~/training/character.json \
 cargo bench --locked --bench training -- training/projection
 cargo bench --locked --bench training -- training/narrow
 cargo bench --locked --bench training -- training/attention
+cargo bench --locked --bench training -- training/attention_pack
 cargo bench --locked --bench training -- training/fusion_attention
 cargo bench --locked --bench training -- training/frozen_backward
 cargo bench --locked --bench training -- training/adamw

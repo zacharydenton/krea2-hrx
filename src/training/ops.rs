@@ -1471,12 +1471,25 @@ mod tests {
     fn attention_pack_preserves_bits_and_zeroes_padding() {
         let mut stream = Stream::open().unwrap();
         let ops = Ops::new(hrx::BufferPool::new());
-        for (rows, cols) in [(1, 1), (7, 33), (16, 128), (17, 128), (32, 1536), (33, 6144)] {
+        for (rows, cols, capacity) in [
+            (1, 1, 32),
+            (1, 32, 16),
+            (7, 31, 32),
+            (7, 33, 32),
+            (16, 128, 32),
+            (17, 128, 19),
+            (17, 128, 20),
+            (17, 128, 33),
+            (17, 128, 48),
+            (32, 1536, 48),
+            (33, 6144, 64),
+            (1043, 1536, 1072),
+            (4115, 6144, 4144),
+        ] {
             let bits = [0u16, 0x8000, 0x3f80, 0xbf80, 0x0001, 0x7f80, 0x7fc1, 0xffff];
             let values = (0..rows * cols).map(|i| bits[i % bits.len()]).collect::<Vec<_>>();
             let input =
                 Tensor::from_slice(ops.pool(), &mut stream, &values, rows, cols).unwrap();
-            let capacity = rows.div_ceil(16) * 16 + 16;
             let (padded, transposed) =
                 pack_attention_input(&ops, &stream, &input, capacity).unwrap();
             let padded = padded.download(&mut stream).unwrap();
