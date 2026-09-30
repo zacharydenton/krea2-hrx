@@ -480,21 +480,7 @@ impl Transformer {
                 .modulation
                 .as_ref()
                 .ok_or_else(|| Error::invalid("missing modulation tape"))?;
-            train::sum_rows_accumulate(
-                ops,
-                stream,
-                &ops.binary(stream, grad, down, Binary::Mul)?,
-                dst,
-                5,
-            )?;
-            train::sum_rows_accumulate(
-                ops,
-                stream,
-                &ops.binary(stream, &gp, norm2, Binary::Mul)?,
-                dst,
-                3,
-            )?;
-            train::sum_rows_accumulate(ops, stream, &gp, dst, 4)?;
+            train::modulation_backward(ops, stream, grad, down, &gp, norm2, dst, 3)?;
         }
         let gn2 =
             ops.binary(stream, &gp, &train::one_plus(ops, stream, &row(3)?)?, Binary::Mul)?;
@@ -548,21 +534,7 @@ impl Transformer {
                 .modulation
                 .as_ref()
                 .ok_or_else(|| Error::invalid("missing modulation tape"))?;
-            train::sum_rows_accumulate(
-                ops,
-                stream,
-                &ops.binary(stream, &gr, projected, Binary::Mul)?,
-                dst,
-                2,
-            )?;
-            train::sum_rows_accumulate(
-                ops,
-                stream,
-                &ops.binary(stream, &pre_grad, norm1, Binary::Mul)?,
-                dst,
-                0,
-            )?;
-            train::sum_rows_accumulate(ops, stream, &pre_grad, dst, 1)?;
+            train::modulation_backward(ops, stream, &gr, projected, &pre_grad, norm1, dst, 0)?;
         }
         let gn1 = ops.binary(
             stream,

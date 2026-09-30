@@ -552,6 +552,58 @@ fn gated_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn modulation_backward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/modulation_backward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (tokens, width) in [(1, 6144), (1043, 6144), (4115, 6144)] {
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let label = format!("{tokens}x{width}");
+        group.bench_function(&label, |b| {
+            let (stream, ops, r, branch, a, normalized, outputs) =
+                prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let [r, branch, a, normalized] = std::array::from_fn::<_, 4, _>(|_| {
+                        tensor(&ops, &mut stream, tokens, width)
+                    });
+                    let outputs = std::array::from_fn::<_, 2, _>(|_| {
+                        train::FloatTensor::zero(&stream, 6, width).unwrap()
+                    });
+                    (stream, ops, r, branch, a, normalized, outputs)
+                });
+            let mut run = |candidate| {
+                if candidate {
+                    train::modulation_backward(
+                        ops,
+                        stream,
+                        r,
+                        branch,
+                        a,
+                        normalized,
+                        &outputs[1],
+                        3,
+                    )
+                    .unwrap();
+                } else {
+                    let gate = ops.binary(stream, r, branch, krea2::ops::Binary::Mul).unwrap();
+                    train::sum_rows_accumulate(ops, stream, &gate, &outputs[0], 5).unwrap();
+                    let scale =
+                        ops.binary(stream, a, normalized, krea2::ops::Binary::Mul).unwrap();
+                    train::sum_rows_accumulate(ops, stream, &scale, &outputs[0], 3).unwrap();
+                    train::sum_rows_accumulate(ops, stream, a, &outputs[0], 4).unwrap();
+                }
+                stream.synchronize().unwrap();
+            };
+            run(false);
+            run(true);
+            b.iter_custom(|iterations| paired.measure(iterations, &mut run));
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 fn adamw(c: &mut Criterion) {
     let mut prepared = None;
     c.bench_function("training/adamw/rank32x16384", |b| {
@@ -686,6 +738,7 @@ criterion_group!(
     fusion_attention,
     frozen_backward,
     gated_backward,
+    modulation_backward,
     adamw,
     optimizer_update,
     full_step

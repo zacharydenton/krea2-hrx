@@ -980,6 +980,48 @@ pub fn sum_rows_accumulate(
     }
 }
 
+/// Accumulate scale, shift and residual-gate gradients into three consecutive rows.
+/// Product rounding and FP32 reduction order match the separate operations.
+#[allow(clippy::too_many_arguments)]
+pub fn modulation_backward(
+    ops: &Ops,
+    stream: &Stream,
+    residual_grad: &Tensor,
+    branch: &Tensor,
+    affine_grad: &Tensor,
+    normalized: &Tensor,
+    dst: &FloatTensor,
+    row: usize,
+) -> Result<()> {
+    let x = affine_grad;
+    if [residual_grad, branch, normalized]
+        .iter()
+        .any(|t| (t.rows(), t.cols()) != (x.rows(), x.cols()))
+        || dst.cols() != x.cols()
+        || dst.rows() < 3
+        || row > dst.rows() - 3
+    {
+        return Err(Error::invalid("modulation gradient dimensions"));
+    }
+    // SAFETY: matching BF16 inputs; each column owns its three FP32 output cells.
+    unsafe {
+        ops.launch_1d(
+            stream,
+            "train_modulation_backward",
+            config(&[("rows", x.rows()), ("cols", x.cols()), ("size", x.size())]),
+            &Scalars::new().index(x.cols()),
+            &[
+                residual_grad.binding()?,
+                branch.binding()?,
+                x.binding()?,
+                normalized.binding()?,
+                dst.binding().slice(row * x.cols() * 4, 3 * x.cols() * 4)?,
+            ],
+            x.cols(),
+        )
+    }
+}
+
 /// Sum a broadcast gradient in FP32, rounding once at the activation boundary.
 pub fn sum_rows(ops: &Ops, stream: &Stream, x: &Tensor) -> Result<Tensor> {
     let sum = FloatTensor::scratch(ops, stream, 1, x.cols())?;

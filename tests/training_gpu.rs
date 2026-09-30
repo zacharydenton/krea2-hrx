@@ -45,6 +45,63 @@ fn close(got: &[f32], expected: &[f32], relative: f64, absolute: f64) {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn modulation_backward_matches_separate_reductions_and_preserves_other_rows() {
+    use krea2::ops::Binary;
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (rows, cols) in [(1, 1), (7, 19), (31, 255), (33, 257), (1043, 64), (4115, 65)] {
+        let inputs = [3, 7, 11, 19].map(|offset| values(rows * cols, offset));
+        let [r, b, a, n] = std::array::from_fn::<_, 4, _>(|i| {
+            upload(&ops, &mut stream, rows, cols, &inputs[i])
+        });
+        let mut expected = values(7 * cols, 23);
+        let dst = FloatTensor::from_slice(&mut stream, 7, cols, &expected).unwrap();
+        let reference = FloatTensor::from_slice(&mut stream, 7, cols, &expected).unwrap();
+        for row in [3, 0, 3] {
+            ops::modulation_backward(&ops, &stream, &r, &b, &a, &n, &dst, row).unwrap();
+            let gate = ops.binary(&stream, &r, &b, Binary::Mul).unwrap();
+            let scale = ops.binary(&stream, &a, &n, Binary::Mul).unwrap();
+            ops::sum_rows_accumulate(&ops, &stream, &scale, &reference, row).unwrap();
+            ops::sum_rows_accumulate(&ops, &stream, &a, &reference, row + 1).unwrap();
+            ops::sum_rows_accumulate(&ops, &stream, &gate, &reference, row + 2).unwrap();
+            for c in 0..cols {
+                let mut sum = [0.0f32; 3];
+                for r in 0..rows {
+                    let i = r * cols + c;
+                    sum[0] += to_f32(from_f32(inputs[2][i] * inputs[3][i]));
+                    sum[1] += inputs[2][i];
+                    sum[2] += to_f32(from_f32(inputs[0][i] * inputs[1][i]));
+                }
+                for j in 0..3 {
+                    expected[(row + j) * cols + c] += sum[j];
+                }
+            }
+            let actual = dst.download(&mut stream).unwrap();
+            let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+            assert_eq!(bits(actual.clone()), bits(reference.download(&mut stream).unwrap()));
+            assert_eq!(bits(actual), bits(expected.clone()));
+        }
+        for row in [5, usize::MAX] {
+            assert!(
+                ops::modulation_backward(&ops, &stream, &r, &b, &a, &n, &dst, row).is_err()
+            );
+        }
+        let short = FloatTensor::zero(&stream, 2, cols).unwrap();
+        assert!(ops::modulation_backward(&ops, &stream, &r, &b, &a, &n, &short, 0).is_err());
+        let mismatch = upload(&ops, &mut stream, 1, cols + 1, &vec![0.0; cols + 1]);
+        for inputs in [(&mismatch, &b, &n), (&r, &mismatch, &n), (&r, &b, &mismatch)] {
+            assert!(
+                ops::modulation_backward(
+                    &ops, &stream, inputs.0, inputs.1, &a, inputs.2, &dst, 0
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn gated_backward_preserves_product_rounding_and_matches_chain_rule() {
     use krea2::ops::Binary;
     let mut stream = Stream::open().unwrap();

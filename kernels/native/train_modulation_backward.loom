@@ -1,0 +1,75 @@
+// Accumulate scale, shift and residual-gate gradients in their original row order.
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_modulation_backward.rows : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_modulation_backward.cols : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_modulation_backward.size : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_modulation_backward.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_modulation_backward.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@target) export("krea2_train_modulation_backward") @krea2_train_modulation_backward(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %gx = config.get @krea2.train_modulation_backward.grid_x : index
+  %gy = config.get @krea2.train_modulation_backward.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %residual_grad: buffer, %branch: buffer, %affine_grad: buffer, %normalized: buffer, %out: buffer) {
+  %offset = index.constant 0 : offset
+  %zero = index.constant 0 : index
+  %one = index.constant 1 : index
+  %two = index.constant 2 : index
+  %step = index.constant 256 : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %base = index.mul %group, %step : index
+  %col = index.add %base, %lane : index
+  %rows = config.get @krea2.train_modulation_backward.rows : index
+  %cols = config.get @krea2.train_modulation_backward.cols : index
+  %size = config.get @krea2.train_modulation_backward.size : index
+  %rg = buffer.assume.memory_space<global> %residual_grad : buffer
+  %rv = buffer.view %rg[%offset] : buffer -> view<[%size]xbf16>
+  %bg = buffer.assume.memory_space<global> %branch : buffer
+  %bv = buffer.view %bg[%offset] : buffer -> view<[%size]xbf16>
+  %ag = buffer.assume.memory_space<global> %affine_grad : buffer
+  %av = buffer.view %ag[%offset] : buffer -> view<[%size]xbf16>
+  %ng = buffer.assume.memory_space<global> %normalized : buffer
+  %nv = buffer.view %ng[%offset] : buffer -> view<[%size]xbf16>
+  %og = buffer.assume.memory_space<global> %out : buffer
+  %ov = buffer.view %og[%offset] : buffer -> view<3x[%cols]xf32>
+  %ok = index.cmp ult, %col, %cols : index
+  scf.if %ok {
+    %c = index.assume %col [range(%col, 0, 1073741824), lt(%col, %cols)] : index
+    %zf = scalar.constant 0.0 : f32
+    %scale, %shift, %gate = scf.for %r = [%zero to %rows step %one](%s = %zf, %h = %zf, %g = %zf : f32, f32, f32) -> (f32, f32, f32) {
+      %rb = index.mul %r, %cols : index
+      %at = index.add %rb, %c : index
+      %i = index.assume %at [range(%at, 0, 1073741824), lt(%at, %size)] : index
+      %r_bits = view.load %rv[%i] : view<[%size]xbf16> -> bf16
+      %r_f32 = scalar.extf %r_bits : bf16 to f32
+      %b_bits = view.load %bv[%i] : view<[%size]xbf16> -> bf16
+      %b_f32 = scalar.extf %b_bits : bf16 to f32
+      %a_bits = view.load %av[%i] : view<[%size]xbf16> -> bf16
+      %a_f32 = scalar.extf %a_bits : bf16 to f32
+      %n_bits = view.load %nv[%i] : view<[%size]xbf16> -> bf16
+      %n_f32 = scalar.extf %n_bits : bf16 to f32
+      %scale_product = scalar.mulf %a_f32, %n_f32 : f32
+      %scale_bits = scalar.fptrunc %scale_product : f32 to bf16
+      %scale_value = scalar.extf %scale_bits : bf16 to f32
+      %gate_product = scalar.mulf %r_f32, %b_f32 : f32
+      %gate_bits = scalar.fptrunc %gate_product : f32 to bf16
+      %gate_value = scalar.extf %gate_bits : bf16 to f32
+      %sn = scalar.addf %s, %scale_value : f32
+      %hn = scalar.addf %h, %a_f32 : f32
+      %gn = scalar.addf %g, %gate_value : f32
+      scf.yield %sn, %hn, %gn : f32, f32, f32
+    }
+    %old_scale = view.load %ov[%zero, %c] : view<3x[%cols]xf32> -> f32
+    %old_shift = view.load %ov[%one, %c] : view<3x[%cols]xf32> -> f32
+    %old_gate = view.load %ov[%two, %c] : view<3x[%cols]xf32> -> f32
+    %total_scale = scalar.addf %old_scale, %scale : f32
+    %total_shift = scalar.addf %old_shift, %shift : f32
+    %total_gate = scalar.addf %old_gate, %gate : f32
+    view.store %total_scale, %ov[%zero, %c] : f32, view<3x[%cols]xf32>
+    view.store %total_shift, %ov[%one, %c] : f32, view<3x[%cols]xf32>
+    view.store %total_gate, %ov[%two, %c] : f32, view<3x[%cols]xf32>
+  }
+  kernel.return
+}

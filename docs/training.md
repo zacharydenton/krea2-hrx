@@ -148,6 +148,9 @@ update; a nonfinite gradient cancels the update without changing optimizer state
 MLP and attention gate derivatives each use one fused dispatch. It reads the
 cached forward activation and writes both branch gradients, preserving the BF16
 rounding of the intermediate product without materializing that temporary tensor.
+With all adapter targets enabled, each modulation stage also fuses its scale,
+shift and residual-gate gradient reductions. It preserves BF16 product rounding
+and the FP32 row summation order while avoiding two product tensors.
 
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The
@@ -206,6 +209,8 @@ with the direct reverse GEMM on the same inputs. This is an experiment; training
 does not retain these weight transposes. `training/gated_backward` always pairs
 the fused gate derivative with the original three-operation sequence. Both use
 the same alternating-order timing and summary as the dense comparison.
+`training/modulation_backward` compares the fused modulation reduction with its
+original two products and three reductions using the same paired timing.
 
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,
