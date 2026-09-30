@@ -227,10 +227,9 @@ fn projection_backward_transposed(
 fn attention(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/attention");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
-    for tokens in [1024, 4096] {
-        for backward in [false, true] {
+    for tokens in [1024, 1043, 4096, 4115] {
+        for pass in ["forward", "backward", "forward_backward"] {
             let mut prepared = None;
-            let pass = if backward { "forward_backward" } else { "forward" };
             group.bench_function(format!("{pass}/{tokens}"), |b| {
                 let (mut stream, ops, q, k, v, grad) = prepared.take().unwrap_or_else(|| {
                     let mut stream = Stream::open().unwrap();
@@ -241,10 +240,15 @@ fn attention(c: &mut Criterion) {
                     let grad = tensor(&ops, &mut stream, tokens, 6144);
                     (stream, ops, q, k, v, grad)
                 });
+                let cached = (pass == "backward")
+                    .then(|| train::attention(&ops, &stream, &q, &k, &v).unwrap());
+                stream.synchronize().unwrap();
                 let mut run = || {
-                    let f = train::attention(&ops, &stream, &q, &k, &v).unwrap();
-                    let gradients = backward.then(|| {
-                        train::attention_backward(&ops, &stream, &q, &k, &v, &f, &grad).unwrap()
+                    let fresh = (pass != "backward")
+                        .then(|| train::attention(&ops, &stream, &q, &k, &v).unwrap());
+                    let f = cached.as_ref().or(fresh.as_ref()).unwrap();
+                    let gradients = (pass != "forward").then(|| {
+                        train::attention_backward(&ops, &stream, &q, &k, &v, f, &grad).unwrap()
                     });
                     stream.synchronize().unwrap();
                     black_box((f, gradients));

@@ -101,6 +101,12 @@ impl MemoryEstimate {
             // Adjacent blocks' shared input/output is still counted twice here.
             28 * tokens * (137728 * 2 + 6144 * 4 + 48 * 4)
         };
+        // Cached padded Q/K/V and Q/K transposes: all block tapes when retained,
+        // or only the current block when recomputing. Include forward headroom.
+        activations += if c.gradient_checkpointing { 1 } else { 28 }
+            * (tokens.div_ceil(16) * 16 + 16)
+            * (6144 * 2 + 1536 * 3)
+            * 2;
         if c.targets == Targets::All {
             // Four extra main-block tensors only when modulation is trainable.
             if !c.gradient_checkpointing {

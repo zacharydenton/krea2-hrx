@@ -683,6 +683,12 @@ fn check_batched_attention(t: usize, heads: usize, kv: usize, gain: f32, sequenc
     let gt = upload(&ops, &mut stream, t, heads * d, &g);
     let mut f = ops::attention_batched(&ops, &stream, &qt, &kt, &vt, sequence).unwrap();
     let (dq, dk, dv) = ops::attention_backward(&ops, &stream, &qt, &kt, &vt, &f, &gt).unwrap();
+    if sequence == t && t >= 16 && heads == kv * 4 {
+        let unrelated_q = upload(&ops, &mut stream, t, heads * d, &q);
+        assert!(
+            ops::attention_backward(&ops, &stream, &unrelated_q, &kt, &vt, &f, &gt).is_err()
+        );
+    }
     let mut output = vec![0.0; q.len()];
     let mut eq = vec![0.0f64; q.len()];
     let mut ek = vec![0.0f64; k.len()];

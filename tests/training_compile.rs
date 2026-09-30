@@ -16,6 +16,7 @@ fn training_kernels_compile_without_a_device() {
             ("grid_x", 5),
             ("grid_y", 1),
             ("rows", 7),
+            ("capacity", 32),
             ("cols", 128),
             ("size", 896),
             ("tokens", 7),
@@ -47,6 +48,7 @@ fn real_training_attention_shapes_compile_without_spills() {
     // Include actual 512-area buckets with text tokens, not only round lengths.
     for tokens in [1015usize, 1023, 1024, 1025, 1043, 1067, 1070, 1074, 4096, 4115] {
         for name in [
+            "train_attention_pack",
             "train_attention",
             "train_attention_flash",
             "train_attention_flash_dq",
@@ -61,7 +63,9 @@ fn real_training_attention_shapes_compile_without_spills() {
             for (key, value) in [
                 (
                     "grid_x",
-                    if name.starts_with("train_attention_flash") {
+                    if name == "train_attention_pack" {
+                        (tokens.div_ceil(16) * 16 + 16).div_ceil(32) * (6144 / 32)
+                    } else if name.starts_with("train_attention_flash") {
                         tokens.div_ceil(16)
                     } else {
                         tokens * if name.starts_with("train_attention_dkv") { 12 } else { 48 }
@@ -78,11 +82,10 @@ fn real_training_attention_shapes_compile_without_spills() {
                 ("q_stride", 6144),
                 ("kv_stride", 1536),
                 ("out_stride", 6144),
-                (
-                    "token_capacity",
-                    tokens.div_ceil(16) * 16
-                        + if name == "train_attention_flash" { 16 } else { 0 },
-                ),
+                ("token_capacity", tokens.div_ceil(16) * 16 + 16),
+                ("rows", tokens),
+                ("cols", 6144),
+                ("capacity", tokens.div_ceil(16) * 16 + 16),
                 ("tokens", tokens),
                 ("sequence", tokens),
                 ("heads", 48),

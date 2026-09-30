@@ -1,0 +1,99 @@
+// Read each BF16 value once; write padded row-major and transposed layouts.
+// Every tail element is zeroed in this pass, without a fill or copy dispatch.
+amdgpu.target<gfx11-generic> @krea2_train_attention_pack_target {subgroup_size = 32}
+config.decl @krea2.train_attention_pack.rows : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_pack.cols : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_pack.capacity : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_pack.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_attention_pack.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@krea2_train_attention_pack_target) export("krea2_train_attention_pack") @krea2_train_attention_pack(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %gx = config.get @krea2.train_attention_pack.grid_x : index
+  %gy = config.get @krea2.train_attention_pack.grid_y : index
+  kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %out: buffer, %transposed: buffer) {
+  %offset = index.constant 0 : offset
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %zero = index.constant 0 : index
+  %zf = scalar.constant 0.0 : f32
+  %zb = scalar.fptrunc %zf : f32 to bf16
+  %eight = index.constant 8 : index
+  %tile = index.constant 32 : index
+  %pad = index.constant 31 : index
+  %rows = config.get @krea2.train_attention_pack.rows : index
+  %cols = config.get @krea2.train_attention_pack.cols : index
+  %capacity = config.get @krea2.train_attention_pack.capacity : index
+  %rounded = index.add %cols, %pad : index
+  %tiles = index.div %rounded, %tile : index
+  %tr = index.div %group, %tiles : index
+  %tc = index.rem %group, %tiles : index
+  %br = index.mul %tr, %tile : index
+  %bc = index.mul %tc, %tile : index
+  %lr = index.div %lane, %tile : index
+  %lc = index.rem %lane, %tile : index
+  %xg = buffer.assume.memory_space<global> %x : buffer
+  %xv = buffer.view %xg[%offset] : buffer -> view<[%n]xbf16>
+  %og = buffer.assume.memory_space<global> %out : buffer
+  %ov = buffer.view %og[%offset] : buffer -> view<[%capacity]x[%cols]xbf16>
+  %tg = buffer.assume.memory_space<global> %transposed : buffer
+  %tv = buffer.view %tg[%offset] : buffer -> view<[%cols]x[%capacity]xbf16>
+  %bytes = index.constant 2112 : offset
+  %storage = buffer.alloca<workgroup> align(16) %bytes : buffer
+  %shared = buffer.view %storage[%offset] : buffer -> view<32x33xbf16>
+  scf.for %j = [%zero to %tile step %eight] {
+    %r = index.add %lr, %j : index
+    %ir = index.add %br, %r : index
+    %ic = index.add %bc, %lc : index
+    %row_ok = index.cmp ult, %ir, %rows : index
+    %col_ok = index.cmp ult, %ic, %cols : index
+    %value = scf.if %row_ok -> (bf16) {
+      %value_col = scf.if %col_ok -> (bf16) {
+        %base = index.mul %ir, %cols : index
+        %idx = index.add %base, %ic : index
+        %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+        %v = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+        scf.yield %v : bf16
+      } else {
+        scf.yield %zb : bf16
+      }
+      scf.yield %value_col : bf16
+    } else {
+      scf.yield %zb : bf16
+    }
+    %sr = index.assume %r [range(%r, 0, 32)] : index
+    %sc = index.assume %lc [range(%lc, 0, 32)] : index
+    view.store %value, %shared[%sr, %sc] : bf16, view<32x33xbf16>
+    %out_ok = index.cmp ult, %ir, %capacity : index
+    scf.if %out_ok {
+      scf.if %col_ok {
+        %orow = index.assume %ir [lt(%ir, %capacity)] : index
+        %ocol = index.assume %ic [lt(%ic, %cols)] : index
+        view.store %value, %ov[%orow, %ocol] : bf16, view<[%capacity]x[%cols]xbf16>
+      }
+    }
+    scf.yield
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  scf.for %j = [%zero to %tile step %eight] {
+    %r = index.add %lr, %j : index
+    %ir = index.add %bc, %r : index
+    %ic = index.add %br, %lc : index
+    %row_ok = index.cmp ult, %ir, %cols : index
+    %col_ok = index.cmp ult, %ic, %capacity : index
+    scf.if %row_ok {
+      scf.if %col_ok {
+        %sr = index.assume %r [range(%r, 0, 32)] : index
+        %sc = index.assume %lc [range(%lc, 0, 32)] : index
+        %v = view.load %shared[%sc, %sr] : view<32x33xbf16> -> bf16
+        %orow = index.assume %ir [lt(%ir, %cols)] : index
+        %ocol = index.assume %ic [lt(%ic, %capacity)] : index
+        view.store %v, %tv[%orow, %ocol] : bf16, view<[%cols]x[%capacity]xbf16>
+      }
+    }
+    scf.yield
+  }
+  kernel.return
+}

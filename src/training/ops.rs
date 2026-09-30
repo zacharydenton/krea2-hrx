@@ -615,6 +615,16 @@ pub struct Attention {
     heads: usize,
     kv: usize,
     sequence: usize,
+    packed: Option<Box<AttentionInputs>>,
+}
+
+struct AttentionInputs {
+    sources: [Tensor; 3],
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    qt: Tensor,
+    kt: Tensor,
 }
 
 fn attention_config(
@@ -634,19 +644,32 @@ fn attention_config(
     ])
 }
 
-fn pad_attention_input(
+fn pack_attention_input(
     ops: &Ops,
     stream: &Stream,
     input: &Tensor,
     capacity: usize,
-) -> Result<Tensor> {
-    if input.rows() == capacity {
-        return Ok(input.clone());
+) -> Result<(Tensor, Tensor)> {
+    if capacity < input.rows() {
+        return Err(Error::invalid("attention packing capacity"));
     }
     let out = ops.tensor(stream, capacity, input.cols())?;
-    stream.fill(out.binding()?, 0)?;
-    stream.copy(out.binding()?.slice(0, input.size() * 2)?, input.binding()?)?;
-    Ok(out)
+    let transposed = ops.tensor(stream, input.cols(), capacity)?;
+    // SAFETY: guarded input reads preserve BF16 bits. The tiled kernel writes
+    // both complete output matrices, explicitly zeroing all padded rows.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_attention_pack",
+            config(&[("rows", input.rows()), ("cols", input.cols()), ("capacity", capacity)]),
+            &Scalars::new().index(input.size()),
+            &[input.binding()?, out.binding()?, transposed.binding()?],
+            capacity.div_ceil(32) * input.cols().div_ceil(32),
+            1,
+            256,
+        )?;
+    }
+    Ok((out, transposed))
 }
 
 /// Streaming GQA with linear auxiliary storage and FP32 softmax accumulation.
@@ -692,10 +715,9 @@ pub fn attention_batched(
         && heads == kv * 4
     {
         let capacity = q.rows().div_ceil(16) * 16 + 16;
-        let qp = pad_attention_input(ops, stream, q, capacity)?;
-        let kp = pad_attention_input(ops, stream, k, capacity)?;
-        let vp = pad_attention_input(ops, stream, v, capacity)?;
-        let vt = transpose(ops, stream, &vp)?;
+        let (qp, qt) = pack_attention_input(ops, stream, q, capacity)?;
+        let (kp, kt) = pack_attention_input(ops, stream, k, capacity)?;
+        let (vp, vt) = pack_attention_input(ops, stream, v, capacity)?;
         // SAFETY: operands have zero-filled 16-token headroom; each workgroup owns
         // sixteen queries and four heads, writing only valid rows to all outputs.
         unsafe {
@@ -723,7 +745,22 @@ pub fn attention_batched(
                 128,
             )?;
         }
-        return Ok(Attention { output, exact, lse, heads, kv, sequence });
+        return Ok(Attention {
+            output,
+            exact,
+            lse,
+            heads,
+            kv,
+            sequence,
+            packed: Some(Box::new(AttentionInputs {
+                sources: [q.clone(), k.clone(), v.clone()],
+                q: qp,
+                k: kp,
+                v: vp,
+                qt,
+                kt,
+            })),
+        });
     }
     // SAFETY: dimensions above match the configured GQA layout; a wave owns one query/head.
     unsafe {
@@ -745,10 +782,11 @@ pub fn attention_batched(
             32,
         )?;
     }
-    Ok(Attention { output, exact, lse, heads, kv, sequence })
+    Ok(Attention { output, exact, lse, heads, kv, sequence, packed: None })
 }
 
 /// Compute dQ, dK and dV without atomic accumulation or repeated KV storage.
+/// Inputs must be the unchanged tensors used by the corresponding forward pass.
 pub fn attention_backward(
     ops: &Ops,
     stream: &Stream,
@@ -772,6 +810,11 @@ pub fn attention_backward(
         || forward.lse.cols != heads
     {
         return Err(Error::invalid("attention backward dimensions"));
+    }
+    if let Some(packed) = &forward.packed
+        && !packed.sources.iter().zip([q, k, v]).all(|(a, b)| a.same_view(b))
+    {
+        return Err(Error::invalid("attention backward requires its forward inputs"));
     }
     let delta = FloatTensor::scratch(ops, stream, q.rows(), heads)?;
     let dq = ops.tensor(stream, q.rows(), q.cols())?;
@@ -799,15 +842,9 @@ pub fn attention_backward(
             if tiled { heads } else { 1 },
             32,
         )?;
-        if tiled {
-            let capacity = q.rows().div_ceil(16) * 16;
-            let qp = pad_attention_input(ops, stream, q, capacity)?;
-            let kp = pad_attention_input(ops, stream, k, capacity)?;
-            let vp = pad_attention_input(ops, stream, v, capacity)?;
-            let gp = pad_attention_input(ops, stream, grad, capacity)?;
-            let kt = transpose(ops, stream, &kp)?;
-            let qt = transpose(ops, stream, &qp)?;
-            let gt = transpose(ops, stream, &gp)?;
+        if let Some(packed) = &forward.packed {
+            let capacity = packed.q.rows();
+            let (gp, gt) = pack_attention_input(ops, stream, grad, capacity)?;
             let tiled = config(&[
                 ("tokens", q.rows()),
                 ("token_capacity", capacity),
@@ -817,13 +854,13 @@ pub fn attention_backward(
                 ("kv", kv),
             ]);
             let mut args = vec![
-                qp.binding()?,
-                kp.binding()?,
-                vp.binding()?,
+                packed.q.binding()?,
+                packed.k.binding()?,
+                packed.v.binding()?,
                 gp.binding()?,
                 forward.lse.binding(),
                 delta.binding(),
-                kt.binding()?,
+                packed.kt.binding()?,
                 gt.binding()?,
                 dq.binding()?,
                 dq.binding()?,
@@ -840,7 +877,7 @@ pub fn attention_backward(
                 heads,
                 32,
             )?;
-            args[6] = qt.binding()?;
+            args[6] = packed.qt.binding()?;
             args[8] = dk.binding()?;
             args[9] = dv.binding()?;
             ops.launch(
@@ -957,4 +994,43 @@ pub fn permute_taps(ops: &Ops, stream: &Stream, x: &Tensor, reverse: bool) -> Re
         )?;
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a gfx1151 GPU"]
+    fn attention_pack_preserves_bits_and_zeroes_padding() {
+        let mut stream = Stream::open().unwrap();
+        let ops = Ops::new(hrx::BufferPool::new());
+        for (rows, cols) in [(1, 1), (7, 33), (16, 128), (17, 128), (32, 1536), (33, 6144)] {
+            let bits = [0u16, 0x8000, 0x3f80, 0xbf80, 0x0001, 0x7f80, 0x7fc1, 0xffff];
+            let values = (0..rows * cols).map(|i| bits[i % bits.len()]).collect::<Vec<_>>();
+            let input =
+                Tensor::from_slice(ops.pool(), &mut stream, &values, rows, cols).unwrap();
+            let capacity = rows.div_ceil(16) * 16 + 16;
+            let (padded, transposed) =
+                pack_attention_input(&ops, &stream, &input, capacity).unwrap();
+            let padded = padded.download(&mut stream).unwrap();
+            let transposed = transposed.download(&mut stream).unwrap();
+            for r in 0..capacity {
+                for c in 0..cols {
+                    let expected = if r < rows { values[r * cols + c] } else { 0 };
+                    assert_eq!(
+                        padded[r * cols + c],
+                        expected,
+                        "row-major {rows}x{cols} at {r},{c}"
+                    );
+                    assert_eq!(
+                        transposed[c * capacity + r],
+                        expected,
+                        "transposed {rows}x{cols} at {r},{c}"
+                    );
+                }
+            }
+            assert!(pack_attention_input(&ops, &stream, &input, rows - 1).is_err());
+        }
+    }
 }

@@ -117,6 +117,12 @@ impl Tensor {
         self.rows * self.cols
     }
 
+    /// Whether two handles name the same matrix in the same storage owner.
+    pub(crate) fn same_view(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.storage, &other.storage)
+            && (self.offset, self.rows, self.cols) == (other.offset, other.rows, other.cols)
+    }
+
     /// This tensor's byte offset within its backing allocation.
     fn at(&self) -> usize {
         self.storage.base() + self.offset

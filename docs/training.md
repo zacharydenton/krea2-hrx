@@ -130,7 +130,11 @@ allocating activation tapes when checkpointing is disabled; its full capacity
 is included in the allocation estimate. Each block completes before advancing,
 bounding temporary storage retained by queued dispatches. Grouped-query attention
 retains linear-sized statistics and computes gradients without floating-point
-atomics.
+atomics. Tiled attention also retains padded Q/K/V and transposed Q/K for the
+reverse pass. A fused packing kernel writes both layouts and zeroes tail rows
+without changing BF16 bits; backward only packs the incoming gradient. The
+allocation estimate includes these cached layouts. This reuses forward data
+without quantizing attention or changing the gradient arithmetic.
 
 Optimizer updates replay prepared HRX graphs for all parameter norms and AdamW
 operations. The complete global norm is read and checked before any parameter
