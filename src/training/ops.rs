@@ -281,6 +281,56 @@ fn matmul_nn_inner(
     Ok(out)
 }
 
+/// Add a rank-sized matrix product to a base tensor, rounding the product to BF16 first.
+/// `transposed` selects an N x K right operand; otherwise it is K x N.
+pub fn matmul_add(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    base: &Tensor,
+    scale: f32,
+    transposed: bool,
+) -> Result<Tensor> {
+    let (m, k) = (a.rows(), a.cols());
+    let (bk, n) = if transposed { (b.cols(), b.rows()) } else { (b.rows(), b.cols()) };
+    if k != bk || (base.rows(), base.cols()) != (m, n) || !scale.is_finite() {
+        return Err(Error::invalid("training GEMM add dimensions"));
+    }
+    if !n.is_multiple_of(64) || !k.is_multiple_of(32) || k > 64 {
+        let product = if transposed {
+            matmul(ops, stream, a, b, 1.0)?
+        } else {
+            matmul_nn(ops, stream, a, b, 1.0)?
+        };
+        return add_scaled(ops, stream, base, &product, scale);
+    }
+    let out = ops.tensor(stream, m, n)?;
+    // SAFETY: full N/K tiles, guarded ragged M; base/out are M x N, A is M x K,
+    // and the specialized right-operand layout matches B's validated dimensions.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_gemm_lora_add",
+            config(&[
+                ("m", m),
+                ("n", n),
+                ("k", k),
+                ("asize", a.size()),
+                ("bsize", b.size()),
+                ("csize", out.size()),
+                ("transposed", usize::from(transposed)),
+            ]),
+            &Scalars::new().index(m).float(scale),
+            &[a.binding()?, b.binding()?, base.binding()?, out.binding()?],
+            n / 64,
+            m.div_ceil(64),
+            256,
+        )?;
+    }
+    Ok(out)
+}
+
 /// FP32 result for an adapter parameter gradient.
 pub fn matmul_float(
     ops: &Ops,

@@ -88,8 +88,16 @@ impl Projection {
         strength: f32,
     ) -> Result<(Tensor, Tensor)> {
         let low = train::matmul(ops, stream, x, &self.a.value, 1.0)?;
-        let delta = train::matmul(ops, stream, &low, &self.b.value, 1.0)?;
-        Ok((train::add_scaled(ops, stream, base, &delta, self.scale() * strength)?, low))
+        let output = train::matmul_add(
+            ops,
+            stream,
+            &low,
+            &self.b.value,
+            base,
+            self.scale() * strength,
+            true,
+        )?;
+        Ok((output, low))
     }
     /// Accumulate parameter gradients and add the branch's input gradient.
     pub fn backward(
@@ -124,8 +132,7 @@ impl Projection {
         train::matmul_tn_accumulate(ops, stream, grad, low, &self.b.grad, self.scale())?;
         let dl = train::matmul_nn(ops, stream, grad, &self.b.value, self.scale())?;
         train::matmul_tn_accumulate(ops, stream, &dl, x, &self.a.grad, 1.0)?;
-        let dx = train::matmul_nn(ops, stream, &dl, &self.a.value, 1.0)?;
-        train::add_scaled(ops, stream, base_grad, &dx, 1.0)
+        train::matmul_add(ops, stream, &dl, &self.a.value, base_grad, 1.0, false)
     }
 }
 
@@ -666,10 +673,10 @@ mod full_target_tests {
             let factors = Factors {
                 inputs,
                 outputs,
-                rank: 2,
-                alpha: 2.0,
-                a: (0..inputs * 2).map(|i| ((i % 23) as f32 - 11.0) * 0.001).collect(),
-                b: (0..outputs * 2).map(|i| ((i % 19) as f32 - 9.0) * 0.001).collect(),
+                rank: 32,
+                alpha: 32.0,
+                a: (0..inputs * 32).map(|i| ((i % 23) as f32 - 11.0) * 0.001).collect(),
+                b: (0..outputs * 32).map(|i| ((i % 19) as f32 - 9.0) * 0.001).collect(),
             };
             adapters.insert(
                 format!("blocks.0.{name}"),

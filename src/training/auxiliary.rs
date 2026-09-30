@@ -321,7 +321,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let mut adapter = Adapter::initialize_targets(2, 2.0, 37, Targets::All).unwrap();
+        let mut adapter = Adapter::initialize_targets(32, 32.0, 37, Targets::All).unwrap();
         adapter.layers.retain(|name, _| !name.starts_with("blocks."));
         assert_eq!(adapter.layers.len(), 40);
         let model =

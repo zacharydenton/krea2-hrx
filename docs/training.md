@@ -167,6 +167,11 @@ activation for its parameter gradient, avoiding a duplicate input projection in
 backward. These activations expire with the tape before the optimizer update;
 the memory estimate includes them for retained and recomputed blocks.
 
+Rank-32/64 adapter output projections and input gradients fuse their matrix
+product with the base-result addition. Vector loads stage both weight layouts
+directly, and the product still rounds to BF16 before scaling and adding.
+Other ranks and dimensions retain the separate operations.
+
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The
 estimate counts BF16 weights once and includes the additional execution copies
@@ -234,6 +239,10 @@ original four-operation sequence, including allocation and dispatch overhead.
 `training/rope_norm_backward` pairs fused inverse rotary and Q/K norm backward
 with the separate operations for both head counts. It checks exact BF16 agreement
 and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.
+`training/projection_fused` and `training/projection_fused_rank64` pair complete
+adapter forward/backward passes against separate matrix products and additions,
+with cached forward activations on both sides. Parameter-gradient accumulation
+is included; frozen-base GEMMs are outside these measurements.
 `training/projection_cached` pairs complete LoRA forward/backward passes with and
 without retaining the rank-sized activation, using the same resident inputs.
 

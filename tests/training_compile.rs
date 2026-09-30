@@ -248,6 +248,44 @@ fn adapter_direct_gradients_compile_without_spills() {
 
 #[test]
 #[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
+fn lora_gemm_add_compiles_without_spills() {
+    let compiler = compiler(None).unwrap();
+    let name = "train_gemm_lora_add";
+    for (m, n, k) in [(1usize, 64usize, 32usize), (1043, 6144, 32), (4115, 16384, 64)] {
+        for transposed in [0, 1] {
+            let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+            for (key, value) in [
+                ("m", m),
+                ("n", n),
+                ("k", k),
+                ("asize", m * k),
+                ("bsize", n * k),
+                ("csize", m * n),
+                ("grid_x", n / 64),
+                ("grid_y", m.div_ceil(64)),
+                ("transposed", transposed),
+            ] {
+                request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+            }
+            request.set_report(hrx::loom::ReportMode::Details);
+            let artifact =
+                compiler.module(sources::auxiliary(name).unwrap()).compile(&request).unwrap();
+            assert!(artifact.diagnostics().iter().all(|d| d.code != "BACKEND/009"));
+            if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join(format!("{name}-{m}x{n}x{k}-{transposed}.json")),
+                    artifact.report().unwrap().json().to_string(),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
 fn optimizer_kernels_compile_without_spills() {
     let compiler = compiler(None).unwrap();
     for name in ["train_grad_norm", "train_adamw", "train_adamw_graph"] {

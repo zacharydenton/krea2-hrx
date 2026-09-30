@@ -338,6 +338,84 @@ fn zero_b_preserves_base_output_and_accumulates_only_b_gradients() {
 }
 
 #[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn lora_gemm_add_preserves_bf16_rounding_and_matches_dense_algebra() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (m, n, k) in [
+        (1, 64, 32),
+        (65, 128, 32),
+        (513, 64, 64),
+        (1043, 6144, 32),
+        (4115, 16384, 32),
+        (7, 19, 3),
+        (17, 64, 96),
+    ] {
+        for transposed in [false, true] {
+            let av = values(m * k, 2);
+            let bv = values(n * k, 7);
+            let basev = values(m * n, 11);
+            let a = upload(&ops, &mut stream, m, k, &av);
+            let (br, bc) = if transposed { (n, k) } else { (k, n) };
+            let b = upload(&ops, &mut stream, br, bc, &bv);
+            let base = upload(&ops, &mut stream, m, n, &basev);
+            let product = if transposed {
+                ops::matmul(&ops, &stream, &a, &b, 1.0).unwrap()
+            } else {
+                ops::matmul_nn(&ops, &stream, &a, &b, 1.0).unwrap()
+            };
+            for scale in [-0.55, 0.0, 0.5, 1.0, 1.1] {
+                let reference = ops::add_scaled(&ops, &stream, &base, &product, scale).unwrap();
+                let fused =
+                    ops::matmul_add(&ops, &stream, &a, &b, &base, scale, transposed).unwrap();
+                let got = fused.download(&mut stream).unwrap();
+                assert_eq!(
+                    got,
+                    reference.download(&mut stream).unwrap(),
+                    "{m}x{n}x{k}, transposed={transposed}, scale={scale}"
+                );
+                if m < 100 {
+                    // Independent FP64 dot product; explicitly model the two BF16 roundings.
+                    let expected = (0..m * n)
+                        .map(|index| {
+                            let (row, col) = (index / n, index % n);
+                            let sum: f64 = (0..k)
+                                .map(|j| {
+                                    f64::from(av[row * k + j])
+                                        * f64::from(
+                                            bv[if transposed {
+                                                col * k + j
+                                            } else {
+                                                j * n + col
+                                            }],
+                                        )
+                                })
+                                .sum();
+                            let product = to_f32(from_f32(sum as f32));
+                            to_f32(from_f32(basev[index] + scale * product))
+                        })
+                        .collect::<Vec<_>>();
+                    close(
+                        &got.into_iter().map(to_f32).collect::<Vec<_>>(),
+                        &expected,
+                        0.005,
+                        1e-5,
+                    );
+                }
+            }
+            assert!(
+                ops::matmul_add(&ops, &stream, &a, &b, &base, f32::NAN, transposed).is_err()
+            );
+            let bad_base = base.view(1, 1, 0).unwrap();
+            assert!(
+                ops::matmul_add(&ops, &stream, &a, &b, &bad_base, 1.0, transposed).is_err()
+            );
+            assert_eq!(read(&base, &mut stream), basev);
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn lora_backward_and_adam_match_independent_dense_algebra() {
     let mut stream = Stream::open().unwrap();

@@ -356,7 +356,18 @@ fn projections(c: &mut Criterion) {
 }
 
 fn cached_projections(c: &mut Criterion) {
-    let mut group = c.benchmark_group("training/projection_cached");
+    projection_comparison(c, false, 32);
+    projection_comparison(c, true, 32);
+    projection_comparison(c, true, 64);
+}
+
+fn projection_comparison(c: &mut Criterion, fused: bool, rank: usize) {
+    let name = match (fused, rank) {
+        (false, _) => "training/projection_cached",
+        (true, 32) => "training/projection_fused",
+        (true, _) => "training/projection_fused_rank64",
+    };
+    let mut group = c.benchmark_group(name);
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
     for (tokens, inputs, outputs) in [
         (1043, 6144, 6144),
@@ -377,12 +388,12 @@ fn cached_projections(c: &mut Criterion) {
                     &ops,
                     &mut stream,
                     &Factors {
-                        rank: 32,
+                        rank,
                         inputs,
                         outputs,
-                        alpha: 32.0,
-                        a: vec![0.01; 32 * inputs],
-                        b: vec![0.01; outputs * 32],
+                        alpha: rank as f32,
+                        a: vec![0.01; rank * inputs],
+                        b: vec![0.01; outputs * rank],
                     },
                 )
                 .unwrap();
@@ -399,6 +410,17 @@ fn cached_projections(c: &mut Criterion) {
                 let (y, g) = if candidate {
                     let (y, low) = p.forward_cached(ops, stream, x, base, 1.0).unwrap();
                     let g = p.backward_cached(ops, stream, x, grad, dx, &low).unwrap();
+                    (y, g)
+                } else if fused {
+                    let low = train::matmul(ops, stream, x, &p.a.value, 1.0).unwrap();
+                    let delta = train::matmul(ops, stream, &low, &p.b.value, 1.0).unwrap();
+                    let y = train::add_scaled(ops, stream, base, &delta, 1.0).unwrap();
+                    train::matmul_tn_accumulate(ops, stream, grad, &low, &p.b.grad, 1.0)
+                        .unwrap();
+                    let dl = train::matmul_nn(ops, stream, grad, &p.b.value, 1.0).unwrap();
+                    train::matmul_tn_accumulate(ops, stream, &dl, x, &p.a.grad, 1.0).unwrap();
+                    let branch = train::matmul_nn(ops, stream, &dl, &p.a.value, 1.0).unwrap();
+                    let g = train::add_scaled(ops, stream, dx, &branch, 1.0).unwrap();
                     (y, g)
                 } else {
                     let y = p.forward(ops, stream, x, base, 1.0).unwrap();
