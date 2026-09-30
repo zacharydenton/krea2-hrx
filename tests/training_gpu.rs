@@ -60,6 +60,7 @@ fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
         (1043, 64, 128),
         (1070, 64, 192),
         (4115, 64, 64),
+        (4115, 128, 192),
         (513, 65, 63),
     ] {
         let a = values(m * k, 3);

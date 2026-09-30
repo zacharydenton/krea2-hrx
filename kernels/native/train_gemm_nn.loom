@@ -55,17 +55,20 @@ kernel.def target(@target) export("krea2_train_gemm_nn") @krea2_train_gemm_nn(%c
  %mtiles1 = index.sub %mtiles0, %c1 : index
  %mtiles = index.div %mtiles1, %c128 : index
  %batch = index.div %gy, %mtiles : index
- // Raster four row tiles together to reuse each frozen-weight tile.
+ // Use adjacent column tiles for long reductions to reuse gradient rows.
+ // Keep four-row weight reuse when output width is at least the reduction size.
+ %long_reduction = index.cmp ugt, %k, %n : index
+ %raster = scf.select %long_reduction, %c1, %c4 : index
  %linear_m = index.rem %gy, %mtiles : index
  %ntiles = index.div %n, %c64 : index
  %flat0 = index.mul %linear_m, %ntiles : index
  %flat = index.add %flat0, %gx : index
- %group_size = index.mul %ntiles, %c4 : index
+ %group_size = index.mul %ntiles, %raster : index
  %group_id = index.div %flat, %group_size : index
- %first_m = index.mul %group_id, %c4 : index
+ %first_m = index.mul %group_id, %raster : index
  %remaining_m = index.sub %mtiles, %first_m : index
- %short_group = index.cmp ult, %remaining_m, %c4 : index
- %group_rows0 = scf.select %short_group, %remaining_m, %c4 : index
+ %short_group = index.cmp ult, %remaining_m, %raster : index
+ %group_rows0 = scf.select %short_group, %remaining_m, %raster : index
  %group_rows = index.assume %group_rows0 [range(%group_rows0, 1, 4)] : index
  %position = index.rem %flat, %group_size : index
  %group_three = index.constant 3 : index

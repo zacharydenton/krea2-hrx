@@ -25,10 +25,13 @@ fn dense(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/dense");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
     for (m, n, k) in [
+        (1043, 6144, 1536),
+        (1043, 1536, 6144),
         (1043usize, 6144usize, 6144usize),
         (1043, 16384, 6144),
         (1043, 6144, 16384),
         (4115, 6144, 16384),
+        (4115, 16384, 6144),
     ] {
         for (name, tile_m, tile_n) in [
             ("gemm_bf16_bf16_nt", 64usize, 64usize),

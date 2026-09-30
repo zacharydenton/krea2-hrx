@@ -163,6 +163,7 @@ fn training_dense_tiles_compile_without_spills() {
             (1043, 16384, 6144),
             (1043, 6144, 16384),
             (4115, 16384, 6144),
+            (4115, 6144, 16384),
         ] {
             let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
             for (key, value) in [
