@@ -171,6 +171,9 @@ Forward sigmoid/SiLU gates fuse activation with multiplication, retaining the
 rounded activation for backward. Residual gates fuse broadcast multiplication
 and addition while preserving the product's BF16 rounding. Both paths use
 four-element vector loads, with scalar-operation fallbacks for ragged extents.
+Backward gates also process four BF16 elements per thread when the element count
+is divisible by four. Ragged counts retain the single-dispatch scalar kernel;
+both variants preserve the product rounding and recompute the FP32 derivative.
 
 Both main-block and auxiliary tapes retain each adapter's rank-sized forward
 activation for its parameter gradient, avoiding a duplicate input projection in
@@ -255,6 +258,9 @@ and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.
 including the normalized intermediate's BF16 rounding.
 `training/forward_gates` pairs fused sigmoid, SiLU and residual gate sequences
 with their separate operations, including retention of the cached activations.
+`training/gated_backward_packed` pairs scalar and vectorized backward kernels,
+checks exact BF16 agreement, and exports Details-mode compiler reports through
+`KREA2_BENCH_REPORT_DIR`.
 `training/projection_fused` and `training/projection_fused_rank64` pair complete
 adapter forward/backward passes against separate matrix products and additions,
 with cached forward activations on both sides. Parameter-gradient accumulation

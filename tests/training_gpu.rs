@@ -274,7 +274,18 @@ fn gated_backward_preserves_product_rounding_and_matches_chain_rule() {
     use krea2::ops::Binary;
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
-    for (rows, cols) in [(1, 1), (1, 31), (1, 255), (1, 256), (1, 257), (3, 6144)] {
+    for (rows, cols) in [
+        (1, 1),
+        (1, 4),
+        (1, 31),
+        (1, 255),
+        (1, 256),
+        (1, 257),
+        (1, 1028),
+        (3, 6144),
+        (1043, 6144),
+        (4115, 16384),
+    ] {
         let size = rows * cols;
         let x: Vec<_> = values(size, 3).into_iter().map(|v| v * 32.0).collect();
         // Supply an independent cached activation so recomputing it would fail.

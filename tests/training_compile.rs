@@ -32,6 +32,7 @@ fn training_kernels_compile_without_a_device() {
             ("parts", 1),
             ("reverse", 1),
             ("sigmoid", 0),
+            ("packed", 0),
         ] {
             request.set_config(format!("krea2.{name}.{key}"), value.to_string());
         }
@@ -43,6 +44,16 @@ fn training_kernels_compile_without_a_device() {
         if matches!(name, "train_gated_backward" | "train_gated_forward") {
             request.set_config(format!("krea2.{name}.sigmoid"), "1");
             compiler.module(source).compile(&request).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        if name == "train_gated_backward" {
+            request.set_config("krea2.train_gated_backward.packed", "1");
+            for sigmoid in ["0", "1"] {
+                request.set_config("krea2.train_gated_backward.sigmoid", sigmoid);
+                compiler
+                    .module(source)
+                    .compile(&request)
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
         }
     }
 }

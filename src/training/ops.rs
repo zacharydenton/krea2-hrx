@@ -801,12 +801,14 @@ pub fn gated_backward(
     }
     let dx = ops.tensor(stream, x.rows(), x.cols())?;
     let dv = ops.tensor(stream, x.rows(), x.cols())?;
-    // SAFETY: matching BF16 matrices and two distinct, fully written outputs.
+    let packed = x.size().is_multiple_of(4);
+    // SAFETY: matching BF16 matrices and distinct outputs. Packed mode handles four
+    // elements per thread only when the element count is divisible by four.
     unsafe {
-        ops.launch_1d(
+        ops.launch(
             stream,
             "train_gated_backward",
-            config(&[("sigmoid", usize::from(sigmoid))]),
+            config(&[("sigmoid", usize::from(sigmoid)), ("packed", usize::from(packed))]),
             &Scalars::new().index(x.size()),
             &[
                 x.binding()?,
@@ -816,7 +818,9 @@ pub fn gated_backward(
                 dx.binding()?,
                 dv.binding()?,
             ],
-            x.size(),
+            x.size().div_ceil(if packed { 1024 } else { 256 }),
+            1,
+            256,
         )?;
     }
     Ok((dx, dv))

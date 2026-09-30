@@ -1,6 +1,8 @@
 // Reverse grad * (activation(x) * value), retaining the cached activation and
 // the BF16 rounding boundary between the product and activation derivative.
+// Packed mode handles four elements per thread; scalar mode supports ragged sizes.
 amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_gated_backward.packed : %value: index where [range(%value, 0, 1)]
 config.decl @krea2.train_gated_backward.sigmoid : %value: index where [range(%value, 0, 1)]
 config.decl @krea2.train_gated_backward.grid_x : %value: index where [range(%value, 1, 1073741824)]
 config.decl @krea2.train_gated_backward.grid_y : %value: index where [range(%value, 1, 1073741824)]
@@ -16,9 +18,17 @@ kernel.def target(@target) export("krea2_train_gated_backward") @krea2_train_gat
   %n = index.assume %count [range(%count, 1, 1073741824)] : index
   %lane = kernel.workitem.id<x> : index
   %group = kernel.workgroup.id<x> : index
-  %step = index.constant 256 : index
+  %c1 = index.constant 1 : index
+  %c4 = index.constant 4 : index
+  %c256 = index.constant 256 : index
+  %c1024 = index.constant 1024 : index
+  %mode_packed = config.get @krea2.train_gated_backward.packed : index
+  %packed = index.cmp ne, %mode_packed, %zero : index
+  %step = scf.select %packed, %c1024, %c256 : index
+  %width = scf.select %packed, %c4, %c1 : index
   %base = index.mul %group, %step : index
-  %idx = index.add %base, %lane : index
+  %local = index.mul %lane, %width : index
+  %idx = index.add %base, %local : index
   %mode = config.get @krea2.train_gated_backward.sigmoid : index
   %sigmoid = index.cmp ne, %mode, %zero : index
   %xg = buffer.assume.memory_space<global> %x : buffer
@@ -35,34 +45,67 @@ kernel.def target(@target) export("krea2_train_gated_backward") @krea2_train_gat
   %dvv = buffer.view %dvg[%offset] : buffer -> view<[%n]xbf16>
   %ok = index.cmp ult, %idx, %n : index
   scf.if %ok {
-    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
-    %xb = view.load %xv[%i] : view<[%n]xbf16> -> bf16
-    %xf = scalar.extf %xb : bf16 to f32
-    %ab = view.load %av[%i] : view<[%n]xbf16> -> bf16
-    %af = scalar.extf %ab : bf16 to f32
-    %vb = view.load %vv[%i] : view<[%n]xbf16> -> bf16
-    %vf = scalar.extf %vb : bf16 to f32
-    %gb = view.load %gv[%i] : view<[%n]xbf16> -> bf16
-    %gf = scalar.extf %gb : bf16 to f32
-    %product = scalar.mulf %gf, %vf : f32
-    %product_bf16 = scalar.fptrunc %product : f32 to bf16
-    %incoming = scalar.extf %product_bf16 : bf16 to f32
-    %one = scalar.constant 1.0 : f32
-    %negative = scalar.negf %xf : f32
-    %exp = scalar.expf<afn> %negative : f32
-    %denom = scalar.addf %one, %exp : f32
-    %sig = scalar.divf %one, %denom : f32
-    %complement = scalar.subf %one, %sig : f32
-    %sig_derivative = scalar.mulf %sig, %complement : f32
-    %term = scalar.mulf %xf, %sig_derivative : f32
-    %silu_derivative = scalar.addf %sig, %term : f32
-    %derivative = scf.select %sigmoid, %sig_derivative, %silu_derivative : f32
-    %dx_f32 = scalar.mulf %incoming, %derivative : f32
-    %dx_bf16 = scalar.fptrunc %dx_f32 : f32 to bf16
-    %dv_f32 = scalar.mulf %gf, %af : f32
-    %dv_bf16 = scalar.fptrunc %dv_f32 : f32 to bf16
-    view.store %dx_bf16, %dxv[%i] : bf16, view<[%n]xbf16>
-    view.store %dv_bf16, %dvv[%i] : bf16, view<[%n]xbf16>
+    scf.if %packed {
+      %limit = index.sub %n, %c4 : index
+      %i = index.assume %idx [range(%idx, 0, 1073741823), le(%idx, %limit), mul(%idx, 4)] : index
+      %xb = vector.load %xv[%i] : view<[%n]xbf16> -> vector<4xbf16>
+      %xf = vector.extf %xb : vector<4xbf16> to vector<4xf32>
+      %ab = vector.load %av[%i] : view<[%n]xbf16> -> vector<4xbf16>
+      %af = vector.extf %ab : vector<4xbf16> to vector<4xf32>
+      %vb = vector.load %vv[%i] : view<[%n]xbf16> -> vector<4xbf16>
+      %vf = vector.extf %vb : vector<4xbf16> to vector<4xf32>
+      %gb = vector.load %gv[%i] : view<[%n]xbf16> -> vector<4xbf16>
+      %gf = vector.extf %gb : vector<4xbf16> to vector<4xf32>
+      %product = vector.mulf %gf, %vf : vector<4xf32>
+      %product_bf16 = vector.fptrunc %product : vector<4xf32> to vector<4xbf16>
+      %incoming = vector.extf %product_bf16 : vector<4xbf16> to vector<4xf32>
+      %one = vector.constant 1.0 : vector<4xf32>
+      %fzero = vector.constant 0.0 : vector<4xf32>
+      %negative = vector.subf %fzero, %xf : vector<4xf32>
+      %exp = vector.expf<afn> %negative : vector<4xf32>
+      %denom = vector.addf %one, %exp : vector<4xf32>
+      %sig = vector.divf %one, %denom : vector<4xf32>
+      %complement = vector.subf %one, %sig : vector<4xf32>
+      %sig_derivative = vector.mulf %sig, %complement : vector<4xf32>
+      %term = vector.mulf %xf, %sig_derivative : vector<4xf32>
+      %silu_derivative = vector.addf %sig, %term : vector<4xf32>
+      %derivative = scf.select %sigmoid, %sig_derivative, %silu_derivative : vector<4xf32>
+      %dx_f32 = vector.mulf %incoming, %derivative : vector<4xf32>
+      %dx_bf16 = vector.fptrunc %dx_f32 : vector<4xf32> to vector<4xbf16>
+      %dv_f32 = vector.mulf %gf, %af : vector<4xf32>
+      %dv_bf16 = vector.fptrunc %dv_f32 : vector<4xf32> to vector<4xbf16>
+      vector.store %dx_bf16, %dxv[%i] : vector<4xbf16>, view<[%n]xbf16>
+      vector.store %dv_bf16, %dvv[%i] : vector<4xbf16>, view<[%n]xbf16>
+    } else {
+      %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+      %xb = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+      %xf = scalar.extf %xb : bf16 to f32
+      %ab = view.load %av[%i] : view<[%n]xbf16> -> bf16
+      %af = scalar.extf %ab : bf16 to f32
+      %vb = view.load %vv[%i] : view<[%n]xbf16> -> bf16
+      %vf = scalar.extf %vb : bf16 to f32
+      %gb = view.load %gv[%i] : view<[%n]xbf16> -> bf16
+      %gf = scalar.extf %gb : bf16 to f32
+      %product = scalar.mulf %gf, %vf : f32
+      %product_bf16 = scalar.fptrunc %product : f32 to bf16
+      %incoming = scalar.extf %product_bf16 : bf16 to f32
+      %one = scalar.constant 1.0 : f32
+      %negative = scalar.negf %xf : f32
+      %exp = scalar.expf<afn> %negative : f32
+      %denom = scalar.addf %one, %exp : f32
+      %sig = scalar.divf %one, %denom : f32
+      %complement = scalar.subf %one, %sig : f32
+      %sig_derivative = scalar.mulf %sig, %complement : f32
+      %term = scalar.mulf %xf, %sig_derivative : f32
+      %silu_derivative = scalar.addf %sig, %term : f32
+      %derivative = scf.select %sigmoid, %sig_derivative, %silu_derivative : f32
+      %dx_f32 = scalar.mulf %incoming, %derivative : f32
+      %dx_bf16 = scalar.fptrunc %dx_f32 : f32 to bf16
+      %dv_f32 = scalar.mulf %gf, %af : f32
+      %dv_bf16 = scalar.fptrunc %dv_f32 : f32 to bf16
+      view.store %dx_bf16, %dxv[%i] : bf16, view<[%n]xbf16>
+      view.store %dv_bf16, %dvv[%i] : bf16, view<[%n]xbf16>
+    }
   }
   kernel.return
 }

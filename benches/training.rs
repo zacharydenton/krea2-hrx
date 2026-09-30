@@ -706,6 +706,105 @@ fn gated_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn gated_backward_packed(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/gated_backward_packed");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    let name = "train_gated_backward";
+    for (tokens, width, sigmoid) in
+        [(1043, 6144, true), (1043, 16384, false), (4115, 6144, true), (4115, 16384, false)]
+    {
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let mode = if sigmoid { "sigmoid" } else { "silu" };
+        let label = format!("{mode}/{tokens}x{width}");
+        group.bench_function(&label, |b| {
+            let (stream, inputs, outputs, variants) = prepared.get_or_insert_with(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let inputs = std::array::from_fn::<_, 4, _>(|_| {
+                    tensor(&ops, &mut stream, tokens, width)
+                });
+                let outputs = std::array::from_fn::<_, 2, _>(|_| {
+                    ops.tensor(&stream, tokens, width).unwrap()
+                });
+                let compiler = krea2::kernels::compiler(None).unwrap();
+                let source = kernel_source(name);
+                let variants = std::array::from_fn::<_, 2, _>(|packed| {
+                    let grid = [
+                        (tokens * width).div_ceil(if packed == 1 { 1024 } else { 256 }) as u32,
+                        1,
+                        1,
+                    ];
+                    let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+                    for (key, value) in [
+                        ("grid_x", grid[0] as usize),
+                        ("grid_y", 1),
+                        ("sigmoid", usize::from(sigmoid)),
+                        ("packed", packed),
+                    ] {
+                        request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+                    }
+                    request.set_report(hrx::loom::ReportMode::Details);
+                    let artifact = compiler.module(&source).compile(&request).unwrap();
+                    if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                        let directory = std::path::PathBuf::from(directory);
+                        std::fs::create_dir_all(&directory).unwrap();
+                        std::fs::write(
+                            directory
+                                .join(format!("gated-backward-{tokens}x{width}-{packed}.json")),
+                            artifact.report().unwrap().json().to_string(),
+                        )
+                        .unwrap();
+                    }
+                    // SAFETY: this source implements the gate ABI with six matching BF16 matrices.
+                    let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
+                    let constants = krea2::kernels::Scalars::new()
+                        .index(tokens * width)
+                        .pack(name, &kernel)
+                        .unwrap();
+                    (kernel, constants, grid)
+                });
+                (stream, inputs, outputs, variants)
+            });
+            let dispatch = |stream: &mut Stream, candidate: bool| {
+                let (kernel, constants, grid) = &variants[usize::from(candidate)];
+                // SAFETY: all matrices match, packed extents are divisible by four,
+                // and each variant uses its own matching launch geometry.
+                unsafe {
+                    stream
+                        .dispatch(
+                            kernel,
+                            *grid,
+                            [256, 1, 1],
+                            constants,
+                            &[
+                                inputs[0].binding().unwrap(),
+                                inputs[1].binding().unwrap(),
+                                inputs[2].binding().unwrap(),
+                                inputs[3].binding().unwrap(),
+                                outputs[0].binding().unwrap(),
+                                outputs[1].binding().unwrap(),
+                            ],
+                        )
+                        .unwrap();
+                }
+                stream.synchronize().unwrap();
+            };
+            dispatch(stream, false);
+            let reference = outputs.each_ref().map(|t| t.download(stream).unwrap());
+            dispatch(stream, true);
+            for (output, reference) in outputs.iter().zip(reference) {
+                assert!(output.download(stream).unwrap() == reference, "packed gate parity");
+            }
+            b.iter_custom(|iterations| {
+                paired.measure(iterations, |candidate| dispatch(stream, candidate))
+            });
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 fn modulation_backward(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/modulation_backward");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -1276,6 +1375,7 @@ criterion_group!(
     fusion_attention,
     frozen_backward,
     gated_backward,
+    gated_backward_packed,
     forward_gates,
     modulation_backward,
     norm_backward,
