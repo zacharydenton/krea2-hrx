@@ -761,6 +761,113 @@ fn modulated_norm_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn rope_norm_backward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/rope_norm_backward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (tokens, heads) in [(1usize, 1usize), (1043, 48), (1043, 12), (4115, 48), (4115, 12)] {
+        let cols = heads * 128;
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let label = format!("{tokens}x{heads}x128");
+        group.bench_function(&label, |b| {
+            let (stream, ops, x, grad, scale, cos, sin) = prepared.get_or_insert_with(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let x = tensor(&ops, &mut stream, tokens, cols);
+                let grad = tensor(&ops, &mut stream, tokens, cols);
+                let weights: Vec<_> = (0..128).map(|i| i as f32 * 0.001).collect();
+                let scale =
+                    train::FloatTensor::from_slice(&mut stream, 1, 128, &weights).unwrap();
+                let angles: Vec<_> =
+                    (0..tokens * 128).map(|i| (i / 2) as f32 * 0.137).collect();
+                let cos = train::FloatTensor::from_slice(
+                    &mut stream,
+                    tokens,
+                    128,
+                    &angles.iter().map(|a| a.cos()).collect::<Vec<_>>(),
+                )
+                .unwrap();
+                let sin = train::FloatTensor::from_slice(
+                    &mut stream,
+                    tokens,
+                    128,
+                    &angles.iter().map(|a| a.sin()).collect::<Vec<_>>(),
+                )
+                .unwrap();
+                if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                    let name = "train_rope_norm_backward";
+                    let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+                    for (key, value) in [
+                        ("cols", 128),
+                        ("size", tokens * cols),
+                        ("heads", heads),
+                        ("tables", tokens * 128),
+                        ("grid_x", tokens * heads),
+                        ("grid_y", 1),
+                    ] {
+                        request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+                    }
+                    request.set_report(hrx::loom::ReportMode::Details);
+                    let artifact = krea2::kernels::compiler(None)
+                        .unwrap()
+                        .module(krea2::kernels::sources::auxiliary(name).unwrap())
+                        .compile(&request)
+                        .unwrap();
+                    std::fs::create_dir_all(&directory).unwrap();
+                    std::fs::write(
+                        Path::new(&directory).join(format!("{name}-{label}-compiler.json")),
+                        artifact.report().unwrap().json().to_string(),
+                    )
+                    .unwrap();
+                }
+                (stream, ops, x, grad, scale, cos, sin)
+            });
+            let run = |stream: &Stream, candidate| {
+                if candidate {
+                    train::rope_norm_backward(
+                        ops,
+                        stream,
+                        x,
+                        grad,
+                        scale.binding(),
+                        cos,
+                        sin,
+                        1e-5,
+                    )
+                    .unwrap()
+                } else {
+                    let rotary = train::rope(ops, stream, grad, cos, sin, true).unwrap();
+                    train::norm_backward(
+                        ops,
+                        stream,
+                        &x.view(tokens * heads, 128, 0).unwrap(),
+                        &rotary.view(tokens * heads, 128, 0).unwrap(),
+                        scale.binding(),
+                        1e-5,
+                    )
+                    .unwrap()
+                }
+            };
+            let reference = run(stream, false);
+            let candidate = run(stream, true);
+            stream.synchronize().unwrap();
+            b.iter_custom(|iterations| {
+                paired.measure(iterations, |candidate| {
+                    let result = run(stream, candidate);
+                    stream.synchronize().unwrap();
+                    black_box(result);
+                })
+            });
+            assert_eq!(
+                reference.download(stream).unwrap(),
+                candidate.download(stream).unwrap()
+            );
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 fn adamw(c: &mut Criterion) {
     let mut prepared = None;
     c.bench_function("training/adamw/rank32x16384", |b| {
@@ -898,6 +1005,7 @@ criterion_group!(
     modulation_backward,
     norm_backward,
     modulated_norm_backward,
+    rope_norm_backward,
     adamw,
     optimizer_update,
     full_step

@@ -317,18 +317,6 @@ impl Transformer {
         ops.norm(stream, x, self.weights.get(name)?, Norm::OnePlusScale, 1e-5)
     }
 
-    fn norm_backward(
-        &self,
-        ops: &Ops,
-        stream: &mut Stream,
-        x: &Tensor,
-        grad: &Tensor,
-        name: &str,
-    ) -> Result<Tensor> {
-        let scale = self.weights.get(name)?.f32_values(stream)?;
-        train::norm_backward(ops, stream, x, grad, scale, 1e-5)
-    }
-
     /// Forward one block, retaining the activations needed for its reverse pass.
     #[allow(clippy::too_many_arguments)]
     pub fn block(
@@ -508,27 +496,12 @@ impl Transformer {
         )?;
         let (gq, gk, gv) =
             train::attention_backward(ops, stream, &t.q, &t.k, &t.v, &t.attention, &gat)?;
-        let gq = train::rope(ops, stream, &gq, cos, sin, true)?;
-        let gk = train::rope(ops, stream, &gk, cos, sin, true)?;
-        let tokens = grad.rows();
-        let gq = self
-            .norm_backward(
-                ops,
-                stream,
-                &t.q0.view(tokens * 48, 128, 0)?,
-                &gq.view(tokens * 48, 128, 0)?,
-                &format!("{p}.attn.qknorm.qnorm.scale"),
-            )?
-            .view(tokens, 6144, 0)?;
-        let gk = self
-            .norm_backward(
-                ops,
-                stream,
-                &t.k0.view(tokens * 12, 128, 0)?,
-                &gk.view(tokens * 12, 128, 0)?,
-                &format!("{p}.attn.qknorm.knorm.scale"),
-            )?
-            .view(tokens, 1536, 0)?;
+        let qscale =
+            self.weights.get(&format!("{p}.attn.qknorm.qnorm.scale"))?.f32_values(stream)?;
+        let gq = train::rope_norm_backward(ops, stream, &t.q0, &gq, qscale, cos, sin, 1e-5)?;
+        let kscale =
+            self.weights.get(&format!("{p}.attn.qknorm.knorm.scale"))?.f32_values(stream)?;
+        let gk = train::rope_norm_backward(ops, stream, &t.k0, &gk, kscale, cos, sin, 1e-5)?;
         let mut pre_grad =
             self.linear_backward(ops, stream, &t.pre, &gq, &format!("{p}.attn.wq"))?;
         for (name, g) in [("wk", &gk), ("wv", &gv), ("gate", &gg)] {

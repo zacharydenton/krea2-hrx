@@ -695,6 +695,106 @@ fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
 }
 
 #[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn fused_rotary_norm_backward_preserves_rounding_and_matches_cpu() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (tokens, heads) in [(1, 1), (3, 2), (5, 12), (3, 48)] {
+        let cols = heads * 128;
+        let x = values(tokens * cols, 4);
+        let grad = values(tokens * cols, 9);
+        let weights: Vec<_> = (0..128).map(|i| (i as f32 - 64.0) * 0.0031).collect();
+        // Token- and pair-dependent angles catch table indexing across heads and quarters.
+        let angles: Vec<_> = (0..tokens * 128).map(|i| (i / 2) as f32 * 0.137).collect();
+        let cos: Vec<_> = angles.iter().map(|a| a.cos()).collect();
+        let sin: Vec<_> = angles.iter().map(|a| a.sin()).collect();
+        let xt = upload(&ops, &mut stream, tokens, cols, &x);
+        let gt = upload(&ops, &mut stream, tokens, cols, &grad);
+        let wt = FloatTensor::from_slice(&mut stream, 1, 128, &weights).unwrap();
+        let ct = FloatTensor::from_slice(&mut stream, tokens, 128, &cos).unwrap();
+        let st = FloatTensor::from_slice(&mut stream, tokens, 128, &sin).unwrap();
+        for eps in [1e-5, 1e-3] {
+            let result =
+                ops::rope_norm_backward(&ops, &stream, &xt, &gt, wt.binding(), &ct, &st, eps)
+                    .unwrap();
+            let rotary = ops::rope(&ops, &stream, &gt, &ct, &st, true).unwrap();
+            let reference = ops::norm_backward(
+                &ops,
+                &stream,
+                &xt.view(tokens * heads, 128, 0).unwrap(),
+                &rotary.view(tokens * heads, 128, 0).unwrap(),
+                wt.binding(),
+                eps,
+            )
+            .unwrap();
+            assert_eq!(
+                result.download(&mut stream).unwrap(),
+                reference.download(&mut stream).unwrap()
+            );
+            let mut expected = vec![0.0; tokens * cols];
+            for row in 0..tokens * heads {
+                let table = row / heads * 128;
+                let base = row * 128;
+                let xx = &x[base..base + 128];
+                let g: Vec<_> = (0..128)
+                    .map(|c| {
+                        let rotated = grad[base + (c ^ 1)]
+                            * sin[table + c]
+                            * if c % 2 == 0 { 1.0 } else { -1.0 };
+                        let rounded =
+                            to_f32(from_f32(grad[base + c] * cos[table + c] + rotated));
+                        f64::from(rounded * (1.0 + weights[c]))
+                    })
+                    .collect();
+                let variance = xx.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / 128.0
+                    + f64::from(eps);
+                let dot =
+                    xx.iter().zip(&g).map(|(x, g)| f64::from(*x) * g).sum::<f64>() / 128.0;
+                for c in 0..128 {
+                    expected[base + c] =
+                        ((g[c] - f64::from(xx[c]) * dot / variance) / variance.sqrt()) as f32;
+                }
+            }
+            close(&read(&result, &mut stream), &expected, 0.006, 1e-5);
+        }
+        for eps in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(
+                ops::rope_norm_backward(&ops, &stream, &xt, &gt, wt.binding(), &ct, &st, eps)
+                    .is_err()
+            );
+        }
+        let bad = upload(&ops, &mut stream, tokens, cols + 1, &vec![0.0; tokens * (cols + 1)]);
+        for (x, g) in [(&xt, &bad), (&bad, &bad)] {
+            assert!(
+                ops::rope_norm_backward(&ops, &stream, x, g, wt.binding(), &ct, &st, 1e-5)
+                    .is_err()
+            );
+        }
+        let bad_table =
+            FloatTensor::from_slice(&mut stream, tokens, 64, &vec![0.0; tokens * 64]).unwrap();
+        for (c, s) in [(&bad_table, &st), (&ct, &bad_table)] {
+            assert!(
+                ops::rope_norm_backward(&ops, &stream, &xt, &gt, wt.binding(), c, s, 1e-5)
+                    .is_err()
+            );
+        }
+        assert!(
+            ops::rope_norm_backward(
+                &ops,
+                &stream,
+                &xt,
+                &gt,
+                bad_table.binding(),
+                &ct,
+                &st,
+                1e-5
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
     for (tokens, heads, kv) in [

@@ -154,6 +154,9 @@ and the FP32 row summation order while avoiding two product tensors.
 The 128-channel Q/K RMSNorm reverse pass retains each lane's inputs and scaled
 gradients in registers across its reduction. Each row keeps its original
 summation and shuffle order. Other widths use the general two-pass kernel.
+The model combines inverse rotary and Q/K norm backward in one dispatch. Adjacent
+lanes exchange rotary partners and round the result to BF16 in registers before
+the norm derivative, avoiding the intermediate gradient matrix.
 The main-block norm reverse paths fuse broadcast modulation scaling and residual
 addition into the norm dispatch. BF16 rounding still occurs after adding one to
 the modulation, scaling the gradient, computing the norm gradient and adding the
@@ -223,6 +226,9 @@ per-row kernel, checks exact BF16 output agreement and exports both compiler
 reports through `KREA2_BENCH_REPORT_DIR`.
 `training/modulated_norm_backward` pairs the fused main-block path with its
 original four-operation sequence, including allocation and dispatch overhead.
+`training/rope_norm_backward` pairs fused inverse rotary and Q/K norm backward
+with the separate operations for both head counts. It checks exact BF16 agreement
+and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.
 
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,

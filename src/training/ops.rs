@@ -529,6 +529,59 @@ pub fn rope(
     Ok(out)
 }
 
+/// Inverse rotary followed by frozen Q/K RMSNorm backward, with BF16 rotary rounding.
+#[allow(clippy::too_many_arguments)]
+pub fn rope_norm_backward(
+    ops: &Ops,
+    stream: &Stream,
+    x: &Tensor,
+    grad: &Tensor,
+    scale: View<'_>,
+    cos: &FloatTensor,
+    sin: &FloatTensor,
+    eps: f32,
+) -> Result<Tensor> {
+    if !x.cols().is_multiple_of(128)
+        || (grad.rows(), grad.cols()) != (x.rows(), x.cols())
+        || scale.len() != 128 * 4
+        || (cos.rows, cos.cols) != (x.rows(), 128)
+        || (sin.rows, sin.cols) != (cos.rows, cos.cols)
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(Error::invalid("rotary norm backward dimensions"));
+    }
+    let heads = x.cols() / 128;
+    let rows = x.rows() * heads;
+    let out = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: one wave per 128-channel head, with matching matrices and rotary tables.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_rope_norm_backward",
+            config(&[
+                ("cols", 128),
+                ("size", x.size()),
+                ("heads", heads),
+                ("tables", cos.size()),
+            ]),
+            &Scalars::new().index(rows).float(eps),
+            &[
+                x.binding()?,
+                grad.binding()?,
+                scale,
+                cos.binding(),
+                sin.binding(),
+                out.binding()?,
+            ],
+            rows,
+            1,
+            32,
+        )?;
+    }
+    Ok(out)
+}
+
 /// Add one to a BF16 vector at the model's rounding boundary.
 pub fn one_plus(ops: &Ops, stream: &Stream, x: &Tensor) -> Result<Tensor> {
     let out = ops.tensor(stream, x.rows(), x.cols())?;
