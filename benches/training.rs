@@ -7,7 +7,11 @@ use krea2::{
     ops::{Ops, Tensor},
     training::{TrainConfig, Trainer, model::Projection, ops as train, optimizer},
 };
-use std::{hint::black_box, path::Path, time::Duration};
+use std::{
+    hint::black_box,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 fn kernel_source(name: &str) -> String {
     std::env::var_os("KREA2_BENCH_KERNEL_DIR")
@@ -33,10 +37,12 @@ fn dense(c: &mut Criterion) {
             ("train_gemm_nn", 128, 64),
         ] {
             let mut prepared = None;
+            let mut paired_totals = [Duration::ZERO; 2];
+            let mut pairs = 0u64;
             let label = format!("{name}/{m}x{n}x{k}");
             group.bench_function(&label, |b| {
-                let (stream, kernel, constants, a, w, out, grid) =
-                    prepared.get_or_insert_with(|| {
+                let (stream, kernel, constants, reference, a, w, out, grid) = prepared
+                    .get_or_insert_with(|| {
                         let mut stream = Stream::open().unwrap();
                         let ops = Ops::new(BufferPool::new());
                         let a = tensor(&ops, &mut stream, m, k);
@@ -75,6 +81,24 @@ fn dense(c: &mut Criterion) {
                             .float(1.0)
                             .pack(name, &kernel)
                             .unwrap();
+                        let reference =
+                            std::env::var_os("KREA2_BENCH_REFERENCE_DIR").map(|directory| {
+                                let source = std::fs::read_to_string(
+                                    Path::new(&directory).join(format!("{name}.loom")),
+                                )
+                                .unwrap();
+                                let artifact =
+                                    compiler.module(&source).compile(&request).unwrap();
+                                // SAFETY: the reference uses the same matrix ABI and tile geometry.
+                                let kernel =
+                                    unsafe { stream.load_artifact(&artifact).unwrap() };
+                                let constants = krea2::kernels::Scalars::new()
+                                    .index(m)
+                                    .float(1.0)
+                                    .pack(name, &kernel)
+                                    .unwrap();
+                                (kernel, constants)
+                            });
                         if let Some(directory) = reports {
                             let directory = std::path::PathBuf::from(directory);
                             std::fs::create_dir_all(&directory).unwrap();
@@ -113,9 +137,9 @@ fn dense(c: &mut Criterion) {
                                 .unwrap();
                             }
                         }
-                        (stream, kernel, constants, a, w, out, grid)
+                        (stream, kernel, constants, reference, a, w, out, grid)
                     });
-                b.iter(|| {
+                let mut dispatch = |kernel, constants| {
                     // SAFETY: bindings and constants are the same validated resident matrices as above.
                     unsafe {
                         stream
@@ -133,8 +157,40 @@ fn dense(c: &mut Criterion) {
                             .unwrap();
                     }
                     stream.synchronize().unwrap();
-                });
+                };
+                if let Some((reference, reference_constants)) = reference {
+                    b.iter_custom(|iterations| {
+                        let mut candidate_time = Duration::ZERO;
+                        for _ in 0..iterations {
+                            for side in [pairs as usize % 2, 1 - pairs as usize % 2] {
+                                let start = Instant::now();
+                                if side == 0 {
+                                    dispatch(reference, reference_constants);
+                                } else {
+                                    dispatch(kernel, constants);
+                                }
+                                let elapsed = start.elapsed();
+                                paired_totals[side] += elapsed;
+                                if side == 1 {
+                                    candidate_time += elapsed;
+                                }
+                            }
+                            pairs += 1;
+                        }
+                        candidate_time
+                    });
+                } else {
+                    b.iter(|| dispatch(kernel, constants));
+                }
             });
+            if pairs > 0 {
+                eprintln!(
+                    "paired {label}: reference {:.3} ms, candidate {:.3} ms, ratio {:.4} ({pairs} pairs, including warm-up)",
+                    paired_totals[0].as_secs_f64() * 1000.0 / pairs as f64,
+                    paired_totals[1].as_secs_f64() * 1000.0 / pairs as f64,
+                    paired_totals[1].as_secs_f64() / paired_totals[0].as_secs_f64(),
+                );
+            }
         }
     }
     group.finish();

@@ -186,6 +186,16 @@ Normal training continues to use the embedded kernels; keep candidate files and
 reports outside the checkout. The `training/adapter_gradient` cases measure
 direct FP32 parameter-gradient accumulation in both projection directions.
 
+For dense kernels, `KREA2_BENCH_REFERENCE_DIR` adds a reference source directory.
+Reference kernels must use the same names, binding ABI and launch tile geometry.
+Each iteration runs the reference and candidate on the same resident tensors,
+alternating their order. Criterion records candidate time; a paired summary
+reports both averages and their ratio across warm-up and measured iterations.
+The paired ratio is descriptive, without a confidence interval. Check identical
+sources and swap reference/candidate roles when investigating small differences.
+This helps compare kernels under changing GPU contention, but does not replace an
+uncontended end-to-end measurement.
+
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,
 allocation and queue backpressure, and do not measure kernel execution time.
