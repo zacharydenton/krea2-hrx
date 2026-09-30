@@ -134,6 +134,85 @@ fn modulated_norm_forward_preserves_rounding_and_matches_cpu() {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn forward_gates_preserve_rounding_and_match_cpu() {
+    use krea2::ops::{Binary, Unary};
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (rows, cols) in
+        [(1, 1), (1, 4), (7, 19), (7, 132), (1, 1028), (1043, 6144), (4115, 16384)]
+    {
+        let mut x = values(rows * cols, 2);
+        for (i, &v) in [0.0, -0.0, -80.0, -8.0, 8.0, 80.0].iter().enumerate().take(x.len()) {
+            x[i] = v;
+        }
+        let value = values(rows * cols, 7);
+        let residual = values(rows * cols, 11);
+        let modulation = values(cols, 13);
+        let xt = upload(&ops, &mut stream, rows, cols, &x);
+        let vt = upload(&ops, &mut stream, rows, cols, &value);
+        let rt = upload(&ops, &mut stream, rows, cols, &residual);
+        let mt = upload(&ops, &mut stream, 1, cols, &modulation);
+        for sigmoid in [false, true] {
+            let activation = ops
+                .unary(&stream, &xt, if sigmoid { Unary::Sigmoid } else { Unary::Silu })
+                .unwrap();
+            let product = ops.binary(&stream, &activation, &vt, Binary::Mul).unwrap();
+            let (cached, output) =
+                ops::gated_forward(&ops, &stream, &xt, &vt, sigmoid).unwrap();
+            assert!(
+                cached.download(&mut stream).unwrap()
+                    == activation.download(&mut stream).unwrap(),
+                "activation {rows}x{cols}, sigmoid={sigmoid}"
+            );
+            let actual = output.download(&mut stream).unwrap();
+            assert!(
+                actual == product.download(&mut stream).unwrap(),
+                "product {rows}x{cols}, sigmoid={sigmoid}"
+            );
+            if rows < 10 {
+                let expected: Vec<_> = x
+                    .iter()
+                    .zip(&value)
+                    .map(|(&x, &v)| {
+                        let a = if sigmoid { 1.0 } else { f64::from(x) }
+                            / (1.0 + (-f64::from(x)).exp());
+                        to_f32(from_f32(to_f32(from_f32(a as f32)) * v))
+                    })
+                    .collect();
+                close(
+                    &actual.into_iter().map(to_f32).collect::<Vec<_>>(),
+                    &expected,
+                    0.004,
+                    1e-6,
+                );
+            }
+        }
+        let product = ops.binary(&stream, &vt, &mt, Binary::Mul).unwrap();
+        let reference = ops.binary(&stream, &rt, &product, Binary::Add).unwrap();
+        let result = ops::residual_gate(&ops, &stream, &rt, &vt, &mt).unwrap();
+        let actual = result.download(&mut stream).unwrap();
+        assert!(actual == reference.download(&mut stream).unwrap(), "residual {rows}x{cols}");
+        let expected: Vec<_> = value
+            .iter()
+            .zip(&residual)
+            .enumerate()
+            .map(|(i, (&v, &r))| from_f32(r + to_f32(from_f32(v * modulation[i % cols]))))
+            .collect();
+        assert!(actual == expected);
+        if rows * cols > 1 {
+            let bad = xt.view(1, 1, 0).unwrap();
+            assert!(ops::gated_forward(&ops, &stream, &xt, &bad, true).is_err());
+            assert!(ops::residual_gate(&ops, &stream, &rt, &bad, &mt).is_err());
+        }
+        if cols > 1 {
+            let bad_mod = mt.view(1, 1, 0).unwrap();
+            assert!(ops::residual_gate(&ops, &stream, &rt, &vt, &bad_mod).is_err());
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn modulation_backward_matches_separate_reductions_and_preserves_other_rows() {
     use krea2::ops::Binary;
     let mut stream = Stream::open().unwrap();

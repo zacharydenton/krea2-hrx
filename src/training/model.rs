@@ -8,7 +8,7 @@ use super::ops::{self as train, FloatTensor};
 use crate::checkpoint::{Checkpoint, DType};
 use crate::lora::{Adapter, Factors, PROJECTIONS};
 use crate::models::Weights;
-use crate::ops::{Binary, Ops, Tensor, Unary, Weight};
+use crate::ops::{Binary, Ops, Tensor, Weight};
 use crate::{Error, Result};
 
 /// FP32 master parameter, gradient, Adam moments, and a BF16 execution copy.
@@ -391,7 +391,6 @@ impl Transformer {
         let (v, low2) = self.linear(ops, stream, &pre, &format!("{p}.attn.wv"), strength)?;
         let (gate0, low3) =
             self.linear(ops, stream, &pre, &format!("{p}.attn.gate"), strength)?;
-        let gate = ops.unary(stream, &gate0, Unary::Sigmoid)?;
         let q = train::norm_rope(
             ops,
             stream,
@@ -411,15 +410,11 @@ impl Transformer {
             1e-5,
         )?;
         let attention = train::attention(ops, stream, &q, &k, &v)?;
-        let attended = ops.binary(stream, &attention.output, &gate, Binary::Mul)?;
+        let (gate, attended) =
+            train::gated_forward(ops, stream, &gate0, &attention.output, true)?;
         let (projected, low4) =
             self.linear(ops, stream, &attended, &format!("{p}.attn.wo"), strength)?;
-        let residual = ops.binary(
-            stream,
-            x,
-            &ops.binary(stream, &projected, &row(2)?, Binary::Mul)?,
-            Binary::Add,
-        )?;
+        let residual = train::residual_gate(ops, stream, x, &projected, &row(2)?)?;
         let (norm2, post) = train::norm_modulated(
             ops,
             stream,
@@ -431,17 +426,11 @@ impl Transformer {
         )?;
         let (mlp_gate0, low5) =
             self.linear(ops, stream, &post, &format!("{p}.mlp.gate"), strength)?;
-        let mlp_gate = ops.unary(stream, &mlp_gate0, Unary::Silu)?;
         let (up, low6) = self.linear(ops, stream, &post, &format!("{p}.mlp.up"), strength)?;
-        let mixed = ops.binary(stream, &mlp_gate, &up, Binary::Mul)?;
+        let (mlp_gate, mixed) = train::gated_forward(ops, stream, &mlp_gate0, &up, false)?;
         let (down, low7) =
             self.linear(ops, stream, &mixed, &format!("{p}.mlp.down"), strength)?;
-        let output = ops.binary(
-            stream,
-            &residual,
-            &ops.binary(stream, &down, &row(5)?, Binary::Mul)?,
-            Binary::Add,
-        )?;
+        let output = train::residual_gate(ops, stream, &residual, &down, &row(5)?)?;
         Ok(BlockTape {
             adapter_lows: [low0, low1, low2, low3, low4, low5, low6, low7],
             input: x.clone(),

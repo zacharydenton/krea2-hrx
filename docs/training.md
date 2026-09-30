@@ -167,6 +167,10 @@ the original FP32 reduction tree and all intermediate BF16 roundings.
 Q/K forward normalization and rotary embedding also share one dispatch. Each
 wave keeps a 128-channel head in registers and exchanges rounded normalized
 values between adjacent lanes; backward retains the original Q/K inputs.
+Forward sigmoid/SiLU gates fuse activation with multiplication, retaining the
+rounded activation for backward. Residual gates fuse broadcast multiplication
+and addition while preserving the product's BF16 rounding. Both paths use
+four-element vector loads, with scalar-operation fallbacks for ragged extents.
 
 Both main-block and auxiliary tapes retain each adapter's rank-sized forward
 activation for its parameter gradient, avoiding a duplicate input projection in
@@ -249,6 +253,8 @@ with the separate operations for both head counts. It checks exact BF16 agreemen
 and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.
 `training/norm_rope_forward` does the same for forward normalization and rotary,
 including the normalized intermediate's BF16 rounding.
+`training/forward_gates` pairs fused sigmoid, SiLU and residual gate sequences
+with their separate operations, including retention of the cached activations.
 `training/projection_fused` and `training/projection_fused_rank64` pair complete
 adapter forward/backward passes against separate matrix products and additions,
 with cached forward activations on both sides. Parameter-gradient accumulation

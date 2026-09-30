@@ -1,0 +1,57 @@
+// Vectorized forward activation and product, retaining activation for backward.
+// Preserve the intermediate BF16 rounding before the final operation.
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_gated_forward.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gated_forward.grid_y : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gated_forward.sigmoid : %value: index where [range(%value, 0, 1)]
+kernel.def target(@target) export("krea2_train_gated_forward") @krea2_train_gated_forward(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 256 : index
+ %gx = config.get @krea2.train_gated_forward.grid_x : index
+ %gy = config.get @krea2.train_gated_forward.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %value: buffer, %activation: buffer, %out: buffer) {
+ %off = index.constant 0 : offset
+ %c4 = index.constant 4 : index
+ %step = index.constant 1024 : index
+ %n = index.assume %count [range(%count, 4, 1073741824), mul(%count, 4)] : index
+ %lane = kernel.workitem.id<x> : index
+ %group = kernel.workgroup.id<x> : index
+ %base = index.mul %group, %step : index
+ %local = index.mul %lane, %c4 : index
+ %at = index.add %base, %local : index
+ %xg = buffer.assume.memory_space<global> %x : buffer
+ %xv = buffer.view %xg[%off] : buffer -> view<[%n]xbf16>
+ %valueg = buffer.assume.memory_space<global> %value : buffer
+ %valuev = buffer.view %valueg[%off] : buffer -> view<[%n]xbf16>
+ %activationg = buffer.assume.memory_space<global> %activation : buffer
+ %activationv = buffer.view %activationg[%off] : buffer -> view<[%n]xbf16>
+ %outg = buffer.assume.memory_space<global> %out : buffer
+ %outv = buffer.view %outg[%off] : buffer -> view<[%n]xbf16>
+ %ok = index.cmp ult, %at, %n : index
+ scf.if %ok {
+ %limit = index.sub %n, %c4 : index
+ %i = index.assume %at [range(%at, 0, 1073741823), le(%at, %limit), mul(%at, 4)] : index
+ %vb = vector.load %valuev[%i] : view<[%n]xbf16> -> vector<4xbf16>
+ %vf = vector.extf %vb : vector<4xbf16> to vector<4xf32>
+ %xb = vector.load %xv[%i] : view<[%n]xbf16> -> vector<4xbf16>
+ %xf = vector.extf %xb : vector<4xbf16> to vector<4xf32>
+ %zero = vector.constant 0.0 : vector<4xf32>
+ %one = vector.constant 1.0 : vector<4xf32>
+ %negative = vector.subf %zero, %xf : vector<4xf32>
+ %exponential = vector.expf<afn> %negative : vector<4xf32>
+ %denominator = vector.addf %one, %exponential : vector<4xf32>
+ %mode = config.get @krea2.train_gated_forward.sigmoid : index
+ %izero = index.constant 0 : index
+ %sigmoid = index.cmp ne, %mode, %izero : index
+ %numerator = scf.select %sigmoid, %one, %xf : vector<4xf32>
+ %activated = vector.divf %numerator, %denominator : vector<4xf32>
+ %ab = vector.fptrunc %activated : vector<4xf32> to vector<4xbf16>
+ %af = vector.extf %ab : vector<4xbf16> to vector<4xf32>
+ %product = vector.mulf %af, %vf : vector<4xf32>
+ %output = vector.fptrunc %product : vector<4xf32> to vector<4xbf16>
+ vector.store %ab, %activationv[%i] : vector<4xbf16>, view<[%n]xbf16>
+ vector.store %output, %outv[%i] : vector<4xbf16>, view<[%n]xbf16>
+ }
+ kernel.return
+}

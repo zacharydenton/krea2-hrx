@@ -4,7 +4,7 @@ use std::sync::Arc;
 use hrx::{Buffer, PooledBuffer, Stream, View};
 
 use crate::kernels::Scalars;
-use crate::ops::{Ops, Tensor, Weight, config};
+use crate::ops::{Binary, Ops, Tensor, Unary, Weight, config};
 use crate::{Error, Result};
 
 #[derive(Default, serde::Serialize)]
@@ -710,6 +710,76 @@ pub fn activation_backward(
             &Scalars::new().index(x.size()),
             &[x.binding()?, grad.binding()?, out.binding()?],
             x.size(),
+        )?;
+    }
+    Ok(out)
+}
+
+/// SiLU/sigmoid times a value, returning the rounded activation and product.
+pub fn gated_forward(
+    ops: &Ops,
+    stream: &Stream,
+    x: &Tensor,
+    value: &Tensor,
+    sigmoid: bool,
+) -> Result<(Tensor, Tensor)> {
+    if (value.rows(), value.cols()) != (x.rows(), x.cols()) {
+        return Err(Error::invalid("gated forward dimensions"));
+    }
+    if !x.size().is_multiple_of(4) {
+        let activation =
+            ops.unary(stream, x, if sigmoid { Unary::Sigmoid } else { Unary::Silu })?;
+        let out = ops.binary(stream, &activation, value, Binary::Mul)?;
+        return Ok((activation, out));
+    }
+    let activation = ops.tensor(stream, x.rows(), x.cols())?;
+    let out = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: four BF16 elements per thread, matching matrix extents divisible by four.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_gated_forward",
+            config(&[("sigmoid", usize::from(sigmoid))]),
+            &Scalars::new().index(x.size()),
+            &[x.binding()?, value.binding()?, activation.binding()?, out.binding()?],
+            x.size().div_ceil(1024),
+            1,
+            256,
+        )?;
+    }
+    Ok((activation, out))
+}
+
+/// Broadcast a gate over a branch and add the residual, rounding the product first.
+pub fn residual_gate(
+    ops: &Ops,
+    stream: &Stream,
+    residual: &Tensor,
+    value: &Tensor,
+    modulation: &Tensor,
+) -> Result<Tensor> {
+    if (value.rows(), value.cols()) != (residual.rows(), residual.cols())
+        || (modulation.rows(), modulation.cols()) != (1, value.cols())
+    {
+        return Err(Error::invalid("residual gate dimensions"));
+    }
+    if !value.cols().is_multiple_of(4) {
+        let product = ops.binary(stream, value, modulation, Binary::Mul)?;
+        return ops.binary(stream, residual, &product, Binary::Add);
+    }
+    let out = ops.tensor(stream, value.rows(), value.cols())?;
+    // SAFETY: four contiguous elements per thread cannot cross a broadcast row;
+    // matrices match, with one modulation value per column and columns divisible by four.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_residual_gate",
+            config(&[("cols", value.cols())]),
+            &Scalars::new().index(value.size()),
+            &[residual.binding()?, value.binding()?, modulation.binding()?, out.binding()?],
+            value.size().div_ceil(1024),
+            1,
+            256,
         )?;
     }
     Ok(out)

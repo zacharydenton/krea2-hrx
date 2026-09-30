@@ -591,6 +591,76 @@ fn frozen_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn forward_gates(c: &mut Criterion) {
+    use krea2::ops::{Binary, Unary};
+    let mut group = c.benchmark_group("training/forward_gates");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for tokens in [1043, 4115] {
+        for mode in ["sigmoid", "silu", "residual"] {
+            let width = if mode == "silu" { 16384 } else { 6144 };
+            let mut prepared = None;
+            let mut paired = PairedTimings::default();
+            let label = format!("{mode}/{tokens}x{width}");
+            group.bench_function(&label, |b| {
+                let (stream, ops, x, value, modulation) = prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let x = tensor(&ops, &mut stream, tokens, width);
+                    let value = tensor(&ops, &mut stream, tokens, width);
+                    let modulation = tensor(&ops, &mut stream, 1, width);
+                    (stream, ops, x, value, modulation)
+                });
+                let run = |stream: &Stream, candidate| {
+                    if mode == "residual" {
+                        let output = if candidate {
+                            train::residual_gate(ops, stream, x, value, modulation).unwrap()
+                        } else {
+                            let product =
+                                ops.binary(stream, value, modulation, Binary::Mul).unwrap();
+                            ops.binary(stream, x, &product, Binary::Add).unwrap()
+                        };
+                        (output, None)
+                    } else {
+                        let (activation, output) = if candidate {
+                            train::gated_forward(ops, stream, x, value, mode == "sigmoid")
+                                .unwrap()
+                        } else {
+                            let activation = ops
+                                .unary(
+                                    stream,
+                                    x,
+                                    if mode == "sigmoid" {
+                                        Unary::Sigmoid
+                                    } else {
+                                        Unary::Silu
+                                    },
+                                )
+                                .unwrap();
+                            let output =
+                                ops.binary(stream, &activation, value, Binary::Mul).unwrap();
+                            (activation, output)
+                        };
+                        (output, Some(activation))
+                    }
+                };
+                // Warm compilation and both allocation paths before timing.
+                black_box(run(stream, false));
+                black_box(run(stream, true));
+                stream.synchronize().unwrap();
+                b.iter_custom(|iterations| {
+                    paired.measure(iterations, |candidate| {
+                        let result = run(stream, candidate);
+                        stream.synchronize().unwrap();
+                        black_box(result);
+                    })
+                });
+            });
+            paired.report(&label);
+        }
+    }
+    group.finish();
+}
+
 fn gated_backward(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/gated_backward");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -1206,6 +1276,7 @@ criterion_group!(
     fusion_attention,
     frozen_backward,
     gated_backward,
+    forward_gates,
     modulation_backward,
     norm_backward,
     modulated_norm_forward,
