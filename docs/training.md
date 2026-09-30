@@ -151,6 +151,9 @@ rounding of the intermediate product without materializing that temporary tensor
 With all adapter targets enabled, each modulation stage also fuses its scale,
 shift and residual-gate gradient reductions. It preserves BF16 product rounding
 and the FP32 row summation order while avoiding two product tensors.
+The 128-channel Q/K RMSNorm reverse pass retains each lane's inputs and scaled
+gradients in registers across its reduction. Each row keeps its original
+summation and shuffle order. Other widths use the general two-pass kernel.
 
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The
@@ -211,6 +214,9 @@ the fused gate derivative with the original three-operation sequence. Both use
 the same alternating-order timing and summary as the dense comparison.
 `training/modulation_backward` compares the fused modulation reduction with its
 original two products and three reductions using the same paired timing.
+`training/norm_backward` pairs the specialized Q/K kernel with the general
+per-row kernel, checks exact BF16 output agreement and exports both compiler
+reports through `KREA2_BENCH_REPORT_DIR`.
 
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,

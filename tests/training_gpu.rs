@@ -550,8 +550,9 @@ fn prepared_optimizer_matches_updates_and_rejects_nonfinite_gradients_atomically
 fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
-    for cols in [128, 6144] {
-        let rows = 3;
+    for (rows, cols) in
+        [(1, 128), (3, 128), (4, 128), (5, 128), (31, 128), (3, 127), (3, 129), (3, 6144)]
+    {
         let x = values(rows * cols, 4);
         let g = values(rows * cols, 9);
         let w = values(cols, 3);

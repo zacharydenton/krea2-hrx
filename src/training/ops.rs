@@ -627,11 +627,13 @@ pub fn norm_backward(
         return Err(Error::invalid("RMSNorm backward dimensions"));
     }
     let out = ops.tensor(stream, x.rows(), x.cols())?;
+    let kernel =
+        if x.cols() == 128 { "train_norm_backward_head" } else { "train_norm_backward" };
     // SAFETY: matching matrices and one scale per column; one wave owns each row.
     unsafe {
         ops.launch(
             stream,
-            "train_norm_backward",
+            kernel,
             config(&[("cols", x.cols()), ("size", x.size())]),
             &Scalars::new().index(x.rows()).float(eps),
             &[x.binding()?, grad.binding()?, scale, out.binding()?],

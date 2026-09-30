@@ -604,6 +604,107 @@ fn modulation_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn norm_backward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/norm_backward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for rows in [5usize, 1043 * 48, 1043 * 12, 4115 * 48, 4115 * 12] {
+        let cols = 128;
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let label = format!("{rows}x{cols}");
+        group.bench_function(&label, |b| {
+            let (stream, kernels, x, grad, scale, outputs) =
+                prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let x = tensor(&ops, &mut stream, rows, cols);
+                    let grad = tensor(&ops, &mut stream, rows, cols);
+                    let weights: Vec<_> = (0..cols).map(|i| (i % 113) as f32 * 0.001).collect();
+                    let scale =
+                        train::FloatTensor::from_slice(&mut stream, 1, cols, &weights).unwrap();
+                    let outputs = std::array::from_fn::<_, 2, _>(|_| {
+                        ops.tensor(&stream, rows, cols).unwrap()
+                    });
+                    let compiler = krea2::kernels::compiler(None).unwrap();
+                    let reports = std::env::var_os("KREA2_BENCH_REPORT_DIR");
+                    let mut kernels = Vec::new();
+                    for name in ["train_norm_backward", "train_norm_backward_head"] {
+                        let mut request =
+                            hrx::loom::Specialization::new(format!("krea2_{name}"));
+                        for (key, value) in [
+                            ("cols", cols),
+                            ("size", rows * cols),
+                            ("grid_x", rows),
+                            ("grid_y", 1),
+                        ] {
+                            request
+                                .set_config(format!("krea2.{name}.{key}"), value.to_string());
+                        }
+                        if reports.is_some() {
+                            request.set_report(hrx::loom::ReportMode::Details);
+                        }
+                        let source = if name == "train_norm_backward" {
+                            krea2::kernels::sources::auxiliary(name).unwrap().to_owned()
+                        } else {
+                            kernel_source(name)
+                        };
+                        let artifact = compiler.module(&source).compile(&request).unwrap();
+                        if let Some(directory) = &reports {
+                            std::fs::create_dir_all(directory).unwrap();
+                            std::fs::write(
+                                Path::new(directory)
+                                    .join(format!("{name}-{label}-compiler.json")),
+                                artifact.report().unwrap().json().to_string(),
+                            )
+                            .unwrap();
+                        }
+                        // SAFETY: both kernels have the norm ABI and one wave per row.
+                        let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
+                        let constants = krea2::kernels::Scalars::new()
+                            .index(rows)
+                            .float(1e-5)
+                            .pack(name, &kernel)
+                            .unwrap();
+                        kernels.push((kernel, constants));
+                    }
+                    (stream, kernels, x, grad, scale, outputs)
+                });
+            let mut dispatch = |candidate: bool| {
+                let side = usize::from(candidate);
+                let (kernel, constants) = &kernels[side];
+                // SAFETY: all bindings match the specialized extents and declared matrix ABI.
+                unsafe {
+                    stream
+                        .dispatch(
+                            kernel,
+                            [rows as u32, 1, 1],
+                            [32, 1, 1],
+                            constants,
+                            &[
+                                x.binding().unwrap(),
+                                grad.binding().unwrap(),
+                                scale.binding(),
+                                outputs[side].binding().unwrap(),
+                            ],
+                        )
+                        .unwrap();
+                }
+                stream.synchronize().unwrap();
+            };
+            dispatch(false);
+            dispatch(true);
+            b.iter_custom(|iterations| paired.measure(iterations, &mut dispatch));
+            assert_eq!(
+                outputs[0].download(stream).unwrap(),
+                outputs[1].download(stream).unwrap(),
+                "norm reference output: {label}"
+            );
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 fn adamw(c: &mut Criterion) {
     let mut prepared = None;
     c.bench_function("training/adamw/rank32x16384", |b| {
@@ -739,6 +840,7 @@ criterion_group!(
     frozen_backward,
     gated_backward,
     modulation_backward,
+    norm_backward,
     adamw,
     optimizer_update,
     full_step
