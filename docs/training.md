@@ -164,6 +164,9 @@ residual; the temporary vectors and matrices are not materialized.
 The main-block forward path also fuses RMSNorm, modulation scaling and shift.
 It retains the normalized BF16 values needed by modulation gradients, preserving
 the original FP32 reduction tree and all intermediate BF16 roundings.
+Q/K forward normalization and rotary embedding also share one dispatch. Each
+wave keeps a 128-channel head in registers and exchanges rounded normalized
+values between adjacent lanes; backward retains the original Q/K inputs.
 
 Both main-block and auxiliary tapes retain each adapter's rank-sized forward
 activation for its parameter gradient, avoiding a duplicate input projection in
@@ -244,6 +247,8 @@ the separate forward operations and checks both outputs for exact agreement.
 `training/rope_norm_backward` pairs fused inverse rotary and Q/K norm backward
 with the separate operations for both head counts. It checks exact BF16 agreement
 and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.
+`training/norm_rope_forward` does the same for forward normalization and rotary,
+including the normalized intermediate's BF16 rounding.
 `training/projection_fused` and `training/projection_fused_rank64` pair complete
 adapter forward/backward passes against separate matrix products and additions,
 with cached forward activations on both sides. Parameter-gradient accumulation

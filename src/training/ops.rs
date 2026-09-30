@@ -579,6 +579,46 @@ pub fn rope(
     Ok(out)
 }
 
+/// Frozen Q/K RMSNorm followed by rotary, retaining normalization rounding in registers.
+pub fn norm_rope(
+    ops: &Ops,
+    stream: &mut Stream,
+    x: &Tensor,
+    weight: &Weight,
+    cos: &FloatTensor,
+    sin: &FloatTensor,
+    eps: f32,
+) -> Result<Tensor> {
+    if !x.cols().is_multiple_of(128)
+        || weight.count != 128
+        || (cos.rows, cos.cols) != (x.rows(), 128)
+        || (sin.rows, sin.cols) != (cos.rows, cos.cols)
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(Error::invalid("norm rotary dimensions"));
+    }
+    let heads = x.cols() / 128;
+    let rows = x.rows() * heads;
+    let scale = weight.f32_values(stream)?;
+    let out = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: eight waves per workgroup, each guarding one 128-channel head;
+    // matching input/output matrices, 128 weights, and 128 table values per token.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_norm_rope",
+            config(&[("size", x.size()), ("heads", heads), ("tables", cos.size())]),
+            &Scalars::new().index(rows).float(eps),
+            &[x.binding()?, scale, cos.binding(), sin.binding(), out.binding()?],
+            rows.div_ceil(8),
+            1,
+            256,
+        )?;
+    }
+    Ok(out)
+}
+
 /// Inverse rotary followed by frozen Q/K RMSNorm backward, with BF16 rotary rounding.
 #[allow(clippy::too_many_arguments)]
 pub fn rope_norm_backward(

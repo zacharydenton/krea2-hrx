@@ -920,7 +920,16 @@ fn modulated_norm_backward(c: &mut Criterion) {
 }
 
 fn rope_norm_backward(c: &mut Criterion) {
-    let mut group = c.benchmark_group("training/rope_norm_backward");
+    norm_rope_comparison(c, false);
+    norm_rope_comparison(c, true);
+}
+
+fn norm_rope_comparison(c: &mut Criterion, forward: bool) {
+    let mut group = c.benchmark_group(if forward {
+        "training/norm_rope_forward"
+    } else {
+        "training/rope_norm_backward"
+    });
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
     for (tokens, heads) in [(1usize, 1usize), (1043, 48), (1043, 12), (4115, 48), (4115, 12)] {
         let cols = heads * 128;
@@ -934,8 +943,24 @@ fn rope_norm_backward(c: &mut Criterion) {
                 let x = tensor(&ops, &mut stream, tokens, cols);
                 let grad = tensor(&ops, &mut stream, tokens, cols);
                 let weights: Vec<_> = (0..128).map(|i| i as f32 * 0.001).collect();
-                let scale =
-                    train::FloatTensor::from_slice(&mut stream, 1, 128, &weights).unwrap();
+                let bf = std::sync::Arc::new(stream.allocate(128 * 2).unwrap());
+                let fp = std::sync::Arc::new(stream.allocate(128 * 4).unwrap());
+                stream
+                    .upload(
+                        bf.binding(),
+                        &weights
+                            .iter()
+                            .flat_map(|&v| from_f32(v).to_le_bytes())
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                stream
+                    .upload(
+                        fp.binding(),
+                        &weights.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                let scale = krea2::ops::Weight::new(&bf, 0, vec![128], 128, Some((fp, 0)));
                 let angles: Vec<_> =
                     (0..tokens * 128).map(|i| (i / 2) as f32 * 0.137).collect();
                 let cos = train::FloatTensor::from_slice(
@@ -953,14 +978,18 @@ fn rope_norm_backward(c: &mut Criterion) {
                 )
                 .unwrap();
                 if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
-                    let name = "train_rope_norm_backward";
+                    let name =
+                        if forward { "train_norm_rope" } else { "train_rope_norm_backward" };
                     let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
                     for (key, value) in [
                         ("cols", 128),
                         ("size", tokens * cols),
                         ("heads", heads),
                         ("tables", tokens * 128),
-                        ("grid_x", tokens * heads),
+                        (
+                            "grid_x",
+                            if forward { (tokens * heads).div_ceil(8) } else { tokens * heads },
+                        ),
                         ("grid_y", 1),
                     ] {
                         request.set_config(format!("krea2.{name}.{key}"), value.to_string());
@@ -980,19 +1009,35 @@ fn rope_norm_backward(c: &mut Criterion) {
                 }
                 (stream, ops, x, grad, scale, cos, sin)
             });
-            let run = |stream: &Stream, candidate| {
+            let run = |stream: &mut Stream, candidate| {
+                if forward {
+                    return if candidate {
+                        train::norm_rope(ops, stream, x, scale, cos, sin, 1e-5).unwrap()
+                    } else {
+                        let norm = ops
+                            .norm(
+                                stream,
+                                &x.view(tokens * heads, 128, 0).unwrap(),
+                                scale,
+                                krea2::ops::Norm::OnePlusScale,
+                                1e-5,
+                            )
+                            .unwrap();
+                        train::rope(
+                            ops,
+                            stream,
+                            &norm.view(tokens, cols, 0).unwrap(),
+                            cos,
+                            sin,
+                            false,
+                        )
+                        .unwrap()
+                    };
+                }
+                let scale = scale.f32_values(stream).unwrap();
                 if candidate {
-                    train::rope_norm_backward(
-                        ops,
-                        stream,
-                        x,
-                        grad,
-                        scale.binding(),
-                        cos,
-                        sin,
-                        1e-5,
-                    )
-                    .unwrap()
+                    train::rope_norm_backward(ops, stream, x, grad, scale, cos, sin, 1e-5)
+                        .unwrap()
                 } else {
                     let rotary = train::rope(ops, stream, grad, cos, sin, true).unwrap();
                     train::norm_backward(
@@ -1000,7 +1045,7 @@ fn rope_norm_backward(c: &mut Criterion) {
                         stream,
                         &x.view(tokens * heads, 128, 0).unwrap(),
                         &rotary.view(tokens * heads, 128, 0).unwrap(),
-                        scale.binding(),
+                        scale,
                         1e-5,
                     )
                     .unwrap()

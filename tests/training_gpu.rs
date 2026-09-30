@@ -1032,6 +1032,98 @@ fn fused_rotary_norm_backward_preserves_rounding_and_matches_cpu() {
 }
 
 #[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn fused_norm_rotary_forward_preserves_rounding_and_matches_cpu() {
+    use krea2::ops::{Norm, Weight};
+    use std::sync::Arc;
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (tokens, heads) in
+        [(1, 1), (3, 2), (5, 12), (3, 48), (1043, 12), (1043, 48), (4115, 12), (4115, 48)]
+    {
+        let cols = heads * 128;
+        let x = values(tokens * cols, 4);
+        let weights: Vec<_> = (0..128).map(|i| (i as f32 - 64.0) * 0.0031).collect();
+        let angles: Vec<_> = (0..tokens * 128).map(|i| (i / 2) as f32 * 0.137).collect();
+        let cos: Vec<_> = angles.iter().map(|a| a.cos()).collect();
+        let sin: Vec<_> = angles.iter().map(|a| a.sin()).collect();
+        let xt = upload(&ops, &mut stream, tokens, cols, &x);
+        let bf = Arc::new(stream.allocate(128 * 2).unwrap());
+        let fp = Arc::new(stream.allocate(128 * 4).unwrap());
+        stream
+            .upload(
+                bf.binding(),
+                bytemuck::cast_slice(
+                    &weights.iter().copied().map(from_f32).collect::<Vec<_>>(),
+                ),
+            )
+            .unwrap();
+        stream.upload(fp.binding(), bytemuck::cast_slice(&weights)).unwrap();
+        let weight = Weight::new(&bf, 0, vec![128], 128, Some((Arc::clone(&fp), 0)));
+        let ct = FloatTensor::from_slice(&mut stream, tokens, 128, &cos).unwrap();
+        let st = FloatTensor::from_slice(&mut stream, tokens, 128, &sin).unwrap();
+        for eps in [1e-5, 1e-3] {
+            let result =
+                ops::norm_rope(&ops, &mut stream, &xt, &weight, &ct, &st, eps).unwrap();
+            let norm = ops
+                .norm(
+                    &mut stream,
+                    &xt.view(tokens * heads, 128, 0).unwrap(),
+                    &weight,
+                    Norm::OnePlusScale,
+                    eps,
+                )
+                .unwrap();
+            let reference =
+                ops::rope(&ops, &stream, &norm.view(tokens, cols, 0).unwrap(), &ct, &st, false)
+                    .unwrap();
+            let got = result.download(&mut stream).unwrap();
+            assert!(
+                got == reference.download(&mut stream).unwrap(),
+                "{tokens}x{heads}, eps={eps}"
+            );
+            if tokens < 10 {
+                let mut expected = vec![0.0; x.len()];
+                for row in 0..tokens * heads {
+                    let base = row * 128;
+                    let table = row / heads * 128;
+                    let xx = &x[base..base + 128];
+                    let inv = (xx.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>() / 128.0
+                        + f64::from(eps))
+                    .sqrt()
+                    .recip();
+                    let norm: Vec<_> = (0..128)
+                        .map(|c| {
+                            to_f32(from_f32(
+                                (f64::from(xx[c]) * inv * f64::from(1.0 + weights[c])) as f32,
+                            ))
+                        })
+                        .collect();
+                    for c in 0..128 {
+                        let rotated =
+                            norm[c ^ 1] * sin[table + c] * if c % 2 == 0 { -1.0 } else { 1.0 };
+                        expected[base + c] =
+                            to_f32(from_f32(norm[c] * cos[table + c] + rotated));
+                    }
+                }
+                close(&got.into_iter().map(to_f32).collect::<Vec<_>>(), &expected, 0.005, 1e-5);
+            }
+        }
+        for eps in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(ops::norm_rope(&ops, &mut stream, &xt, &weight, &ct, &st, eps).is_err());
+        }
+        let bad = xt.view(tokens, cols - 1, 0).unwrap();
+        assert!(ops::norm_rope(&ops, &mut stream, &bad, &weight, &ct, &st, 1e-5).is_err());
+        let bad_table = FloatTensor::zero(&stream, tokens, 64).unwrap();
+        for (c, s) in [(&bad_table, &st), (&ct, &bad_table)] {
+            assert!(ops::norm_rope(&ops, &mut stream, &xt, &weight, c, s, 1e-5).is_err());
+        }
+        let bad_weight = Weight::new(&bf, 0, vec![127], 127, Some((fp, 0)));
+        assert!(ops::norm_rope(&ops, &mut stream, &xt, &bad_weight, &ct, &st, 1e-5).is_err());
+    }
+}
+
+#[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn streaming_gqa_forward_and_backward_match_materialized_f64_attention() {
     for (tokens, heads, kv) in [

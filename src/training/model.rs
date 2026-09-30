@@ -8,7 +8,7 @@ use super::ops::{self as train, FloatTensor};
 use crate::checkpoint::{Checkpoint, DType};
 use crate::lora::{Adapter, Factors, PROJECTIONS};
 use crate::models::Weights;
-use crate::ops::{Binary, Norm, Ops, Tensor, Unary, Weight};
+use crate::ops::{Binary, Ops, Tensor, Unary, Weight};
 use crate::{Error, Result};
 
 /// FP32 master parameter, gradient, Adam moments, and a BF16 execution copy.
@@ -359,10 +359,6 @@ impl Transformer {
         }
     }
 
-    fn norm(&self, ops: &Ops, stream: &mut Stream, x: &Tensor, name: &str) -> Result<Tensor> {
-        ops.norm(stream, x, self.weights.get(name)?, Norm::OnePlusScale, 1e-5)
-    }
-
     /// Forward one block, retaining the activations needed for its reverse pass.
     #[allow(clippy::too_many_arguments)]
     pub fn block(
@@ -396,24 +392,24 @@ impl Transformer {
         let (gate0, low3) =
             self.linear(ops, stream, &pre, &format!("{p}.attn.gate"), strength)?;
         let gate = ops.unary(stream, &gate0, Unary::Sigmoid)?;
-        let qn = self
-            .norm(
-                ops,
-                stream,
-                &q0.view(x.rows() * 48, 128, 0)?,
-                &format!("{p}.attn.qknorm.qnorm.scale"),
-            )?
-            .view(x.rows(), 6144, 0)?;
-        let kn = self
-            .norm(
-                ops,
-                stream,
-                &k0.view(x.rows() * 12, 128, 0)?,
-                &format!("{p}.attn.qknorm.knorm.scale"),
-            )?
-            .view(x.rows(), 1536, 0)?;
-        let q = train::rope(ops, stream, &qn, cos, sin, false)?;
-        let k = train::rope(ops, stream, &kn, cos, sin, false)?;
+        let q = train::norm_rope(
+            ops,
+            stream,
+            &q0,
+            self.weights.get(&format!("{p}.attn.qknorm.qnorm.scale"))?,
+            cos,
+            sin,
+            1e-5,
+        )?;
+        let k = train::norm_rope(
+            ops,
+            stream,
+            &k0,
+            self.weights.get(&format!("{p}.attn.qknorm.knorm.scale"))?,
+            cos,
+            sin,
+            1e-5,
+        )?;
         let attention = train::attention(ops, stream, &q, &k, &v)?;
         let attended = ops.binary(stream, &attention.output, &gate, Binary::Mul)?;
         let (projected, low4) =

@@ -345,3 +345,35 @@ fn optimizer_kernels_compile_without_spills() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
+fn norm_rotary_forward_compiles_without_spills() {
+    let compiler = compiler(None).unwrap();
+    let name = "train_norm_rope";
+    for (tokens, heads) in [(1usize, 1usize), (5, 12), (1043, 48), (4115, 12)] {
+        let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+        for (key, value) in [
+            ("size", tokens * heads * 128),
+            ("heads", heads),
+            ("tables", tokens * 128),
+            ("grid_x", (tokens * heads).div_ceil(8)),
+            ("grid_y", 1),
+        ] {
+            request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+        }
+        request.set_report(hrx::loom::ReportMode::Details);
+        let artifact =
+            compiler.module(sources::auxiliary(name).unwrap()).compile(&request).unwrap();
+        assert!(artifact.diagnostics().iter().all(|d| d.code != "BACKEND/009"));
+        if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join(format!("{name}-{tokens}x{heads}.json")),
+                artifact.report().unwrap().json().to_string(),
+            )
+            .unwrap();
+        }
+    }
+}
