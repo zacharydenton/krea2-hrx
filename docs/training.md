@@ -242,6 +242,13 @@ sources and swap reference/candidate roles when investigating small differences.
 This helps compare kernels under changing GPU contention, but does not replace an
 uncontended end-to-end measurement.
 
+`training/narrow` compares the rank-32/64 output GEMM with the previous general
+tiles in both operand layouts. It checks exact BF16 parity before alternating
+timings, and accepts `KREA2_BENCH_KERNEL_DIR` for a candidate
+`train_gemm_narrow.loom` with the same 16×32 output tile and 64-thread workgroup.
+The production path uses this tile for at least 512 rows and full 64-element K
+tiles; other shapes retain the general fallback.
+
 `training/frozen_backward/cached_transpose` measures reusing a frozen weight
 transpose created during setup. Set `KREA2_BENCH_PAIR_FROZEN_DIRECT=1` to pair it
 with the direct reverse GEMM on the same inputs. This is an experiment; training
@@ -335,6 +342,7 @@ KREA2_TRAIN_TEST_CONFIG=~/training/character.json \
   cargo test --release --locked --test training_vae -- --ignored --test-threads=1 --nocapture
 
 cargo bench --locked --bench training -- training/projection
+cargo bench --locked --bench training -- training/narrow
 cargo bench --locked --bench training -- training/attention
 cargo bench --locked --bench training -- training/fusion_attention
 cargo bench --locked --bench training -- training/frozen_backward

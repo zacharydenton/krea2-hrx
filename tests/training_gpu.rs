@@ -340,6 +340,13 @@ fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
     for (m, n, k) in [
+        (511, 32, 64),
+        (512, 32, 64),
+        (513, 32, 128),
+        (529, 32, 192),
+        (1043, 32, 128),
+        (4115, 32, 64),
+        (513, 32, 65),
         (511, 64, 64),
         (512, 64, 64),
         (513, 128, 192),
@@ -370,7 +377,7 @@ fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
         let wt = ops::transpose(&ops, &stream, &w).unwrap();
         let nn = ops::matmul_nn(&ops, &stream, &x, &wt, -0.75).unwrap();
         close(&read(&nn, &mut stream), &expected, 0.004, 1e-6);
-        if m >= 512 && n % 64 == 0 && k % 64 == 0 {
+        if m >= 512 && n % 32 == 0 && k % 64 == 0 {
             assert_eq!(out.download(&mut stream).unwrap(), nn.download(&mut stream).unwrap());
         }
     }

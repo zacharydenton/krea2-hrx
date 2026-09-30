@@ -234,6 +234,164 @@ fn tensor(ops: &Ops, stream: &mut Stream, rows: usize, cols: usize) -> Tensor {
     Tensor::from_slice(ops.pool(), stream, &values, rows, cols).unwrap()
 }
 
+fn narrow_gemms(c: &mut Criterion) {
+    let tm = 16usize;
+    let tn = 32usize;
+    let mut group = c.benchmark_group("training/narrow");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (m, n, k) in
+        [(1043usize, 32usize, 6144usize), (1043, 32, 16384), (4115, 32, 6144), (1043, 64, 6144)]
+    {
+        for nt in [true, false] {
+            let label = format!("{}-{m}x{n}x{k}", if nt { "nt" } else { "nn" });
+            let mut prepared = None;
+            let mut paired = PairedTimings::default();
+            group.bench_function(&label, |b| {
+                let (s, a, w, out, kernels) = prepared.get_or_insert_with(|| {
+                    let mut s = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let data = |len, seed| {
+                        (0..len)
+                            .map(|i| from_f32((((i * 31 + seed) % 997) as f32 - 498.0) / 512.0))
+                            .collect::<Vec<_>>()
+                    };
+                    let a =
+                        Tensor::from_slice(ops.pool(), &mut s, &data(m * k, 7), m, k).unwrap();
+                    let w = Tensor::from_slice(
+                        ops.pool(),
+                        &mut s,
+                        &data(n * k, 41),
+                        if nt { n } else { k },
+                        if nt { k } else { n },
+                    )
+                    .unwrap();
+                    let out = ops.tensor(&s, m, n).unwrap();
+                    let kernels = std::array::from_fn::<_, 2, _>(|side| {
+                        let name = if side == 1 {
+                            "train_gemm_narrow"
+                        } else if n == 64 && m >= 512 {
+                            if nt { "train_gemm" } else { "train_gemm_nn" }
+                        } else if nt {
+                            "gemm_bf16_bf16_nt"
+                        } else {
+                            "gemm_bf16_bf16_nn"
+                        };
+                        let tile_m = if side == 1 {
+                            tm
+                        } else if name.starts_with("train_") {
+                            128
+                        } else {
+                            64
+                        };
+                        let tile_n = if side == 1 { tn } else { 64 };
+                        let threads = if side == 1 { tm * tn / 8 } else { 256 };
+                        let grid = [n.div_ceil(tile_n) as u32, m.div_ceil(tile_m) as u32, 1];
+                        let mut request =
+                            hrx::loom::Specialization::new(format!("krea2_{name}"));
+                        for (key, value) in [
+                            ("m", m),
+                            ("n", n),
+                            ("k", k),
+                            ("asize", m * k),
+                            ("bsize", n * k),
+                            ("csize", m * n),
+                            ("astride", m * k),
+                            ("bstride", n * k),
+                            ("transposed", usize::from(nt)),
+                            ("grid_x", grid[0] as usize),
+                            ("grid_y", grid[1] as usize),
+                        ] {
+                            request
+                                .set_config(format!("krea2.{name}.{key}"), value.to_string());
+                        }
+                        request.set_report(hrx::loom::ReportMode::Details);
+                        let source = if side == 1 {
+                            kernel_source(name)
+                        } else {
+                            krea2::kernels::sources::auxiliary(name).unwrap().to_owned()
+                        };
+                        let artifact = krea2::kernels::compiler(None)
+                            .unwrap()
+                            .module(&source)
+                            .compile(&request)
+                            .unwrap();
+                        if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                            let directory = std::path::PathBuf::from(directory);
+                            std::fs::create_dir_all(&directory).unwrap();
+                            std::fs::write(
+                                directory.join(format!("narrow-{label}-{side}.json")),
+                                artifact.report().unwrap().json().to_string(),
+                            )
+                            .unwrap();
+                        }
+                        // SAFETY: the selected sources use the explicitly configured contiguous matrices and tile geometry.
+                        let kernel = unsafe { s.load_artifact(&artifact).unwrap() };
+                        let constants = krea2::kernels::Scalars::new()
+                            .index(m)
+                            .float(0.5)
+                            .pack(name, &kernel)
+                            .unwrap();
+                        (kernel, constants, grid, [threads as u32, 1, 1])
+                    });
+                    let dispatch = |s: &mut Stream, side: usize| {
+                        let (kernel, constants, grid, block) = &kernels[side];
+                        // SAFETY: both kernels use the configured extents and write the entire output.
+                        unsafe {
+                            s.dispatch(
+                                kernel,
+                                *grid,
+                                *block,
+                                constants,
+                                &[
+                                    a.binding().unwrap(),
+                                    w.binding().unwrap(),
+                                    out.binding().unwrap(),
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        s.synchronize().unwrap();
+                    };
+                    dispatch(&mut s, 0);
+                    let expected = out.download(&mut s).unwrap();
+                    s.fill(out.binding().unwrap(), 0xff).unwrap();
+                    dispatch(&mut s, 1);
+                    let got = out.download(&mut s).unwrap();
+                    assert!(
+                        got == expected,
+                        "parity {label}: {:?}",
+                        got.iter().zip(&expected).position(|(a, b)| a != b)
+                    );
+                    (s, a, w, out, kernels)
+                });
+                b.iter_custom(|iterations| {
+                    paired.measure(iterations, |candidate| {
+                        let (kernel, constants, grid, block) = &kernels[usize::from(candidate)];
+                        // SAFETY: the same validated resident shapes, launch dimensions, and bindings are reused.
+                        unsafe {
+                            s.dispatch(
+                                kernel,
+                                *grid,
+                                *block,
+                                constants,
+                                &[
+                                    a.binding().unwrap(),
+                                    w.binding().unwrap(),
+                                    out.binding().unwrap(),
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        s.synchronize().unwrap();
+                    })
+                });
+            });
+            paired.report(&label);
+        }
+    }
+    group.finish();
+}
+
 fn adapter_gradients(c: &mut Criterion) {
     let name = "train_gemm_tn_accumulate";
     let mut group = c.benchmark_group("training/adapter_gradient");
@@ -1400,6 +1558,7 @@ fn full_step(c: &mut Criterion) {
 criterion_group!(
     benches,
     dense,
+    narrow_gemms,
     adapter_gradients,
     projections,
     cached_projections,

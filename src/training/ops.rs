@@ -174,6 +174,9 @@ fn matmul_inner(
         return Err(Error::invalid("training GEMM dimensions"));
     }
     let out = profile("bf16_allocation", || ops.tensor(stream, a.rows(), b.rows()))?;
+    if narrow_gemm(ops, stream, a, b, &out, alpha, true)? {
+        return Ok(out);
+    }
     if a.rows() >= 512 && b.rows().is_multiple_of(64) && a.cols().is_multiple_of(64) {
         // SAFETY: this kernel permits a ragged M, with full 64-column N/K tiles.
         // Both operands are contiguous row-major BF16 matrices; the output is M x N.
@@ -240,6 +243,9 @@ fn matmul_nn_inner(
     }
     let (m, n, k) = (a.rows(), b.cols(), a.cols());
     let out = profile("bf16_allocation", || ops.tensor(stream, m, n))?;
+    if narrow_gemm(ops, stream, a, b, &out, alpha, false)? {
+        return Ok(out);
+    }
     if m >= 512 && n.is_multiple_of(64) && k.is_multiple_of(64) {
         // SAFETY: the matrices are M x K, K x N and M x N; N/K have full 64-wide tiles.
         unsafe {
@@ -279,6 +285,47 @@ fn matmul_nn_inner(
         )?;
     }
     Ok(out)
+}
+
+// Rank-sized outputs need enough row tiles to fill the GPU. A 16x32 tile
+// avoids the generic 64-column tile's wasted half at rank 32. Keep the same
+// sequential 16-wide WMMA accumulation and final BF16 rounding.
+fn narrow_gemm(
+    ops: &Ops,
+    stream: &Stream,
+    a: &Tensor,
+    b: &Tensor,
+    out: &Tensor,
+    alpha: f32,
+    transposed: bool,
+) -> Result<bool> {
+    let (m, n, k) = (a.rows(), out.cols(), a.cols());
+    if m < 512 || !matches!(n, 32 | 64) || !k.is_multiple_of(64) {
+        return Ok(false);
+    }
+    // SAFETY: callers validate contiguous MxK and NxK/KxN operands and MxN
+    // output. N/K cover complete tiles; the kernel guards ragged output rows.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_gemm_narrow",
+            config(&[
+                ("m", m),
+                ("n", n),
+                ("k", k),
+                ("asize", a.size()),
+                ("bsize", b.size()),
+                ("csize", out.size()),
+                ("transposed", usize::from(transposed)),
+            ]),
+            &Scalars::new().index(m).float(alpha),
+            &[a.binding()?, b.binding()?, out.binding()?],
+            n / 32,
+            m.div_ceil(16),
+            64,
+        )?;
+    }
+    Ok(true)
 }
 
 /// Add a rank-sized matrix product to a base tensor, rounding the product to BF16 first.

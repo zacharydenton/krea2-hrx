@@ -168,6 +168,53 @@ fn adapter_gradient_gemms_compile_for_ragged_and_real_shapes() {
 
 #[test]
 #[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
+fn narrow_training_gemms_compile_without_spills() {
+    let compiler = compiler(None).unwrap();
+    let name = "train_gemm_narrow";
+    for (m, n, k) in [
+        (512usize, 32usize, 64usize),
+        (513, 64, 192),
+        (1043, 32, 6144),
+        (1043, 32, 16384),
+        (4115, 64, 16384),
+    ] {
+        for transposed in [0, 1] {
+            let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+            for (key, value) in [
+                ("m", m),
+                ("n", n),
+                ("k", k),
+                ("asize", m * k),
+                ("bsize", n * k),
+                ("csize", m * n),
+                ("transposed", transposed),
+                ("grid_x", n / 32),
+                ("grid_y", m.div_ceil(16)),
+            ] {
+                request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+            }
+            request.set_report(hrx::loom::ReportMode::Details);
+            let artifact =
+                compiler.module(sources::auxiliary(name).unwrap()).compile(&request).unwrap();
+            assert!(
+                artifact.diagnostics().iter().all(|d| d.code != "BACKEND/009"),
+                "{m}x{n}x{k}/{transposed}: unexpected spill"
+            );
+            if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                let directory = std::path::PathBuf::from(directory);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(
+                    directory.join(format!("{name}-{m}x{n}x{k}-{transposed}.json")),
+                    artifact.report().unwrap().json().to_string(),
+                )
+                .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires the provisioned Loom compiler, but no GPU execution"]
 fn training_dense_tiles_compile_without_spills() {
     let compiler = compiler(None).unwrap();
     for name in ["train_gemm", "train_gemm_nn"] {
