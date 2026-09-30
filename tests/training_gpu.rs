@@ -546,6 +546,113 @@ fn prepared_optimizer_matches_updates_and_rejects_nonfinite_gradients_atomically
 }
 
 #[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn modulated_norm_backward_preserves_rounding_and_matches_cpu_chain_rule() {
+    use krea2::ops::Binary;
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (rows, cols) in [(1, 1), (3, 127), (5, 128), (3, 129), (3, 6144)] {
+        let x = values(rows * cols, 4);
+        let g = values(rows * cols, 9);
+        let residual = values(rows * cols, 13);
+        let mut modulation = values(cols, 19);
+        for (dst, value) in
+            modulation.iter_mut().zip([-1.0, 0.0, 1.0 / 256.0, -1.0 / 256.0, 64.0, -64.0])
+        {
+            *dst = value;
+        }
+        let w: Vec<_> = (0..cols).map(|i| ((i * 23 % 37) as f32 - 18.0) * 0.013).collect();
+        let xt = upload(&ops, &mut stream, rows, cols, &x);
+        let gt = upload(&ops, &mut stream, rows, cols, &g);
+        let rt = upload(&ops, &mut stream, rows, cols, &residual);
+        let mt = upload(&ops, &mut stream, 1, cols, &modulation);
+        let wt = FloatTensor::from_slice(&mut stream, 1, cols, &w).unwrap();
+        for eps in [1e-5, 1e-3] {
+            let result = ops::norm_modulated_backward(
+                &ops,
+                &stream,
+                &xt,
+                &gt,
+                wt.binding(),
+                &mt,
+                &rt,
+                eps,
+            )
+            .unwrap();
+            let one_plus = ops::one_plus(&ops, &stream, &mt).unwrap();
+            let scaled = ops.binary(&stream, &gt, &one_plus, Binary::Mul).unwrap();
+            let norm =
+                ops::norm_backward(&ops, &stream, &xt, &scaled, wt.binding(), eps).unwrap();
+            let reference = ops::add_scaled(&ops, &stream, &rt, &norm, 1.0).unwrap();
+            assert_eq!(
+                result.download(&mut stream).unwrap(),
+                reference.download(&mut stream).unwrap()
+            );
+            let mut expected = vec![0.0; rows * cols];
+            for row in 0..rows {
+                let xx = &x[row * cols..(row + 1) * cols];
+                let grad: Vec<_> = (0..cols)
+                    .map(|c| {
+                        let scaled = to_f32(from_f32(
+                            g[row * cols + c] * to_f32(from_f32(1.0 + modulation[c])),
+                        ));
+                        f64::from(scaled * (1.0 + w[c]))
+                    })
+                    .collect();
+                let variance = xx.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>()
+                    / cols as f64
+                    + f64::from(eps);
+                let dot = xx.iter().zip(&grad).map(|(x, g)| f64::from(*x) * g).sum::<f64>()
+                    / cols as f64;
+                for c in 0..cols {
+                    let norm = ((grad[c] - f64::from(xx[c]) * dot / variance) / variance.sqrt())
+                        as f32;
+                    expected[row * cols + c] =
+                        to_f32(from_f32(residual[row * cols + c] + to_f32(from_f32(norm))));
+                }
+            }
+            close(&read(&result, &mut stream), &expected, 0.006, 1e-5);
+        }
+        for eps in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(
+                ops::norm_modulated_backward(
+                    &ops,
+                    &stream,
+                    &xt,
+                    &gt,
+                    wt.binding(),
+                    &mt,
+                    &rt,
+                    eps
+                )
+                .is_err()
+            );
+        }
+        let bad_mod = upload(&ops, &mut stream, 2, cols, &vec![0.0; 2 * cols]);
+        assert!(
+            ops::norm_modulated_backward(
+                &ops,
+                &stream,
+                &xt,
+                &gt,
+                wt.binding(),
+                &bad_mod,
+                &rt,
+                1e-5
+            )
+            .is_err()
+        );
+        let bad = upload(&ops, &mut stream, 1, cols + 1, &vec![0.0; cols + 1]);
+        for (g, r) in [(&bad, &rt), (&gt, &bad)] {
+            assert!(
+                ops::norm_modulated_backward(&ops, &stream, &xt, g, wt.binding(), &mt, r, 1e-5)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn rmsnorm_and_rotary_backward_match_cpu_derivatives() {
     let mut stream = Stream::open().unwrap();

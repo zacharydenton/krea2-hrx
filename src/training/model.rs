@@ -482,11 +482,18 @@ impl Transformer {
                 .ok_or_else(|| Error::invalid("missing modulation tape"))?;
             train::modulation_backward(ops, stream, grad, down, &gp, norm2, dst, 3)?;
         }
-        let gn2 =
-            ops.binary(stream, &gp, &train::one_plus(ops, stream, &row(3)?)?, Binary::Mul)?;
-        let gr =
-            self.norm_backward(ops, stream, &t.residual, &gn2, &format!("{p}.postnorm.scale"))?;
-        let gr = train::add_scaled(ops, stream, grad, &gr, 1.0)?;
+        let post_scale =
+            self.weights.get(&format!("{p}.postnorm.scale"))?.f32_values(stream)?;
+        let gr = train::norm_modulated_backward(
+            ops,
+            stream,
+            &t.residual,
+            &gp,
+            post_scale,
+            &row(3)?,
+            grad,
+            1e-5,
+        )?;
         let go = ops.binary(stream, &gr, &row(2)?, Binary::Mul)?;
         let ga =
             self.linear_backward(ops, stream, &t.attended, &go, &format!("{p}.attn.wo"))?;
@@ -536,15 +543,17 @@ impl Transformer {
                 .ok_or_else(|| Error::invalid("missing modulation tape"))?;
             train::modulation_backward(ops, stream, &gr, projected, &pre_grad, norm1, dst, 0)?;
         }
-        let gn1 = ops.binary(
+        let pre_scale = self.weights.get(&format!("{p}.prenorm.scale"))?.f32_values(stream)?;
+        train::norm_modulated_backward(
+            ops,
             stream,
+            &t.input,
             &pre_grad,
-            &train::one_plus(ops, stream, &row(0)?)?,
-            Binary::Mul,
-        )?;
-        let gx =
-            self.norm_backward(ops, stream, &t.input, &gn1, &format!("{p}.prenorm.scale"))?;
-        train::add_scaled(ops, stream, &gr, &gx, 1.0)
+            pre_scale,
+            &row(0)?,
+            &gr,
+            1e-5,
+        )
     }
 
     /// Download current FP32 adapter masters for export or checkpointing.

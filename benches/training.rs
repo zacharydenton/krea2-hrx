@@ -705,6 +705,62 @@ fn norm_backward(c: &mut Criterion) {
     group.finish();
 }
 
+fn modulated_norm_backward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/modulated_norm_backward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for rows in [1usize, 1043, 4115] {
+        let cols = 6144;
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let label = format!("{rows}x{cols}");
+        group.bench_function(&label, |b| {
+            let (stream, ops, x, grad, residual, modulation, scale) = prepared
+                .get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let [x, grad, residual] = std::array::from_fn::<_, 3, _>(|_| {
+                        tensor(&ops, &mut stream, rows, cols)
+                    });
+                    let modulation = tensor(&ops, &mut stream, 1, cols);
+                    let weights: Vec<_> = (0..cols).map(|i| (i % 113) as f32 * 0.001).collect();
+                    let scale =
+                        train::FloatTensor::from_slice(&mut stream, 1, cols, &weights).unwrap();
+                    (stream, ops, x, grad, residual, modulation, scale)
+                });
+            let mut run = |candidate| {
+                let result = if candidate {
+                    train::norm_modulated_backward(
+                        ops,
+                        stream,
+                        x,
+                        grad,
+                        scale.binding(),
+                        modulation,
+                        residual,
+                        1e-5,
+                    )
+                    .unwrap()
+                } else {
+                    let one_plus = train::one_plus(ops, stream, modulation).unwrap();
+                    let scaled =
+                        ops.binary(stream, grad, &one_plus, krea2::ops::Binary::Mul).unwrap();
+                    let norm =
+                        train::norm_backward(ops, stream, x, &scaled, scale.binding(), 1e-5)
+                            .unwrap();
+                    train::add_scaled(ops, stream, residual, &norm, 1.0).unwrap()
+                };
+                stream.synchronize().unwrap();
+                black_box(result);
+            };
+            run(false);
+            run(true);
+            b.iter_custom(|iterations| paired.measure(iterations, &mut run));
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 fn adamw(c: &mut Criterion) {
     let mut prepared = None;
     c.bench_function("training/adamw/rank32x16384", |b| {
@@ -841,6 +897,7 @@ criterion_group!(
     gated_backward,
     modulation_backward,
     norm_backward,
+    modulated_norm_backward,
     adamw,
     optimizer_update,
     full_step

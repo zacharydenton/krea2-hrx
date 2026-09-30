@@ -645,6 +645,51 @@ pub fn norm_backward(
     Ok(out)
 }
 
+/// Apply modulation scaling, RMSNorm backward and a residual gradient in one dispatch.
+/// Preserve the BF16 boundaries of `one_plus`, multiplication, norm and addition.
+#[allow(clippy::too_many_arguments)]
+pub fn norm_modulated_backward(
+    ops: &Ops,
+    stream: &Stream,
+    x: &Tensor,
+    grad: &Tensor,
+    scale: View<'_>,
+    modulation: &Tensor,
+    residual: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    if [grad, residual].iter().any(|t| (t.rows(), t.cols()) != (x.rows(), x.cols()))
+        || (modulation.rows(), modulation.cols()) != (1, x.cols())
+        || scale.len() != x.cols() * 4
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(Error::invalid("modulated RMSNorm backward dimensions"));
+    }
+    let out = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: one wave per row; matching BF16 matrices and per-column scale vectors.
+    unsafe {
+        ops.launch(
+            stream,
+            "train_norm_modulated_backward",
+            config(&[("cols", x.cols()), ("size", x.size())]),
+            &Scalars::new().index(x.rows()).float(eps),
+            &[
+                x.binding()?,
+                grad.binding()?,
+                scale,
+                modulation.binding()?,
+                residual.binding()?,
+                out.binding()?,
+            ],
+            x.rows(),
+            1,
+            32,
+        )?;
+    }
+    Ok(out)
+}
+
 /// Attention output and unrounded statistics retained for its reverse pass.
 pub struct Attention {
     /// BF16 attended values in token-major order.
