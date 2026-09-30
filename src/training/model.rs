@@ -76,9 +76,20 @@ impl Projection {
         base: &Tensor,
         strength: f32,
     ) -> Result<Tensor> {
+        Ok(self.forward_cached(ops, stream, x, base, strength)?.0)
+    }
+    /// Forward with the rank-sized activation retained for `backward_cached`.
+    pub fn forward_cached(
+        &self,
+        ops: &Ops,
+        stream: &Stream,
+        x: &Tensor,
+        base: &Tensor,
+        strength: f32,
+    ) -> Result<(Tensor, Tensor)> {
         let low = train::matmul(ops, stream, x, &self.a.value, 1.0)?;
         let delta = train::matmul(ops, stream, &low, &self.b.value, 1.0)?;
-        train::add_scaled(ops, stream, base, &delta, self.scale() * strength)
+        Ok((train::add_scaled(ops, stream, base, &delta, self.scale() * strength)?, low))
     }
     /// Accumulate parameter gradients and add the branch's input gradient.
     pub fn backward(
@@ -90,7 +101,27 @@ impl Projection {
         base_grad: &Tensor,
     ) -> Result<Tensor> {
         let low = train::matmul(ops, stream, x, &self.a.value, 1.0)?;
-        train::matmul_tn_accumulate(ops, stream, grad, &low, &self.b.grad, self.scale())?;
+        self.backward_cached(ops, stream, x, grad, base_grad, &low)
+    }
+    /// Backward using the activation from the matching forward, before any weight update.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward_cached(
+        &self,
+        ops: &Ops,
+        stream: &Stream,
+        x: &Tensor,
+        grad: &Tensor,
+        base_grad: &Tensor,
+        low: &Tensor,
+    ) -> Result<Tensor> {
+        if (low.rows(), low.cols()) != (x.rows(), self.a.value.rows())
+            || x.cols() != self.a.value.cols()
+            || (grad.rows(), grad.cols()) != (x.rows(), self.b.value.rows())
+            || (base_grad.rows(), base_grad.cols()) != (x.rows(), x.cols())
+        {
+            return Err(Error::invalid("cached LoRA backward dimensions"));
+        }
+        train::matmul_tn_accumulate(ops, stream, grad, low, &self.b.grad, self.scale())?;
         let dl = train::matmul_nn(ops, stream, grad, &self.b.value, self.scale())?;
         train::matmul_tn_accumulate(ops, stream, &dl, x, &self.a.grad, 1.0)?;
         let dx = train::matmul_nn(ops, stream, &dl, &self.a.value, 1.0)?;
@@ -110,6 +141,8 @@ pub struct Transformer {
 
 /// Activations for one recomputed block. Dropped immediately after its backward pass.
 pub struct BlockTape {
+    // Rank-sized forward activations in PROJECTIONS order, before any optimizer update.
+    adapter_lows: [Option<Tensor>; 8],
     input: Tensor,
     pre: Tensor,
     q0: Tensor,
@@ -274,7 +307,7 @@ impl Transformer {
         x: &Tensor,
         name: &str,
         strength: f32,
-    ) -> Result<Tensor> {
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let base = match self.quantized.get(name) {
             Some(weight) => weight.forward(ops, stream, x)?,
             None => {
@@ -290,12 +323,14 @@ impl Transformer {
         };
         match self.adapters.get(name) {
             Some(adapter) if strength != 0.0 => {
-                adapter.forward(ops, stream, x, &base, strength)
+                let (output, low) = adapter.forward_cached(ops, stream, x, &base, strength)?;
+                Ok((output, Some(low)))
             }
-            _ => Ok(base),
+            _ => Ok((base, None)),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn linear_backward(
         &self,
         ops: &Ops,
@@ -303,13 +338,17 @@ impl Transformer {
         x: &Tensor,
         grad: &Tensor,
         name: &str,
+        low: Option<&Tensor>,
     ) -> Result<Tensor> {
         let w = self.weight(name)?;
         let base_grad =
             train::matmul_nn(ops, stream, grad, &w.tensor(w.shape[0], w.shape[1])?, 1.0)?;
-        match self.adapters.get(name) {
-            Some(adapter) => adapter.backward(ops, stream, x, grad, &base_grad),
-            None => Ok(base_grad),
+        match (self.adapters.get(name), low) {
+            (Some(adapter), Some(low)) => {
+                adapter.backward_cached(ops, stream, x, grad, &base_grad, low)
+            }
+            (Some(adapter), None) => adapter.backward(ops, stream, x, grad, &base_grad),
+            (None, _) => Ok(base_grad),
         }
     }
 
@@ -343,10 +382,11 @@ impl Transformer {
             &row(1)?,
             Binary::Add,
         )?;
-        let q0 = self.linear(ops, stream, &pre, &format!("{p}.attn.wq"), strength)?;
-        let k0 = self.linear(ops, stream, &pre, &format!("{p}.attn.wk"), strength)?;
-        let v = self.linear(ops, stream, &pre, &format!("{p}.attn.wv"), strength)?;
-        let gate0 = self.linear(ops, stream, &pre, &format!("{p}.attn.gate"), strength)?;
+        let (q0, low0) = self.linear(ops, stream, &pre, &format!("{p}.attn.wq"), strength)?;
+        let (k0, low1) = self.linear(ops, stream, &pre, &format!("{p}.attn.wk"), strength)?;
+        let (v, low2) = self.linear(ops, stream, &pre, &format!("{p}.attn.wv"), strength)?;
+        let (gate0, low3) =
+            self.linear(ops, stream, &pre, &format!("{p}.attn.gate"), strength)?;
         let gate = ops.unary(stream, &gate0, Unary::Sigmoid)?;
         let qn = self
             .norm(
@@ -368,7 +408,7 @@ impl Transformer {
         let k = train::rope(ops, stream, &kn, cos, sin, false)?;
         let attention = train::attention(ops, stream, &q, &k, &v)?;
         let attended = ops.binary(stream, &attention.output, &gate, Binary::Mul)?;
-        let projected =
+        let (projected, low4) =
             self.linear(ops, stream, &attended, &format!("{p}.attn.wo"), strength)?;
         let residual = ops.binary(
             stream,
@@ -384,11 +424,13 @@ impl Transformer {
             &row(4)?,
             Binary::Add,
         )?;
-        let mlp_gate0 = self.linear(ops, stream, &post, &format!("{p}.mlp.gate"), strength)?;
+        let (mlp_gate0, low5) =
+            self.linear(ops, stream, &post, &format!("{p}.mlp.gate"), strength)?;
         let mlp_gate = ops.unary(stream, &mlp_gate0, Unary::Silu)?;
-        let up = self.linear(ops, stream, &post, &format!("{p}.mlp.up"), strength)?;
+        let (up, low6) = self.linear(ops, stream, &post, &format!("{p}.mlp.up"), strength)?;
         let mixed = ops.binary(stream, &mlp_gate, &up, Binary::Mul)?;
-        let down = self.linear(ops, stream, &mixed, &format!("{p}.mlp.down"), strength)?;
+        let (down, low7) =
+            self.linear(ops, stream, &mixed, &format!("{p}.mlp.down"), strength)?;
         let output = ops.binary(
             stream,
             &residual,
@@ -396,6 +438,7 @@ impl Transformer {
             Binary::Add,
         )?;
         Ok(BlockTape {
+            adapter_lows: [low0, low1, low2, low3, low4, low5, low6, low7],
             input: x.clone(),
             pre,
             q0,
@@ -457,11 +500,32 @@ impl Transformer {
         let p = format!("blocks.{index}");
         let row = |i: usize| mods.view(1, 6144, i * 6144);
         let gd = ops.binary(stream, grad, &row(5)?, Binary::Mul)?;
-        let gm = self.linear_backward(ops, stream, &t.mixed, &gd, &format!("{p}.mlp.down"))?;
+        let gm = self.linear_backward(
+            ops,
+            stream,
+            &t.mixed,
+            &gd,
+            &format!("{p}.mlp.down"),
+            t.adapter_lows[7].as_ref(),
+        )?;
         let (gg, gu) =
             train::gated_backward(ops, stream, &t.mlp_gate0, &t.mlp_gate, &t.up, &gm, false)?;
-        let gp1 = self.linear_backward(ops, stream, &t.post, &gg, &format!("{p}.mlp.gate"))?;
-        let gp2 = self.linear_backward(ops, stream, &t.post, &gu, &format!("{p}.mlp.up"))?;
+        let gp1 = self.linear_backward(
+            ops,
+            stream,
+            &t.post,
+            &gg,
+            &format!("{p}.mlp.gate"),
+            t.adapter_lows[5].as_ref(),
+        )?;
+        let gp2 = self.linear_backward(
+            ops,
+            stream,
+            &t.post,
+            &gu,
+            &format!("{p}.mlp.up"),
+            t.adapter_lows[6].as_ref(),
+        )?;
         let gp = train::add_scaled(ops, stream, &gp1, &gp2, 1.0)?;
         if let Some(dst) = modulation_grad {
             let [_, _, norm2, down] = t
@@ -483,8 +547,14 @@ impl Transformer {
             1e-5,
         )?;
         let go = ops.binary(stream, &gr, &row(2)?, Binary::Mul)?;
-        let ga =
-            self.linear_backward(ops, stream, &t.attended, &go, &format!("{p}.attn.wo"))?;
+        let ga = self.linear_backward(
+            ops,
+            stream,
+            &t.attended,
+            &go,
+            &format!("{p}.attn.wo"),
+            t.adapter_lows[4].as_ref(),
+        )?;
         let (gg, gat) = train::gated_backward(
             ops,
             stream,
@@ -502,11 +572,24 @@ impl Transformer {
         let kscale =
             self.weights.get(&format!("{p}.attn.qknorm.knorm.scale"))?.f32_values(stream)?;
         let gk = train::rope_norm_backward(ops, stream, &t.k0, &gk, kscale, cos, sin, 1e-5)?;
-        let mut pre_grad =
-            self.linear_backward(ops, stream, &t.pre, &gq, &format!("{p}.attn.wq"))?;
-        for (name, g) in [("wk", &gk), ("wv", &gv), ("gate", &gg)] {
-            let part =
-                self.linear_backward(ops, stream, &t.pre, g, &format!("{p}.attn.{name}"))?;
+        let mut pre_grad = self.linear_backward(
+            ops,
+            stream,
+            &t.pre,
+            &gq,
+            &format!("{p}.attn.wq"),
+            t.adapter_lows[0].as_ref(),
+        )?;
+        for (i, (name, g)) in [("wk", &gk), ("wv", &gv), ("gate", &gg)].into_iter().enumerate()
+        {
+            let part = self.linear_backward(
+                ops,
+                stream,
+                &t.pre,
+                g,
+                &format!("{p}.attn.{name}"),
+                t.adapter_lows[i + 1].as_ref(),
+            )?;
             pre_grad = train::add_scaled(ops, stream, &pre_grad, &part, 1.0)?;
         }
         if let Some(dst) = modulation_grad {
@@ -577,8 +660,22 @@ mod full_target_tests {
             a: vec![0.0; 6144],
             b: vec![0.0; 36864],
         };
-        let adapters =
+        let mut adapters: BTreeMap<_, _> =
             [("tproj.1".into(), Projection::new(&ops, &mut stream, &factors).unwrap())].into();
+        for (name, outputs, inputs) in PROJECTIONS {
+            let factors = Factors {
+                inputs,
+                outputs,
+                rank: 2,
+                alpha: 2.0,
+                a: (0..inputs * 2).map(|i| ((i % 23) as f32 - 11.0) * 0.001).collect(),
+                b: (0..outputs * 2).map(|i| ((i % 19) as f32 - 9.0) * 0.001).collect(),
+            };
+            adapters.insert(
+                format!("blocks.0.{name}"),
+                Projection::new(&ops, &mut stream, &factors).unwrap(),
+            );
+        }
         let model = Transformer { weights, quantized: BTreeMap::new(), adapters, layers: 28 };
         let upload = |s: &mut Stream, rows, offset, gain| {
             let bits: Vec<_> = (0..rows * 6144)
@@ -606,7 +703,7 @@ mod full_target_tests {
         let incoming = read(&g, &mut stream);
         let modulation = read(&mods, &mut stream);
         let dst = FloatTensor::zero(&stream, 6, 6144).unwrap();
-        model
+        let input_grad = model
             .backward_with_modulation(
                 &ops,
                 &mut stream,
@@ -657,6 +754,38 @@ mod full_target_tests {
         assert!(dm.iter().all(|v| v.is_finite()));
         for row in dm.chunks_exact(6144) {
             assert!(row.iter().any(|v| *v != 0.0));
+        }
+        let parameters: Vec<_> = model.adapters.values().flat_map(|p| [&p.a, &p.b]).collect();
+        let gradients: Vec<_> =
+            parameters.iter().map(|p| p.grad.download(&mut stream).unwrap()).collect();
+        for p in &parameters {
+            p.grad.clear(&stream).unwrap();
+        }
+        dst.clear(&stream).unwrap();
+        let mut uncached =
+            model.block(&ops, &mut stream, 0, &x, &mods, &cos, &sin, 1.0).unwrap();
+        assert!(uncached.adapter_lows.iter().all(Option::is_some));
+        uncached.adapter_lows = std::array::from_fn(|_| None);
+        let reference = model
+            .backward_with_modulation(
+                &ops,
+                &mut stream,
+                0,
+                uncached,
+                &mods,
+                &cos,
+                &sin,
+                &g,
+                Some(&dst),
+            )
+            .unwrap();
+        assert_eq!(
+            input_grad.download(&mut stream).unwrap(),
+            reference.download(&mut stream).unwrap()
+        );
+        assert_eq!(dst.download(&mut stream).unwrap(), dm);
+        for (p, expected) in parameters.iter().zip(&gradients) {
+            assert_eq!(&p.grad.download(&mut stream).unwrap(), expected);
         }
     }
 }

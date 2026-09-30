@@ -11,7 +11,7 @@ use hrx::Stream;
 type Id = usize;
 enum Operation {
     Input,
-    Linear(Id, String),
+    Linear(Id, String, Option<Tensor>),
     Norm(Id, String),
     Unary(Id, Unary),
     OnePlus(Id),
@@ -58,13 +58,15 @@ impl<'a> Tape<'a> {
         let bias =
             w.find(&format!("{name}.bias")).map(crate::ops::Weight::values).transpose()?;
         let base = self.models.ops.linear(s, self.value(x), weight, bias)?;
-        let y = match self.model.adapters.get(name) {
+        let (y, low) = match self.model.adapters.get(name) {
             Some(p) if self.strength != 0.0 => {
-                p.forward(&self.models.ops, s, self.value(x), &base, self.strength)?
+                let (y, low) =
+                    p.forward_cached(&self.models.ops, s, self.value(x), &base, self.strength)?;
+                (y, Some(low))
             }
-            _ => base,
+            _ => (base, None),
         };
-        Ok(self.push(y, Operation::Linear(x, name.into())))
+        Ok(self.push(y, Operation::Linear(x, name.into(), low)))
     }
     fn norm(&mut self, s: &mut Stream, x: Id, name: &str) -> Result<Id> {
         let y = self.models.ops.norm(
@@ -217,13 +219,16 @@ impl<'a> Tape<'a> {
                 Operation::Input => {
                     grads[id] = Some(g);
                 }
-                Operation::Linear(x, name) => {
+                Operation::Linear(x, name, low) => {
                     let w = self.models.transformer.get(&format!("{name}.weight"))?;
                     let dx =
                         train::matmul_nn(ops, s, &g, &w.tensor(w.shape[0], w.shape[1])?, 1.0)?;
-                    let dx = match self.model.adapters.get(name) {
-                        Some(p) => p.backward(ops, s, self.value(*x), &g, &dx)?,
-                        None => dx,
+                    let dx = match (self.model.adapters.get(name), low) {
+                        (Some(p), Some(low)) => {
+                            p.backward_cached(ops, s, self.value(*x), &g, &dx, low)?
+                        }
+                        (Some(p), None) => p.backward(ops, s, self.value(*x), &g, &dx)?,
+                        (None, _) => dx,
                     };
                     add(&mut grads, s, *x, dx)?;
                 }
@@ -387,6 +392,30 @@ mod tests {
                         assert!(grad.iter().all(|v| *v == 0.0), "zero B should give zero dA");
                     }
                 }
+            }
+            let cached: Vec<_> =
+                parameters.iter().map(|p| p.grad.download(&mut stream).unwrap()).collect();
+            for p in &parameters {
+                p.grad.clear(&stream).unwrap();
+            }
+            for node in &mut tape.nodes {
+                if let Operation::Linear(_, _, low) = &mut node.op {
+                    *low = None;
+                }
+            }
+            let reference = tape.backward(&mut stream, &seeds).unwrap();
+            for (actual, expected) in grads.iter().zip(&reference) {
+                match (actual, expected) {
+                    (Some(a), Some(b)) => assert_eq!(
+                        a.download(&mut stream).unwrap(),
+                        b.download(&mut stream).unwrap()
+                    ),
+                    (None, None) => {}
+                    _ => panic!("cached input gradient connectivity"),
+                }
+            }
+            for (p, expected) in parameters.iter().zip(&cached) {
+                assert_eq!(&p.grad.download(&mut stream).unwrap(), expected);
             }
             optimizer::update_parameters(&models.ops, &mut stream, &parameters, &config, step)
                 .unwrap();

@@ -162,6 +162,11 @@ addition into the norm dispatch. BF16 rounding still occurs after adding one to
 the modulation, scaling the gradient, computing the norm gradient and adding the
 residual; the temporary vectors and matrices are not materialized.
 
+Both main-block and auxiliary tapes retain each adapter's rank-sized forward
+activation for its parameter gradient, avoiding a duplicate input projection in
+backward. These activations expire with the tape before the optimizer update;
+the memory estimate includes them for retained and recomputed blocks.
+
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The
 estimate counts BF16 weights once and includes the additional execution copies
@@ -229,6 +234,8 @@ original four-operation sequence, including allocation and dispatch overhead.
 `training/rope_norm_backward` pairs fused inverse rotary and Q/K norm backward
 with the separate operations for both head counts. It checks exact BF16 agreement
 and exports compiler reports through `KREA2_BENCH_REPORT_DIR`.
+`training/projection_cached` pairs complete LoRA forward/backward passes with and
+without retaining the rank-sized activation, using the same resident inputs.
 
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,

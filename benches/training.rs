@@ -355,6 +355,68 @@ fn projections(c: &mut Criterion) {
     group.finish();
 }
 
+fn cached_projections(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/projection_cached");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (tokens, inputs, outputs) in [
+        (1043, 6144, 6144),
+        (1043, 6144, 1536),
+        (1043, 6144, 16384),
+        (1043, 16384, 6144),
+        (4115, 6144, 16384),
+        (4115, 16384, 6144),
+    ] {
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let label = format!("{tokens}x{inputs}x{outputs}");
+        group.bench_function(&label, |b| {
+            let (stream, ops, p, x, grad, base, dx) = prepared.get_or_insert_with(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let p = Projection::new(
+                    &ops,
+                    &mut stream,
+                    &Factors {
+                        rank: 32,
+                        inputs,
+                        outputs,
+                        alpha: 32.0,
+                        a: vec![0.01; 32 * inputs],
+                        b: vec![0.01; outputs * 32],
+                    },
+                )
+                .unwrap();
+                let x = tensor(&ops, &mut stream, tokens, inputs);
+                let grad = tensor(&ops, &mut stream, tokens, outputs);
+                let base = tensor(&ops, &mut stream, tokens, outputs);
+                let dx = tensor(&ops, &mut stream, tokens, inputs);
+                stream.synchronize().unwrap();
+                (stream, ops, p, x, grad, base, dx)
+            });
+            let mut run = |candidate| {
+                p.a.grad.clear(stream).unwrap();
+                p.b.grad.clear(stream).unwrap();
+                let (y, g) = if candidate {
+                    let (y, low) = p.forward_cached(ops, stream, x, base, 1.0).unwrap();
+                    let g = p.backward_cached(ops, stream, x, grad, dx, &low).unwrap();
+                    (y, g)
+                } else {
+                    let y = p.forward(ops, stream, x, base, 1.0).unwrap();
+                    let g = p.backward(ops, stream, x, grad, dx).unwrap();
+                    (y, g)
+                };
+                stream.synchronize().unwrap();
+                black_box((y, g));
+            };
+            run(false);
+            run(true);
+            b.iter_custom(|iterations| paired.measure(iterations, &mut run));
+        });
+        paired.report(&label);
+    }
+    group.finish();
+}
+
 // Retain the unfused algebra as a runnable baseline for projection optimizations.
 fn projection_backward_transposed(
     projection: &Projection,
@@ -998,6 +1060,7 @@ criterion_group!(
     dense,
     adapter_gradients,
     projections,
+    cached_projections,
     attention,
     fusion_attention,
     frozen_backward,

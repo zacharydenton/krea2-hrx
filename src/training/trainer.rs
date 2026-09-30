@@ -107,7 +107,11 @@ impl MemoryEstimate {
             * (tokens.div_ceil(16) * 16 + 16)
             * (6144 * 2 + 1536 * 3)
             * 2;
+        // Reuse each adapter's rank-sized forward activation in its reverse pass.
+        activations += if c.gradient_checkpointing { 1 } else { 28 } * 8 * tokens * c.rank * 2;
         if c.targets == Targets::All {
+            // Bound every auxiliary projection by the longest possible input sequence.
+            activations += 40 * tokens.max(text_tokens * 12) * c.rank * 2;
             // Four extra main-block tensors only when modulation is trainable.
             if !c.gradient_checkpointing {
                 activations += 28 * tokens * 4 * 6144 * 2;

@@ -424,6 +424,76 @@ fn lora_backward_and_adam_match_independent_dense_algebra() {
 }
 
 #[test]
+#[ignore = "requires a gfx1151 GPU"]
+fn lora_cached_activation_preserves_outputs_and_accumulated_gradients() {
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (m, k, n, rank, zero_b) in [
+        (7, 19, 11, 3, false),
+        (65, 128, 64, 32, false),
+        (513, 64, 128, 64, false),
+        (7, 19, 11, 3, true),
+    ] {
+        let p = Projection::new(
+            &ops,
+            &mut stream,
+            &Factors {
+                inputs: k,
+                outputs: n,
+                rank,
+                alpha: rank as f32 * 0.5,
+                a: values(rank * k, 5),
+                b: if zero_b { vec![0.0; n * rank] } else { values(n * rank, 11) },
+            },
+        )
+        .unwrap();
+        let x = upload(&ops, &mut stream, m, k, &values(m * k, 2));
+        let grad = upload(&ops, &mut stream, m, n, &values(m * n, 7));
+        let base = upload(&ops, &mut stream, m, n, &values(m * n, 13));
+        let dx = upload(&ops, &mut stream, m, k, &values(m * k, 17));
+        let (candidate, low) = p.forward_cached(&ops, &stream, &x, &base, 1.0).unwrap();
+        let reference = p.forward(&ops, &stream, &x, &base, 1.0).unwrap();
+        assert_eq!(
+            candidate.download(&mut stream).unwrap(),
+            reference.download(&mut stream).unwrap()
+        );
+        let expected_low = ops::matmul(&ops, &stream, &x, &p.a.value, 1.0).unwrap();
+        assert_eq!(
+            low.download(&mut stream).unwrap(),
+            expected_low.download(&mut stream).unwrap()
+        );
+        for _ in 0..2 {
+            p.backward(&ops, &stream, &x, &grad, &dx).unwrap();
+        }
+        let a = p.a.grad.download(&mut stream).unwrap();
+        let b = p.b.grad.download(&mut stream).unwrap();
+        p.a.grad.clear(&stream).unwrap();
+        p.b.grad.clear(&stream).unwrap();
+        for _ in 0..2 {
+            let candidate = p.backward_cached(&ops, &stream, &x, &grad, &dx, &low).unwrap();
+            // Recompute dX without changing the accumulated parameter gradients.
+            let dl = ops::matmul_nn(&ops, &stream, &grad, &p.b.value, 0.5).unwrap();
+            let branch = ops::matmul_nn(&ops, &stream, &dl, &p.a.value, 1.0).unwrap();
+            let reference = ops::add_scaled(&ops, &stream, &dx, &branch, 1.0).unwrap();
+            assert_eq!(
+                candidate.download(&mut stream).unwrap(),
+                reference.download(&mut stream).unwrap()
+            );
+        }
+        assert_eq!(p.a.grad.download(&mut stream).unwrap(), a);
+        assert_eq!(p.b.grad.download(&mut stream).unwrap(), b);
+        let bad_low = upload(&ops, &mut stream, m, rank + 1, &vec![0.0; m * (rank + 1)]);
+        assert!(p.backward_cached(&ops, &stream, &x, &grad, &dx, &bad_low).is_err());
+        assert!(p.backward_cached(&ops, &stream, &x, &grad, &bad_low, &low).is_err());
+        assert!(p.backward_cached(&ops, &stream, &x, &bad_low, &dx, &low).is_err());
+        assert!(p.backward_cached(&ops, &stream, &bad_low, &grad, &dx, &low).is_err());
+        // Invalid calls must not partially accumulate either parameter gradient.
+        assert_eq!(p.a.grad.download(&mut stream).unwrap(), a);
+        assert_eq!(p.b.grad.download(&mut stream).unwrap(), b);
+    }
+}
+
+#[test]
 #[ignore = "requires an idle gfx1151 GPU"]
 fn prepared_optimizer_matches_updates_and_rejects_nonfinite_gradients_atomically() {
     let mut stream = Stream::open().unwrap();
