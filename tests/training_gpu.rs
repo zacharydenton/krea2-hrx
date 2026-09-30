@@ -89,9 +89,18 @@ fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
 fn adapter_gradient_accumulation_matches_cpu_across_ragged_tiles() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());
-    for (k, m, n) in
-        [(1, 1, 1), (7, 3, 19), (31, 33, 65), (33, 65, 32), (1070, 32, 64), (4115, 64, 32)]
-    {
+    for (k, m, n) in [
+        (1, 1, 1),
+        (7, 3, 19),
+        (7, 32, 32),
+        (31, 64, 32),
+        (32, 32, 32),
+        (33, 32, 64),
+        (31, 33, 65),
+        (33, 65, 32),
+        (1070, 32, 64),
+        (4115, 64, 32),
+    ] {
         let a = values(k * m, 5);
         let b = values(k * n, 11);
         let av = upload(&ops, &mut stream, k, m, &a);

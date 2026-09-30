@@ -9,6 +9,14 @@ use krea2::{
 };
 use std::{hint::black_box, path::Path, time::Duration};
 
+fn kernel_source(name: &str) -> String {
+    std::env::var_os("KREA2_BENCH_KERNEL_DIR")
+        .map(|directory| {
+            std::fs::read_to_string(Path::new(&directory).join(format!("{name}.loom"))).unwrap()
+        })
+        .unwrap_or_else(|| krea2::kernels::sources::auxiliary(name).unwrap().to_owned())
+}
+
 fn dense(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/dense");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -57,10 +65,9 @@ fn dense(c: &mut Criterion) {
                             request.set_report(hrx::loom::ReportMode::Details);
                         }
                         let compiler = krea2::kernels::compiler(None).unwrap();
-                        let artifact = compiler
-                            .module(krea2::kernels::sources::auxiliary(name).unwrap())
-                            .compile(&request)
-                            .unwrap();
+                        // Compare candidate Loom sources without rebuilding the trainer.
+                        let source = kernel_source(name);
+                        let artifact = compiler.module(&source).compile(&request).unwrap();
                         // SAFETY: this benchmark uses each kernel's declared matrix layout and tile geometry.
                         let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
                         let constants = krea2::kernels::Scalars::new()
@@ -138,6 +145,78 @@ fn tensor(ops: &Ops, stream: &mut Stream, rows: usize, cols: usize) -> Tensor {
         .map(|i| from_f32(((i % 113) as f32 - 56.0) * 0.01))
         .collect::<Vec<_>>();
     Tensor::from_slice(ops.pool(), stream, &values, rows, cols).unwrap()
+}
+
+fn adapter_gradients(c: &mut Criterion) {
+    let name = "train_gemm_tn_accumulate";
+    let mut group = c.benchmark_group("training/adapter_gradient");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (m, n, k) in [
+        (32usize, 6144usize, 1043usize),
+        (6144, 32, 1043),
+        (32, 16384, 1043),
+        (16384, 32, 1043),
+        (32, 16384, 4115),
+        (16384, 32, 4115),
+    ] {
+        let mut prepared = None;
+        group.bench_function(format!("{m}x{n}x{k}"), |b| {
+            let (stream, kernel, constants, a, weight, out) =
+                prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let ops = Ops::new(BufferPool::new());
+                    let a = tensor(&ops, &mut stream, k, m);
+                    let weight = tensor(&ops, &mut stream, k, n);
+                    let out = train::FloatTensor::zero(&stream, m, n).unwrap();
+                    let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
+                    for (key, value) in
+                        [("m", m), ("n", n), ("k", k), ("grid_x", n / 32), ("grid_y", m / 32)]
+                    {
+                        request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+                    }
+                    request.set_report(hrx::loom::ReportMode::Details);
+                    let artifact = krea2::kernels::compiler(None)
+                        .unwrap()
+                        .module(&kernel_source(name))
+                        .compile(&request)
+                        .unwrap();
+                    if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                        let directory = Path::new(&directory);
+                        std::fs::create_dir_all(directory).unwrap();
+                        std::fs::write(
+                            directory.join(format!("{name}-{m}x{n}x{k}-compiler.json")),
+                            artifact.report().unwrap().json().to_string(),
+                        )
+                        .unwrap();
+                    }
+                    // SAFETY: the configured input/output matrices match the kernel ABI.
+                    let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
+                    let constants = krea2::kernels::Scalars::new()
+                        .index(m * n)
+                        .float(0.001)
+                        .pack(name, &kernel)
+                        .unwrap();
+                    stream.synchronize().unwrap();
+                    (stream, kernel, constants, a, weight, out)
+                });
+            b.iter(|| {
+                // SAFETY: each workgroup accumulates its own 32x32 output tile.
+                unsafe {
+                    stream
+                        .dispatch(
+                            kernel,
+                            [(n / 32) as u32, (m / 32) as u32, 1],
+                            [128, 1, 1],
+                            constants,
+                            &[a.binding().unwrap(), weight.binding().unwrap(), out.binding()],
+                        )
+                        .unwrap();
+                }
+                stream.synchronize().unwrap();
+            });
+        });
+    }
+    group.finish();
 }
 
 fn projections(c: &mut Criterion) {
@@ -463,6 +542,7 @@ fn full_step(c: &mut Criterion) {
 criterion_group!(
     benches,
     dense,
+    adapter_gradients,
     projections,
     attention,
     fusion_attention,

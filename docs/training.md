@@ -179,6 +179,13 @@ uninstrumented dispatches afterward; profiling markers serialize execution and
 must not be treated as end-to-end timing. Realistic token counts include text
 tokens, so the benches cover ragged shapes such as 1043 and 4115.
 
+Set `KREA2_BENCH_KERNEL_DIR` to a directory of candidate `<kernel-name>.loom`
+files to compare dense and adapter-gradient kernel changes without rebuilding
+the benchmark. Every selected kernel must have a source file in that directory.
+Normal training continues to use the embedded kernels; keep candidate files and
+reports outside the checkout. The `training/adapter_gradient` cases measure
+direct FP32 parameter-gradient accumulation in both projection directions.
+
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,
 allocation and queue backpressure, and do not measure kernel execution time.
