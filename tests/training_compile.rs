@@ -30,12 +30,17 @@ fn training_kernels_compile_without_a_device() {
             ("width", 8),
             ("parts", 1),
             ("reverse", 1),
+            ("sigmoid", 0),
         ] {
             request.set_config(format!("krea2.{name}.{key}"), value.to_string());
         }
         compiler.module(source).compile(&request).unwrap_or_else(|e| panic!("{name}: {e}"));
         if name == "lora_transport" {
             request.set_config("krea2.lora_transport.reverse", "2");
+            compiler.module(source).compile(&request).unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+        if name == "train_gated_backward" {
+            request.set_config("krea2.train_gated_backward.sigmoid", "1");
             compiler.module(source).compile(&request).unwrap_or_else(|e| panic!("{name}: {e}"));
         }
     }

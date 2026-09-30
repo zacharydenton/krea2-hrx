@@ -145,6 +145,10 @@ Optimizer updates replay prepared HRX graphs for all parameter norms and AdamW
 operations. The complete global norm is read and checked before any parameter
 update; a nonfinite gradient cancels the update without changing optimizer state.
 
+MLP and attention gate derivatives each use one fused dispatch. It reads the
+cached forward activation and writes both branch gradients, preserving the BF16
+rounding of the intermediate product without materializing that temporary tensor.
+
 The memory budget limits HRX allocations during preparation and training. A
 conservative training estimate is checked before opening its stream. The
 estimate counts BF16 weights once and includes the additional execution copies
@@ -195,6 +199,13 @@ The paired ratio is descriptive, without a confidence interval. Check identical
 sources and swap reference/candidate roles when investigating small differences.
 This helps compare kernels under changing GPU contention, but does not replace an
 uncontended end-to-end measurement.
+
+`training/frozen_backward/cached_transpose` measures reusing a frozen weight
+transpose created during setup. Set `KREA2_BENCH_PAIR_FROZEN_DIRECT=1` to pair it
+with the direct reverse GEMM on the same inputs. This is an experiment; training
+does not retain these weight transposes. `training/gated_backward` always pairs
+the fused gate derivative with the original three-operation sequence. Both use
+the same alternating-order timing and summary as the dense comparison.
 
 `KREA2_HOST_PROFILE=1` reports per-update host wall time for training matrix
 operations, transposes and optimizer submissions. These include compilation,

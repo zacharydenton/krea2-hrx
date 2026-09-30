@@ -1,0 +1,68 @@
+// Reverse grad * (activation(x) * value), retaining the cached activation and
+// the BF16 rounding boundary between the product and activation derivative.
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_gated_backward.sigmoid : %value: index where [range(%value, 0, 1)]
+config.decl @krea2.train_gated_backward.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_gated_backward.grid_y : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@target) export("krea2_train_gated_backward") @krea2_train_gated_backward(%count: index) {
+  %one = index.constant 1 : index
+  %threads = index.constant 256 : index
+  %grid_x = config.get @krea2.train_gated_backward.grid_x : index
+  %grid_y = config.get @krea2.train_gated_backward.grid_y : index
+  kernel.launch.config workgroups(%grid_x, %grid_y, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %x: buffer, %activation: buffer, %value: buffer, %grad: buffer, %dx: buffer, %dv: buffer) {
+  %offset = index.constant 0 : offset
+  %zero = index.constant 0 : index
+  %n = index.assume %count [range(%count, 1, 1073741824)] : index
+  %lane = kernel.workitem.id<x> : index
+  %group = kernel.workgroup.id<x> : index
+  %step = index.constant 256 : index
+  %base = index.mul %group, %step : index
+  %idx = index.add %base, %lane : index
+  %mode = config.get @krea2.train_gated_backward.sigmoid : index
+  %sigmoid = index.cmp ne, %mode, %zero : index
+  %xg = buffer.assume.memory_space<global> %x : buffer
+  %xv = buffer.view %xg[%offset] : buffer -> view<[%n]xbf16>
+  %ag = buffer.assume.memory_space<global> %activation : buffer
+  %av = buffer.view %ag[%offset] : buffer -> view<[%n]xbf16>
+  %vg = buffer.assume.memory_space<global> %value : buffer
+  %vv = buffer.view %vg[%offset] : buffer -> view<[%n]xbf16>
+  %gg = buffer.assume.memory_space<global> %grad : buffer
+  %gv = buffer.view %gg[%offset] : buffer -> view<[%n]xbf16>
+  %dxg = buffer.assume.memory_space<global> %dx : buffer
+  %dxv = buffer.view %dxg[%offset] : buffer -> view<[%n]xbf16>
+  %dvg = buffer.assume.memory_space<global> %dv : buffer
+  %dvv = buffer.view %dvg[%offset] : buffer -> view<[%n]xbf16>
+  %ok = index.cmp ult, %idx, %n : index
+  scf.if %ok {
+    %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+    %xb = view.load %xv[%i] : view<[%n]xbf16> -> bf16
+    %xf = scalar.extf %xb : bf16 to f32
+    %ab = view.load %av[%i] : view<[%n]xbf16> -> bf16
+    %af = scalar.extf %ab : bf16 to f32
+    %vb = view.load %vv[%i] : view<[%n]xbf16> -> bf16
+    %vf = scalar.extf %vb : bf16 to f32
+    %gb = view.load %gv[%i] : view<[%n]xbf16> -> bf16
+    %gf = scalar.extf %gb : bf16 to f32
+    %product = scalar.mulf %gf, %vf : f32
+    %product_bf16 = scalar.fptrunc %product : f32 to bf16
+    %incoming = scalar.extf %product_bf16 : bf16 to f32
+    %one = scalar.constant 1.0 : f32
+    %negative = scalar.negf %xf : f32
+    %exp = scalar.expf<afn> %negative : f32
+    %denom = scalar.addf %one, %exp : f32
+    %sig = scalar.divf %one, %denom : f32
+    %complement = scalar.subf %one, %sig : f32
+    %sig_derivative = scalar.mulf %sig, %complement : f32
+    %term = scalar.mulf %xf, %sig_derivative : f32
+    %silu_derivative = scalar.addf %sig, %term : f32
+    %derivative = scf.select %sigmoid, %sig_derivative, %silu_derivative : f32
+    %dx_f32 = scalar.mulf %incoming, %derivative : f32
+    %dx_bf16 = scalar.fptrunc %dx_f32 : f32 to bf16
+    %dv_f32 = scalar.mulf %gf, %af : f32
+    %dv_bf16 = scalar.fptrunc %dv_f32 : f32 to bf16
+    view.store %dx_bf16, %dxv[%i] : bf16, view<[%n]xbf16>
+    view.store %dv_bf16, %dvv[%i] : bf16, view<[%n]xbf16>
+  }
+  kernel.return
+}

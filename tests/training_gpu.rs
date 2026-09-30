@@ -45,6 +45,61 @@ fn close(got: &[f32], expected: &[f32], relative: f64, absolute: f64) {
 
 #[test]
 #[ignore = "requires a gfx1151 GPU"]
+fn gated_backward_preserves_product_rounding_and_matches_chain_rule() {
+    use krea2::ops::Binary;
+    let mut stream = Stream::open().unwrap();
+    let ops = Ops::new(BufferPool::new());
+    for (rows, cols) in [(1, 1), (1, 31), (1, 255), (1, 256), (1, 257), (3, 6144)] {
+        let size = rows * cols;
+        let x: Vec<_> = values(size, 3).into_iter().map(|v| v * 32.0).collect();
+        // Supply an independent cached activation so recomputing it would fail.
+        let activation = values(size, 7);
+        let value = values(size, 11);
+        let grad = values(size, 19);
+        let xt = upload(&ops, &mut stream, rows, cols, &x);
+        let at = upload(&ops, &mut stream, rows, cols, &activation);
+        let vt = upload(&ops, &mut stream, rows, cols, &value);
+        let gt = upload(&ops, &mut stream, rows, cols, &grad);
+        for sigmoid in [false, true] {
+            let (dx, dv) =
+                ops::gated_backward(&ops, &stream, &xt, &at, &vt, &gt, sigmoid).unwrap();
+            let baseline_v = ops.binary(&stream, &gt, &at, Binary::Mul).unwrap();
+            let product = ops.binary(&stream, &gt, &vt, Binary::Mul).unwrap();
+            let baseline_x =
+                ops::activation_backward(&ops, &stream, &xt, &product, sigmoid).unwrap();
+            assert_eq!(
+                dx.download(&mut stream).unwrap(),
+                baseline_x.download(&mut stream).unwrap()
+            );
+            assert_eq!(
+                dv.download(&mut stream).unwrap(),
+                baseline_v.download(&mut stream).unwrap()
+            );
+            let expected: Vec<_> = (0..size)
+                .map(|i| {
+                    let sig = 1.0 / (1.0 + (-f64::from(x[i])).exp());
+                    let derivative = if sigmoid {
+                        sig * (1.0 - sig)
+                    } else {
+                        sig + f64::from(x[i]) * sig * (1.0 - sig)
+                    };
+                    (f64::from(to_f32(from_f32(grad[i] * value[i]))) * derivative) as f32
+                })
+                .collect();
+            close(&read(&dx, &mut stream), &expected, 0.004, 1e-7);
+        }
+        let mismatch = upload(&ops, &mut stream, 1, size + 1, &vec![0.0; size + 1]);
+        for inputs in [(&mismatch, &vt, &gt), (&at, &mismatch, &gt), (&at, &vt, &mismatch)] {
+            assert!(
+                ops::gated_backward(&ops, &stream, &xt, inputs.0, inputs.1, inputs.2, false)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a gfx1151 GPU"]
 fn dense_training_gemm_matches_cpu_across_dispatch_and_tile_boundaries() {
     let mut stream = Stream::open().unwrap();
     let ops = Ops::new(BufferPool::new());

@@ -21,6 +21,44 @@ fn kernel_source(name: &str) -> String {
         .unwrap_or_else(|| krea2::kernels::sources::auxiliary(name).unwrap().to_owned())
 }
 
+#[derive(Default)]
+struct PairedTimings {
+    totals: [Duration; 2],
+    pairs: u64,
+}
+
+impl PairedTimings {
+    // The callback must synchronize each operation before returning.
+    fn measure(&mut self, iterations: u64, mut run: impl FnMut(bool)) -> Duration {
+        let mut candidate_time = Duration::ZERO;
+        for _ in 0..iterations {
+            for side in [self.pairs as usize % 2, 1 - self.pairs as usize % 2] {
+                let start = Instant::now();
+                run(side == 1);
+                let elapsed = start.elapsed();
+                self.totals[side] += elapsed;
+                if side == 1 {
+                    candidate_time += elapsed;
+                }
+            }
+            self.pairs += 1;
+        }
+        candidate_time
+    }
+
+    fn report(&self, label: &str) {
+        if self.pairs > 0 {
+            eprintln!(
+                "paired {label}: reference {:.3} ms, candidate {:.3} ms, ratio {:.4} ({} pairs, including warm-up)",
+                self.totals[0].as_secs_f64() * 1000.0 / self.pairs as f64,
+                self.totals[1].as_secs_f64() * 1000.0 / self.pairs as f64,
+                self.totals[1].as_secs_f64() / self.totals[0].as_secs_f64(),
+                self.pairs,
+            );
+        }
+    }
+}
+
 fn dense(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/dense");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
@@ -40,8 +78,7 @@ fn dense(c: &mut Criterion) {
             ("train_gemm_nn", 128, 64),
         ] {
             let mut prepared = None;
-            let mut paired_totals = [Duration::ZERO; 2];
-            let mut pairs = 0u64;
+            let mut paired = PairedTimings::default();
             let label = format!("{name}/{m}x{n}x{k}");
             group.bench_function(&label, |b| {
                 let (stream, kernel, constants, reference, a, w, out, grid) = prepared
@@ -163,37 +200,19 @@ fn dense(c: &mut Criterion) {
                 };
                 if let Some((reference, reference_constants)) = reference {
                     b.iter_custom(|iterations| {
-                        let mut candidate_time = Duration::ZERO;
-                        for _ in 0..iterations {
-                            for side in [pairs as usize % 2, 1 - pairs as usize % 2] {
-                                let start = Instant::now();
-                                if side == 0 {
-                                    dispatch(reference, reference_constants);
-                                } else {
-                                    dispatch(kernel, constants);
-                                }
-                                let elapsed = start.elapsed();
-                                paired_totals[side] += elapsed;
-                                if side == 1 {
-                                    candidate_time += elapsed;
-                                }
+                        paired.measure(iterations, |candidate| {
+                            if candidate {
+                                dispatch(kernel, constants);
+                            } else {
+                                dispatch(reference, reference_constants);
                             }
-                            pairs += 1;
-                        }
-                        candidate_time
+                        })
                     });
                 } else {
                     b.iter(|| dispatch(kernel, constants));
                 }
             });
-            if pairs > 0 {
-                eprintln!(
-                    "paired {label}: reference {:.3} ms, candidate {:.3} ms, ratio {:.4} ({pairs} pairs, including warm-up)",
-                    paired_totals[0].as_secs_f64() * 1000.0 / pairs as f64,
-                    paired_totals[1].as_secs_f64() * 1000.0 / pairs as f64,
-                    paired_totals[1].as_secs_f64() / paired_totals[0].as_secs_f64(),
-                );
-            }
+            paired.report(&label);
         }
     }
     group.finish();
@@ -435,28 +454,37 @@ fn fusion_attention(c: &mut Criterion) {
 fn frozen_backward(c: &mut Criterion) {
     let mut group = c.benchmark_group("training/frozen_backward");
     group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    let pair_direct = std::env::var_os("KREA2_BENCH_PAIR_FROZEN_DIRECT").is_some();
     for (tokens, inputs, outputs) in [
+        (1043, 6144, 1536),
+        (1043, 1536, 6144),
         (1043, 6144, 6144),
         (1043, 16384, 6144),
         (1043, 6144, 16384),
         (4115, 16384, 6144),
         (4115, 6144, 16384),
     ] {
-        for direct in [false, true] {
+        for method in ["transpose", "direct", "cached_transpose"] {
             let mut prepared = None;
-            let method = if direct { "direct" } else { "transpose" };
-            group.bench_function(format!("{method}/{tokens}x{inputs}x{outputs}"), |b| {
-                let (mut stream, ops, gradient, weight) =
+            let mut paired = PairedTimings::default();
+            let label = format!("{method}/{tokens}x{inputs}x{outputs}");
+            group.bench_function(&label, |b| {
+                let (mut stream, ops, gradient, weight, cached) =
                     prepared.take().unwrap_or_else(|| {
                         let mut stream = Stream::open().unwrap();
                         let ops = Ops::new(BufferPool::new());
                         let gradient = tensor(&ops, &mut stream, tokens, outputs);
                         let weight = tensor(&ops, &mut stream, outputs, inputs);
-                        (stream, ops, gradient, weight)
+                        let cached = (method == "cached_transpose")
+                            .then(|| train::transpose(&ops, &stream, &weight).unwrap());
+                        stream.synchronize().unwrap();
+                        (stream, ops, gradient, weight, cached)
                     });
-                let mut run = || {
-                    let dx = if direct {
+                let mut run = |candidate: bool| {
+                    let dx = if !candidate || method == "direct" {
                         train::matmul_nn(&ops, &stream, &gradient, &weight, 1.0).unwrap()
+                    } else if let Some(transpose) = &cached {
+                        train::matmul(&ops, &stream, &gradient, transpose, 1.0).unwrap()
                     } else {
                         let transpose = train::transpose(&ops, &stream, &weight).unwrap();
                         train::matmul(&ops, &stream, &gradient, &transpose, 1.0).unwrap()
@@ -464,11 +492,62 @@ fn frozen_backward(c: &mut Criterion) {
                     stream.synchronize().unwrap();
                     black_box(dx);
                 };
-                run();
-                b.iter(run);
-                prepared = Some((stream, ops, gradient, weight));
+                run(true);
+                if pair_direct && cached.is_some() {
+                    run(false);
+                    b.iter_custom(|iterations| paired.measure(iterations, &mut run));
+                } else {
+                    b.iter(|| run(true));
+                }
+                prepared = Some((stream, ops, gradient, weight, cached));
             });
+            paired.report(&label);
         }
+    }
+    group.finish();
+}
+
+fn gated_backward(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/gated_backward");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (tokens, width, sigmoid) in
+        [(1043, 6144, true), (1043, 16384, false), (4115, 6144, true), (4115, 16384, false)]
+    {
+        let mut prepared = None;
+        let mut paired = PairedTimings::default();
+        let activation_name = if sigmoid { "sigmoid" } else { "silu" };
+        let label = format!("{activation_name}/{tokens}x{width}");
+        group.bench_function(&label, |b| {
+            let (stream, ops, x, activation, value, grad) = prepared.get_or_insert_with(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let tensors = std::array::from_fn::<_, 4, _>(|_| {
+                    tensor(&ops, &mut stream, tokens, width)
+                });
+                let [x, activation, value, grad] = tensors;
+                (stream, ops, x, activation, value, grad)
+            });
+            let mut run = |candidate| {
+                let result = if candidate {
+                    train::gated_backward(ops, stream, x, activation, value, grad, sigmoid)
+                        .unwrap()
+                } else {
+                    let dv =
+                        ops.binary(stream, grad, activation, krea2::ops::Binary::Mul).unwrap();
+                    let product =
+                        ops.binary(stream, grad, value, krea2::ops::Binary::Mul).unwrap();
+                    let dx =
+                        train::activation_backward(ops, stream, x, &product, sigmoid).unwrap();
+                    (dx, dv)
+                };
+                stream.synchronize().unwrap();
+                black_box(result);
+            };
+            run(false);
+            run(true);
+            b.iter_custom(|iterations| paired.measure(iterations, &mut run));
+        });
+        paired.report(&label);
     }
     group.finish();
 }
@@ -606,6 +685,7 @@ criterion_group!(
     attention,
     fusion_attention,
     frozen_backward,
+    gated_backward,
     adamw,
     optimizer_update,
     full_step

@@ -572,6 +572,43 @@ pub fn activation_backward(
     Ok(out)
 }
 
+/// Reverse a cached SiLU/sigmoid gate times a value, returning `(dx, dvalue)`.
+/// Preserve the BF16 product rounding before applying the activation derivative.
+pub fn gated_backward(
+    ops: &Ops,
+    stream: &Stream,
+    x: &Tensor,
+    activation: &Tensor,
+    value: &Tensor,
+    grad: &Tensor,
+    sigmoid: bool,
+) -> Result<(Tensor, Tensor)> {
+    if [activation, value, grad].iter().any(|t| t.rows() != x.rows() || t.cols() != x.cols()) {
+        return Err(Error::invalid("gated gradient dimensions"));
+    }
+    let dx = ops.tensor(stream, x.rows(), x.cols())?;
+    let dv = ops.tensor(stream, x.rows(), x.cols())?;
+    // SAFETY: matching BF16 matrices and two distinct, fully written outputs.
+    unsafe {
+        ops.launch_1d(
+            stream,
+            "train_gated_backward",
+            config(&[("sigmoid", usize::from(sigmoid))]),
+            &Scalars::new().index(x.size()),
+            &[
+                x.binding()?,
+                activation.binding()?,
+                value.binding()?,
+                grad.binding()?,
+                dx.binding()?,
+                dv.binding()?,
+            ],
+            x.size(),
+        )?;
+    }
+    Ok((dx, dv))
+}
+
 /// Backward through zero-centered RMSNorm with frozen FP32 scales.
 pub fn norm_backward(
     ops: &Ops,

@@ -470,9 +470,8 @@ impl Transformer {
         let row = |i: usize| mods.view(1, 6144, i * 6144);
         let gd = ops.binary(stream, grad, &row(5)?, Binary::Mul)?;
         let gm = self.linear_backward(ops, stream, &t.mixed, &gd, &format!("{p}.mlp.down"))?;
-        let gu = ops.binary(stream, &gm, &t.mlp_gate, Binary::Mul)?;
-        let gg = ops.binary(stream, &gm, &t.up, Binary::Mul)?;
-        let gg = train::activation_backward(ops, stream, &t.mlp_gate0, &gg, false)?;
+        let (gg, gu) =
+            train::gated_backward(ops, stream, &t.mlp_gate0, &t.mlp_gate, &t.up, &gm, false)?;
         let gp1 = self.linear_backward(ops, stream, &t.post, &gg, &format!("{p}.mlp.gate"))?;
         let gp2 = self.linear_backward(ops, stream, &t.post, &gu, &format!("{p}.mlp.up"))?;
         let gp = train::add_scaled(ops, stream, &gp1, &gp2, 1.0)?;
@@ -505,9 +504,15 @@ impl Transformer {
         let go = ops.binary(stream, &gr, &row(2)?, Binary::Mul)?;
         let ga =
             self.linear_backward(ops, stream, &t.attended, &go, &format!("{p}.attn.wo"))?;
-        let gat = ops.binary(stream, &ga, &t.gate, Binary::Mul)?;
-        let gg = ops.binary(stream, &ga, &t.attention.output, Binary::Mul)?;
-        let gg = train::activation_backward(ops, stream, &t.gate0, &gg, true)?;
+        let (gg, gat) = train::gated_backward(
+            ops,
+            stream,
+            &t.gate0,
+            &t.gate,
+            &t.attention.output,
+            &ga,
+            true,
+        )?;
         let (gq, gk, gv) =
             train::attention_backward(ops, stream, &t.q, &t.k, &t.v, &t.attention, &gat)?;
         let gq = train::rope(ops, stream, &gq, cos, sin, true)?;
