@@ -436,7 +436,7 @@ impl Trainer {
         let textfile = Checkpoint::open(&prepare::cache_path(&self.config, sample, "text"))?;
         let text = textfile.get(prepare::text_spec(&self.config).0)?;
         let textbits: Vec<u16> =
-            text.bytes.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
+            text.bytes.as_chunks::<2>().0.iter().map(|v| u16::from_le_bytes(*v)).collect();
         let text =
             Tensor::from_slice(ops.pool(), stream, &textbits, text.shape[0], text.shape[1])?;
         let full = self.config.targets == Targets::All;

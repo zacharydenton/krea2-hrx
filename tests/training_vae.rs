@@ -57,7 +57,7 @@ fn cached_posterior_reencodes_exactly_and_reconstructs_the_image() {
         let cached = file.get("posterior").unwrap();
         assert_eq!(cached.dtype, DType::BF16);
         let bits: Vec<u16> =
-            cached.bytes.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
+            cached.bytes.as_chunks::<2>().0.iter().map(|v| u16::from_le_bytes(*v)).collect();
         assert_eq!(encoded, bits, "cached posterior differs from fresh encoding");
         let moments = encoded.into_iter().map(to_f32).collect::<Vec<_>>();
         let packed =

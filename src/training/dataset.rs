@@ -213,7 +213,7 @@ mod tests {
         for resolution in [512, 768, 1024] {
             let b = buckets(resolution);
             assert_eq!(b[0], (resolution, resolution));
-            for pair in b[1..].chunks_exact(2) {
+            for pair in b[1..].as_chunks::<2>().0 {
                 assert_eq!(pair[0], (pair[1].1, pair[1].0));
             }
             assert!(

@@ -752,7 +752,7 @@ mod full_target_tests {
             (err / norm).sqrt()
         );
         assert!(dm.iter().all(|v| v.is_finite()));
-        for row in dm.chunks_exact(6144) {
+        for row in dm.as_chunks::<6144>().0 {
             assert!(row.iter().any(|v| *v != 0.0));
         }
         let parameters: Vec<_> = model.adapters.values().flat_map(|p| [&p.a, &p.b]).collect();

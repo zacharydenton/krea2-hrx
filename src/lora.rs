@@ -275,14 +275,14 @@ pub(crate) fn floats(t: crate::checkpoint::Tensor<'_>) -> Result<Vec<f32>> {
     match t.dtype {
         DType::BF16 => Ok(t
             .bytes
-            .chunks_exact(2)
-            .map(|v| to_f32(u16::from_le_bytes([v[0], v[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|v| to_f32(u16::from_le_bytes(*v)))
             .collect()),
-        DType::F32 => Ok(t
-            .bytes
-            .chunks_exact(4)
-            .map(|v| f32::from_le_bytes(v.try_into().expect("four bytes")))
-            .collect()),
+        DType::F32 => {
+            Ok(t.bytes.as_chunks::<4>().0.iter().map(|v| f32::from_le_bytes(*v)).collect())
+        }
         _ => Err(Error::invalid("LoRA tensors must be BF16 or F32")),
     }
 }
