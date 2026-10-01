@@ -10,13 +10,14 @@ mod shared;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use crate::context::native_stream;
 use crate::models::Models;
 use crate::numerics::{from_f32, to_f32};
 use crate::ops::Tensor;
 use crate::session::{Session, Weights};
 use hrx::Stream;
 use hrx::inference::ModelContext;
-use shared::{BlockCache, BlockShape, Blocks, Bridge, native_stream};
+use shared::{BlockCache, BlockShape, Blocks, Bridge};
 
 use self::profile::Profile;
 
@@ -113,13 +114,30 @@ impl Pipeline {
         adapter: &crate::lora::Adapter,
         strength: f32,
     ) -> Result<Pipeline> {
+        Self::open_with_adapter_in(
+            files,
+            &ModelContext::new(Default::default())?,
+            compiler,
+            adapter,
+            strength,
+        )
+    }
+
+    /// Open with a LoRA on the caller's device and shared allocation budget.
+    pub fn open_with_adapter_in(
+        files: Files,
+        context: &ModelContext,
+        compiler: Option<&str>,
+        adapter: &crate::lora::Adapter,
+        strength: f32,
+    ) -> Result<Pipeline> {
         if !strength.is_finite() {
             return Err(Error::invalid("LoRA strength must be finite"));
         }
         adapter.validate()?;
         Self::open_impl(
             files,
-            &ModelContext::new(Default::default())?,
+            context,
             compiler,
             (strength != 0.0).then_some(adapter),
             strength,

@@ -1,6 +1,6 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs` 0.8](https://crates.io/crates/hrx-rs) for keyed kernel
+Krea uses [`hrx-rs` 0.8.15](https://crates.io/crates/hrx-rs) or a compatible 0.8 release for keyed kernel
 requests and the coordinated graph API.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
 The GPU runtime and Loom come from the unified HRX 0.8 native bundle.
@@ -16,6 +16,13 @@ tables. HRX's bounded `PlanCache` keeps two idle-evictable shapes, keyed by imag
 width, height and text length, so equal token counts do not alias different RoPE
 geometries. Immutable block weights are shared across those plans.
 
+`Pipeline::open_with_adapter_in(files, &context, compiler, &adapter, strength)`
+uses the same context for LoRA inference, including strength zero. Standalone
+`open` and `open_with_adapter` create a private context and delegate to these
+entry points. An application's root `[patch.crates-io]` applies to Krea's HRX
+dependency too; keep every model on the same resolved HRX package so their
+`ModelContext` types and native runtime agree.
+
 Auxiliary models and their tensor pool use a separate ordered native stream.
 Owned device-copy handoffs drain each boundary without reading intermediate
 latents back to the host. A failed handoff quarantines its stream and captured
@@ -27,6 +34,46 @@ allocating, including native weights, auxiliary pools, block workspace and
 transfer staging. Residency statistics include those native allocations;
 coordinated Runtime statistics still cover only tracked tensors. Driver/compiler memory
 and native allocator rounding remain outside it.
+
+Training provides `Trainer::open_in(config, &context)` and
+`Trainer::resume_in(checkpoint, &context)`. Preparation provides
+`training::prepare::prepare_in(&config, &context)` for both its VAE and text
+encoder passes. Existing standalone entry points create a private context.
+All native streams select the supplied context's GPU; these entry points do not
+move native training operations into the graph scheduler. The embedding
+application still controls job concurrency.
+
+The context's budget is optional: `RuntimeOptions::default()` has none. Configure
+one explicitly when the application needs a global ceiling:
+
+```rust,ignore
+let residency = hrx::residency::ResidencyManager::new(global_bytes)?;
+let context = hrx::inference::ModelContext::new(hrx::execution::RuntimeOptions {
+    memory_budget: Some(residency.budget()),
+    ..Default::default()
+})?;
+let trainer = krea2::training::Trainer::open_in(config, &context)?;
+```
+
+HRX 0.8 supports one allocation counter per native stream. Training preserves
+its hard `memory_gib` ceiling by reserving that **entire allowance** in the
+context's global budget before loading, then enforcing the allowance on its
+private stream. The global counter reports reserved capacity, not instantaneous
+training usage. Admission can fail even when the estimated model would fit if
+the requested allowance plus other live reservations exceeds the global ceiling.
+Choose `memory_gib` accordingly; no code silently shrinks the allowance or enables
+offloading. Without a context budget, the private ceiling still applies.
+
+Each uncached preparation pass reserves and releases its allowance separately.
+A fully cached preparation needs no native stream or allowance. On normal drop
+or a drained load failure, all weights, scratch and stream staging are released
+before the global allowance. If HRX quarantines allocations after a device
+failure, the global allowance remains reserved rather than advertising that
+memory as reusable. Inference streams charge their allocations directly.
+
+The library retains training's 8 GiB system RAM floor and startup headroom checks.
+It never changes `oom_score_adj`; that process-wide policy remains exclusively
+in the standalone `krea2-train` binary.
 
 Transfers and dispatch use HRX `View` regions. Uploads copy into HRX-owned staging
 and queue work on the stream. Weight loading uses chunks of at most 16 MiB;

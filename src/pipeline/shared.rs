@@ -10,14 +10,6 @@ use hrx::{
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub(super) fn native_stream(context: &ModelContext) -> Result<Stream> {
-    let mut stream = hrx::Device::open(context.runtime().gpu()?.index())?.stream()?;
-    if let Some(budget) = context.runtime().memory_budget() {
-        stream = stream.with_memory_budget(budget.clone());
-    }
-    Ok(stream)
-}
-
 /// A failed or panicking native handoff must never reuse its stream.
 pub(super) struct Bridge {
     stream: Mutex<Stream>,

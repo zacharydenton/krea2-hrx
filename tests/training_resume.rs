@@ -28,7 +28,16 @@ fn checkpoint_resume_matches_two_uninterrupted_updates() {
         config.keep_snapshots = 2;
     }
 
-    let mut uninterrupted = Trainer::open(config).unwrap();
+    let allowance = config.memory_gib * (1usize << 30);
+    let manager = hrx::residency::ResidencyManager::new(allowance + 4096).unwrap();
+    let context = hrx::inference::ModelContext::new(hrx::execution::RuntimeOptions {
+        memory_budget: Some(manager.budget()),
+        ..Default::default()
+    })
+    .unwrap();
+    let sibling = manager.budget().reserve(4096).unwrap();
+    let mut uninterrupted = Trainer::open_in(config, &context).unwrap();
+    assert_eq!(manager.budget().reserved_bytes(), allowance + 4096);
     eprintln!("validating uninterrupted update 1");
     let first = uninterrupted.train_step().unwrap().unwrap();
     assert_eq!(first.step, 1);
@@ -55,15 +64,20 @@ fn checkpoint_resume_matches_two_uninterrupted_updates() {
     // A full checkpoint is about 48 GiB; compare hashes without retaining a third copy.
     std::fs::remove_dir_all(&complete).unwrap();
     drop(uninterrupted);
+    assert_eq!(manager.budget().reserved_bytes(), 4096);
 
     eprintln!("update 2 loss {}; validating resumed update 2", second.loss);
-    let mut resumed = Trainer::resume(&checkpoint).unwrap();
+    let mut resumed = Trainer::resume_in(&checkpoint, &context).unwrap();
+    assert_eq!(manager.budget().reserved_bytes(), allowance + 4096);
     assert_eq!(resumed.step(), 1);
     let resumed_second = resumed.train_step().unwrap().unwrap();
     assert_eq!(second.loss, resumed_second.loss);
     assert_eq!(second.gradient_norm, resumed_second.gradient_norm);
     let resumed_path = resumed.save().unwrap();
     drop(resumed);
+    assert_eq!(manager.budget().reserved_bytes(), 4096);
+    drop(sibling);
+    assert_eq!(manager.budget().reserved_bytes(), 0);
     for (file, hash) in reference {
         assert_eq!(
             hash,

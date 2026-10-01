@@ -56,7 +56,7 @@ strip = true
 lto = "thin"
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.8.11" }
+hrx = { package = "hrx-rs", version = "0.8.15" }
 
 # The CLI's error reporting.
 anyhow = "1"

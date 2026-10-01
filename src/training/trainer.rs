@@ -13,7 +13,7 @@ use crate::models::graph::{LATENT_MEAN, LATENT_STDDEV};
 use crate::numerics::{from_f32, to_f32};
 use crate::ops::{Binary, Tensor};
 use crate::{Error, Result};
-use hrx::Stream;
+use hrx::{Stream, inference::ModelContext};
 use rand::{SeedableRng, seq::SliceRandom};
 use rand_chacha::ChaCha8Rng;
 use rand_distr::{Distribution, StandardNormal};
@@ -233,7 +233,8 @@ pub struct Trainer {
     rng: ChaCha8Rng,
     order: Vec<usize>,
     failed: bool,
-    _budget: hrx::residency::ResidencyManager,
+    // Last: the global allowance must outlive native buffers and queued uses.
+    _budget: super::memory::RunBudget,
 }
 
 /// Measurements for one completed optimizer update, excluding checkpoint I/O.
@@ -261,11 +262,22 @@ fn order(count: usize, seed: u64, epoch: u64) -> Vec<usize> {
 impl Trainer {
     /// Open a prepared run; use `prepare` first. No text encoder or VAE stays resident.
     pub fn open(config: TrainConfig) -> Result<Self> {
-        Self::build(config, None)
+        Self::open_in(config, &ModelContext::new(Default::default())?)
+    }
+
+    /// Train on the caller's device, reserving `memory_gib` from its shared budget.
+    /// The same allowance is enforced as a hard private allocation ceiling.
+    pub fn open_in(config: TrainConfig, context: &ModelContext) -> Result<Self> {
+        Self::build(config, context, None)
     }
 
     /// Resume exact FP32 master/optimizer state at a complete update boundary.
     pub fn resume(checkpoint: &Path) -> Result<Self> {
+        Self::resume_in(checkpoint, &ModelContext::new(Default::default())?)
+    }
+
+    /// Resume on the caller's device and budget with the saved `memory_gib` ceiling.
+    pub fn resume_in(checkpoint: &Path, context: &ModelContext) -> Result<Self> {
         let artifact = if checkpoint.join("artifact.json").is_file() {
             let a = super::full::artifacts::Artifact::open(checkpoint)?;
             if a.manifest().kind != super::full::artifacts::Kind::Resume {
@@ -280,12 +292,16 @@ impl Trainer {
         let state: State =
             serde_json::from_slice(&std::fs::read(checkpoint.join("state.json")).map_err(io)?)
                 .map_err(io)?;
-        let result = Self::build(state.config.clone(), Some((checkpoint, state)));
+        let result = Self::build(state.config.clone(), context, Some((checkpoint, state)));
         drop(artifact);
         result
     }
 
-    fn build(config: TrainConfig, resume: Option<(&Path, State)>) -> Result<Self> {
+    fn build(
+        config: TrainConfig,
+        context: &ModelContext,
+        resume: Option<(&Path, State)>,
+    ) -> Result<Self> {
         config.validate()?;
         if config.mode == super::TrainingMode::Full {
             std::fs::create_dir_all(&config.output).map_err(io)?;
@@ -309,8 +325,9 @@ impl Trainer {
                 .checked_add(memory.host_transient)
                 .ok_or_else(|| Error::invalid("system memory estimate overflow"))?,
         )?;
-        let budget = hrx::residency::ResidencyManager::new(config.memory_gib * (1usize << 30))?;
-        let mut stream = Stream::open()?.with_memory_budget(budget.budget());
+        let budget =
+            super::memory::RunBudget::new(context, config.memory_gib * (1usize << 30))?;
+        let mut stream = budget.stream()?;
         let target = stream.target().as_str().to_owned();
         let mut state = State {
             format: if config.mode == super::TrainingMode::Full { 1 } else { 0 },

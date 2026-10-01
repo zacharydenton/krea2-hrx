@@ -24,6 +24,7 @@
 //! ```
 
 pub mod checkpoint;
+mod context;
 mod error;
 pub mod kernels;
 pub mod lora;

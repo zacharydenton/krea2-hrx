@@ -13,7 +13,7 @@ use crate::models::{Models, hub};
 use crate::numerics::from_f32;
 use crate::ops::{Ops, Tensor};
 use crate::{Error, Result};
-use hrx::{BufferPool, Stream};
+use hrx::{BufferPool, Stream, inference::ModelContext};
 
 pub(crate) fn components(c: &TrainConfig) -> Result<(PathBuf, PathBuf)> {
     let text = match &c.text_encoder {
@@ -172,6 +172,13 @@ fn save_bf16(path: &Path, name: &str, tensor: &Tensor, stream: &mut Stream) -> R
 
 /// Prepare posterior moments and frozen RAW text conditioning, then release all models.
 pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
+    prepare_in(c, &ModelContext::new(Default::default())?)
+}
+
+/// Prepare caches on the caller's device. Each uncached model pass reserves
+/// `memory_gib` from the shared budget and releases it before the next pass.
+/// Fully cached preparation creates no GPU stream or allocation reservation.
+pub fn prepare_in(c: &TrainConfig, context: &ModelContext) -> Result<PreparedDataset> {
     let mut data = PreparedDataset::scan(c)?;
     let (text, vae) = components(c)?;
     // Check RAW block storage before uploading the auxiliary graph.
@@ -206,8 +213,8 @@ pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
         )
     });
     if need_latents {
-        let budget = hrx::residency::ResidencyManager::new(c.memory_gib * (1usize << 30))?;
-        let mut stream = Stream::open()?.with_memory_budget(budget.budget());
+        let budget = super::memory::RunBudget::new(context, c.memory_gib * (1usize << 30))?;
+        let mut stream = budget.stream()?;
         let ops = Ops::new(BufferPool::new());
         let encoder = Encoder::load(&mut stream, &vae)?;
         for (index, s) in data.samples.iter().enumerate() {
@@ -236,8 +243,8 @@ pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
         .iter()
         .any(|s| !valid_cache(&cache_path(c, s, "text"), text_spec(c).0, text_spec(c).1, None));
     if need_text {
-        let budget = hrx::residency::ResidencyManager::new(c.memory_gib * (1usize << 30))?;
-        let mut stream = Stream::open()?.with_memory_budget(budget.budget());
+        let budget = super::memory::RunBudget::new(context, c.memory_gib * (1usize << 30))?;
+        let mut stream = budget.stream()?;
         let models = Models::load_parts(&mut stream, &c.model, Some(&text), None, None, None)?;
         for (index, s) in data.samples.iter().enumerate() {
             let path = cache_path(c, s, "text");
@@ -286,4 +293,74 @@ pub(crate) fn load(c: &TrainConfig) -> Result<PreparedDataset> {
         }
     }
     Ok(data)
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+
+    #[test]
+    fn cached_preparation_needs_no_gpu_and_both_missing_passes_use_shared_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = dir.path().join("images");
+        std::fs::create_dir(&images).unwrap();
+        image::RgbImage::new(512, 512).save(images.join("one.png")).unwrap();
+        std::fs::write(images.join("one.txt"), "subject").unwrap();
+        let raw = dir.path().join("raw.safetensors");
+        let tensor = |path: &Path, name: &str, rows, cols| {
+            save_tensors(
+                path,
+                [(
+                    name.into(),
+                    SavedTensor {
+                        dtype: "BF16",
+                        shape: vec![rows, cols],
+                        bytes: vec![0; rows * cols * 2],
+                    },
+                )]
+                .into(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        };
+        tensor(&raw, "blocks.0.attn.wq.weight", 1, 1);
+        let config = TrainConfig {
+            model: raw.clone(),
+            text_encoder: Some(raw.clone()),
+            vae: Some(raw),
+            dataset: images,
+            output: dir.path().join("run"),
+            resolution: 512,
+            trigger: "subject".into(),
+            ..Default::default()
+        };
+        let data = PreparedDataset::scan(&config).unwrap();
+        std::fs::create_dir_all(config.output.join("cache")).unwrap();
+        let sample = &data.samples[0];
+        let posterior = cache_path(&config, sample, "posterior");
+        let text = cache_path(&config, sample, "text");
+        tensor(&posterior, "posterior", 4096, 32);
+        tensor(&text, "conditioning", 1, 6144);
+        let manager = hrx::residency::ResidencyManager::new(1).unwrap();
+        let context = ModelContext::new(hrx::execution::RuntimeOptions {
+            gpu_index: i32::MAX,
+            memory_budget: Some(manager.budget()),
+            ..Default::default()
+        })
+        .unwrap();
+        let oom = std::fs::read_to_string("/proc/self/oom_score_adj").unwrap();
+        assert_eq!(prepare_in(&config, &context).unwrap().samples.len(), 1);
+        for path in [&posterior, &text] {
+            let saved = std::fs::read(path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            let error = prepare_in(&config, &context).unwrap_err();
+            assert!(
+                error.to_string().contains("allocation exceeds residency budget"),
+                "{error}"
+            );
+            assert_eq!(manager.budget().reserved_bytes(), 0);
+            std::fs::write(path, saved).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string("/proc/self/oom_score_adj").unwrap(), oom);
+    }
 }
