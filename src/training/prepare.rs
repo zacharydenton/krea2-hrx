@@ -37,6 +37,10 @@ pub(crate) fn software_hash() -> String {
         include_str!("optimizer.rs"),
         include_str!("ops.rs"),
         include_str!("config.rs"),
+        include_str!("full/parameters.rs"),
+        include_str!("full/numerics.rs"),
+        include_str!("full/checkpoint.rs"),
+        include_str!("full/spec.rs"),
         include_str!("../lora.rs"),
         include_str!("../pipeline/mod.rs"),
         include_str!("../pipeline/schedule.rs"),
@@ -92,7 +96,7 @@ pub(crate) fn fingerprint(
         [dataset::file_hash(&c.model)?, dataset::file_hash(text)?, dataset::file_hash(vae)?];
     let mut h = blake3::Hasher::new();
     h.update(b"krea2-prepared-v1");
-    h.update(&serde_json::to_vec(&c.targets).map_err(io)?);
+    h.update(&serde_json::to_vec(&c.trains_conditioning()).map_err(io)?);
     h.update(&serde_json::to_vec(&identities).map_err(io)?);
     h.update(include_bytes!("../../assets/tokenizer.json"));
     h.update(preprocessing_hash().as_bytes());
@@ -126,10 +130,7 @@ pub(crate) fn cache_path(c: &TrainConfig, s: &Sample, kind: &str) -> PathBuf {
 }
 
 pub(crate) fn text_spec(c: &TrainConfig) -> (&'static str, usize) {
-    match c.targets {
-        crate::lora::Targets::All => ("qwen_taps", 2560),
-        crate::lora::Targets::MainBlocks => ("conditioning", 6144),
-    }
+    if c.trains_conditioning() { ("qwen_taps", 2560) } else { ("conditioning", 6144) }
 }
 
 fn valid_cache(path: &Path, name: &str, cols: usize, rows: Option<usize>) -> bool {
@@ -175,6 +176,9 @@ pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
     let (text, vae) = components(c)?;
     // Check RAW block storage before uploading the auxiliary graph.
     let raw = Checkpoint::open(&c.model)?;
+    if c.mode == super::TrainingMode::Full {
+        super::full::spec::validate(&raw)?;
+    }
     if raw.get("blocks.0.attn.wq.weight")?.dtype != DType::BF16 {
         return Err(Error::invalid("training requires an original-basis RAW BF16 checkpoint"));
     }
@@ -243,7 +247,7 @@ pub fn prepare(c: &TrainConfig) -> Result<PreparedDataset> {
             let ids = models.tokenizer.training_prompt(&s.caption)?;
             eprintln!("encoding caption {}/{}", index + 1, data.samples.len());
             let taps = models.encode(&mut stream, &ids)?;
-            let conditioning = if c.targets == crate::lora::Targets::All {
+            let conditioning = if c.trains_conditioning() {
                 taps
             } else {
                 models.text_fusion(&mut stream, &taps)?

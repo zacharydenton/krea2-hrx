@@ -1,0 +1,57 @@
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_full_norm_scale.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_scale.grid_y : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_scale.rows : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_scale.cols : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_scale.size : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@target) export("krea2_train_full_norm_scale") @krea2_train_full_norm_scale(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 256 : index
+ %gx = config.get @krea2.train_full_norm_scale.grid_x : index
+ %gy = config.get @krea2.train_full_norm_scale.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %input: buffer, %grad: buffer, %inverse: buffer, %output: buffer) {
+ %offset = index.constant 0 : offset
+ %zero = index.constant 0 : index
+ %one = index.constant 1 : index
+ %step = index.constant 256 : index
+ %lane = kernel.workitem.id<x> : index
+ %group = kernel.workgroup.id<x> : index
+ %base = index.mul %group, %step : index
+ %column = index.add %base, %lane : index
+ %rows = config.get @krea2.train_full_norm_scale.rows : index
+ %cols = config.get @krea2.train_full_norm_scale.cols : index
+ %size = config.get @krea2.train_full_norm_scale.size : index
+ %ig = buffer.assume.memory_space<global> %input : buffer
+ %iv = buffer.view %ig[%offset] : buffer -> view<[%size]xbf16>
+ %gg = buffer.assume.memory_space<global> %grad : buffer
+ %gv = buffer.view %gg[%offset] : buffer -> view<[%size]xbf16>
+ %rg = buffer.assume.memory_space<global> %inverse : buffer
+ %rv = buffer.view %rg[%offset] : buffer -> view<[%rows]xf32>
+ %og = buffer.assume.memory_space<global> %output : buffer
+ %ov = buffer.view %og[%offset] : buffer -> view<[%cols]xf32>
+ %ok = index.cmp ult, %column, %cols : index
+ scf.if %ok {
+  %c = index.assume %column [range(%column, 0, 1073741824), lt(%column, %cols)] : index
+  %zf = scalar.constant 0.0 : f32
+  %sum = scf.for %r = [%zero to %rows step %one](%acc = %zf : f32) -> (f32) {
+   %rb = index.mul %r, %cols : index
+   %at = index.add %rb, %c : index
+   %i = index.assume %at [range(%at, 0, 1073741824), lt(%at, %size)] : index
+   %row = index.assume %r [range(%r, 0, 1073741824), lt(%r, %rows)] : index
+   %xb = view.load %iv[%i] : view<[%size]xbf16> -> bf16
+   %gb = view.load %gv[%i] : view<[%size]xbf16> -> bf16
+   %x = scalar.extf %xb : bf16 to f32
+   %g = scalar.extf %gb : bf16 to f32
+   %inv = view.load %rv[%row] : view<[%rows]xf32> -> f32
+   %normalized = scalar.mulf %x, %inv : f32
+   %product = scalar.mulf %g, %normalized : f32
+   %next = scalar.addf %acc, %product : f32
+   scf.yield %next : f32
+  }
+  %old = view.load %ov[%c] : view<[%cols]xf32> -> f32
+  %total = scalar.addf %old, %sum : f32
+  view.store %total, %ov[%c] : f32, view<[%cols]xf32>
+ }
+ kernel.return
+}

@@ -141,11 +141,23 @@ impl PreparedDataset {
         let choices = buckets(config.resolution);
         for path in paths {
             let caption_path = path.with_extension("txt");
-            let caption = std::fs::read_to_string(&caption_path)
-                .map_err(|e| Error::invalid(format!("{}: {e}", caption_path.display())))?
-                .trim()
-                .to_owned();
-            if caption.is_empty() || !caption.contains(&config.trigger) {
+            let caption = match std::fs::read_to_string(&caption_path) {
+                Ok(text) => text,
+                Err(e)
+                    if config.mode == super::TrainingMode::Full
+                        && e.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    String::new()
+                }
+                Err(e) => {
+                    return Err(Error::invalid(format!("{}: {e}", caption_path.display())));
+                }
+            }
+            .trim()
+            .to_owned();
+            if config.mode == super::TrainingMode::Lora
+                && (caption.is_empty() || !caption.contains(&config.trigger))
+            {
                 return Err(Error::invalid(format!(
                     "{}: caption must contain trigger {:?}",
                     caption_path.display(),
@@ -208,6 +220,29 @@ impl PreparedDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_training_accepts_missing_and_empty_captions_but_rejects_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image.png");
+        RgbImage::new(32, 32).save(&path).unwrap();
+        let c = TrainConfig {
+            model: "raw.safetensors".into(),
+            dataset: dir.path().into(),
+            output: dir.path().join("run"),
+            ..TrainConfig::full_preset()
+        };
+        let first = PreparedDataset::scan(&c).unwrap();
+        assert!(first.samples[0].caption.is_empty());
+        std::fs::write(path.with_extension("txt"), " \n").unwrap();
+        assert_eq!(PreparedDataset::scan(&c).unwrap().samples, first.samples);
+        std::fs::write(path.with_extension("txt"), "a new domain without a trigger").unwrap();
+        assert_ne!(PreparedDataset::scan(&c).unwrap().samples[0].key, first.samples[0].key);
+        std::fs::write(path.with_extension("txt"), [255u8]).unwrap();
+        assert!(PreparedDataset::scan(&c).is_err());
+        std::fs::remove_file(path.with_extension("txt")).unwrap();
+        std::fs::create_dir(path.with_extension("txt")).unwrap();
+        assert!(PreparedDataset::scan(&c).is_err());
+    }
     #[test]
     fn buckets_preserve_square_and_portrait_landscape_pairs() {
         for resolution in [512, 768, 1024] {

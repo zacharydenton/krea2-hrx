@@ -196,7 +196,10 @@ of F32 weights, saved activations, adapter state and scratch capacity. Checkpoin
 file size is not doubled to account for upload staging; HRX bounds staging
 independently. Temporary host buffers are estimated separately from the largest
 weight conversion and adapter checkpoint serialization, taking the larger of
-those phases rather than adding them. They do not count against the HRX device
+those phases rather than adding them. Auxiliary weights load before the FP32
+host adapter is created. Checkpointing releases the portable
+adapter's FP32 host copy before collecting optimizer state. These temporary
+buffers do not count against the HRX device
 budget, but do count toward required system RAM. The initial
 target is a 128 GiB Strix Halo system, not the guide's 16 GB NVIDIA setup.
 The trainer requires available system RAM to cover device allocations, temporary
@@ -229,6 +232,10 @@ the benchmark. Every selected kernel must have a source file in that directory.
 Normal training continues to use the embedded kernels; keep candidate files and
 reports outside the checkout. The `training/adapter_gradient` cases measure
 direct FP32 parameter-gradient accumulation in both projection directions.
+They check exact FP32 agreement across three accumulations into nonzero buffers
+before timing. `KREA2_BENCH_REFERENCE_DIR` enables alternating paired timings
+against a reference `train_gemm_tn_accumulate.loom`; each side has its own output
+buffer so both see the same accumulation history.
 
 For dense kernels, `KREA2_BENCH_REFERENCE_DIR` adds a reference source directory.
 Reference kernels must use the same names, binding ABI and launch tile geometry.
@@ -367,3 +374,206 @@ benchmarks in this feature are runnable Criterion benches; measurements remain
 under the ignored Cargo target directory.
 The optimizer comparison uses all 448 rank-32 parameter tensors, including
 gradient norm readback and clipping, and needs roughly 2 GiB of device storage.
+
+## Full RAW fine-tuning
+
+`mode: "full"` trains all 430 transformer tensors (12,820,073,036 parameters),
+including text fusion, projection biases, RMSNorm scales and modulation tables.
+Qwen and the VAE remain frozen and unload after preparation. The cache holds VAE
+posterior moments and twelve Qwen hidden-state taps; text fusion is recomputed
+with the current weights each microbatch. `mode` defaults to `"lora"` for existing
+configurations. Full mode ignores `rank`, `alpha` and `targets`.
+
+A starting configuration for the 128 GiB Strix Halo is:
+
+```json
+{
+  "mode": "full",
+  "model": "/models/krea2_raw_bf16.safetensors",
+  "dataset": "/datasets/domain",
+  "output": "/runs/domain-full",
+  "resolution": 512,
+  "steps": 100,
+  "accumulation": 1,
+  "gradient_checkpointing": false,
+  "learning_rate": 0.00001,
+  "weight_decay": 0.01,
+  "save_every": 50,
+  "keep_checkpoints": 1,
+  "memory_gib": 112,
+  "scratch_pool_mib": 8192,
+  "seed": 37,
+  "validation_prompts": ["a photograph describing the new domain"]
+}
+```
+
+The Rust API exposes the same memory/precision starting point as
+`TrainConfig::full_preset()`. JSON configuration uses the ordinary defaults for
+fields omitted from the file, so include the full-mode settings above explicitly.
+The physical batch size is one. This preset retains activations, with an 8 GiB
+scratch pool and the existing 8 GiB system RAM reserve; it never silently enables
+offloading or recomputation. The startup estimate includes optimizer state,
+activation tapes, reduction buffers, and the largest FP32 weight-gradient
+accumulator. Longer captions increase the activation requirement.
+
+Captions are optional in full mode. Missing or whitespace-only `.txt` files use
+the empty Krea prompt; existing unreadable or invalid UTF-8 caption files are
+errors. Mixed captioned and uncaptioned examples are accepted. Captions help bind
+new visual knowledge to words; uncaptioned training alone does not establish
+that the new concepts can be requested by name. Set representative, fixed
+`validation_prompts` for evaluation; loss alone does not establish knowledge or
+image quality.
+
+Large matrices use authoritative BF16 weights and accumulated BF16 gradients,
+with FP32 optimizer arithmetic and two blockwise 8-bit moments (256 elements per
+block, separate signed/unsigned dynamic codebooks and FP32 maxima). There is no
+FP32 master copy of large matrices. Small matrices below 4096 elements and all
+biases, scales and modulation tables retain FP32 masters, gradients and moments,
+plus BF16 execution copies. A single stream-ordered FP32 accumulator is reused
+for large weight gradients. Both gradient storage and large-weight updates use
+Philox stochastic BF16 rounding keyed by parameter, seed, update and microbatch,
+independently of the data-sampling RNG. All weights remain unchanged until the
+entire backward pass finishes and the averaged global norm is validated/clipped.
+
+Preparation and training use the existing commands:
+
+```sh
+cargo run --release --bin krea2-train -- inspect --config /runs/full.json
+cargo run --release --bin krea2-train -- prepare --config /runs/full.json
+cargo run --release --bin krea2-train -- run --config /runs/full.json --stop-after 2
+cargo run --release --bin krea2-train -- run --resume /runs/domain-full/checkpoints/step-000002
+cargo run --release --bin krea2-train -- evaluate --run /runs/domain-full
+```
+
+Each full checkpoint contains `model.safetensors`, `optimizer.safetensors`,
+versioned `state.json`, and an `artifact.json` provenance manifest. Small model tensors are saved in FP32 and large matrices
+in BF16; optimizer files preserve the exact moment bytes and scales. Serialization
+uses at most 64 MiB of application readback staging. Files and the temporary
+directory are synced before atomic publication, and retention pruning happens
+only after the new checkpoint is complete. A checkpoint is about 48 GiB; allow
+about 110 GiB for old and new checkpoints plus margin. Startup and each save check
+available output space. Failed writes leave previous completed checkpoints intact.
+Resume requires matching software/compiler/device, dataset, original base model,
+and configuration, as with LoRA training.
+
+Full-mode evaluation opens each saved model as **RAW**, using the RAW defaults
+(52 steps, guidance 3.5), fixed seeds 37/38 and the configured prompts. Turbo and
+adapter strength are only relevant to LoRA evaluation. Full fine-tuning does not
+produce a Turbo-compatible adapter. Per-update EMA, LoRA merging, Qwen/VAE
+training and Turbo distillation are outside this implementation. Offline
+averaging of saved full-model snapshots is described below.
+
+Validation includes scalar/GPU optimizer and rounding oracles, norm-scale
+reductions, small-state exact resume and update rejection, and an opt-in real RAW
+one-block/conditioning test. The full 100-step model trial, full-size resume,
+peak-memory measurement and RAW renders still require a sufficiently free machine
+and output volume; the small fixtures do not establish full-run speed or quality.
+
+```sh
+cargo test --test full_training_gpu -- --ignored --test-threads=1
+cargo test --lib training::full::parameters::tests -- --ignored
+KREA2_RAW_CHECKPOINT=/models/krea2_raw_bf16.safetensors \
+  cargo test --lib training::full::parameters::real_model_tests -- --ignored
+# Works with either LoRA or full-mode prepared configs:
+KREA2_TRAIN_TEST_CONFIG=/runs/full.json \
+  cargo test --test training_resume -- --ignored
+cargo bench --bench training -- training/full_adamw
+cargo bench --bench training -- training/full_weight_gradient
+```
+
+The optimizer bench resets weights, gradients and moments outside each timed
+interval. The weight-gradient bench measures the FP32 TN product; it excludes
+BF16 staging, the rest of backward, and optimizer work. Full optimizer compiler
+reports can be saved through `KREA2_BENCH_REPORT_DIR` outside the checkout. Use
+`KREA2_TRAIN_BENCH_CONFIG=/runs/full.json cargo bench --bench training -- training/prepared/step`
+for the final end-to-end number.
+
+## Model-only snapshots and offline averaging
+
+Full training has independent retention for resumable checkpoints and inference
+models. `keep_checkpoints` controls complete resume directories. Add
+`"snapshot_every": 50, "keep_snapshots": 2` to the 100-step example above to retain
+two model-only snapshots under `snapshots/`. JSON defaults disable automatic
+snapshots; `TrainConfig::full_preset()` enables them every 250 optimizer updates
+and keeps two. `null` disables the schedule. Pinning protects extra artifacts
+outside those retention counts. A snapshot alone cannot resume training.
+
+Snapshots contain the original model precision (BF16 large matrices, FP32 small
+tensors), without optimizer or sampler state. Coincident snapshot/checkpoint
+saves hard-link the immutable model file where the filesystem permits; otherwise
+they copy it with bounded buffers and check available space. They do not read
+weights back from the GPU twice. Removing either directory leaves the other
+usable. Treat model files as immutable: editing a hard-linked file would change
+both views. Exports include provenance, source checksums and the evaluation
+configuration; they still require the frozen text encoder and VAE.
+
+```sh
+# Use the built target/release/krea2-train binary for these commands.
+krea2-train checkpoint list --run /runs/domain-full
+krea2-train checkpoint pin --checkpoint /runs/domain-full/snapshots/step-000050
+krea2-train checkpoint export \
+  --checkpoint /runs/domain-full/checkpoints/step-000100 \
+  --output /runs/domain-full/exports/final
+
+# Equal weight per saved model:
+krea2-train checkpoint average \
+  --checkpoints /runs/domain-full/snapshots/step-000050 /runs/domain-full/snapshots/step-000100 \
+  --output /runs/domain-full/exports/average
+# Gap-aware exponential averaging of the same snapshots:
+krea2-train checkpoint average \
+  --checkpoints /runs/domain-full/snapshots/step-000050 /runs/domain-full/snapshots/step-000100 \
+  --half-life-steps 50 --output /runs/domain-full/exports/ema
+krea2-train evaluate --checkpoint /runs/domain-full/exports/ema \
+  --output /runs/domain-full/evaluation/ema
+# Remove manual protection when the snapshot is no longer needed:
+krea2-train checkpoint pin --checkpoint /runs/domain-full/snapshots/step-000050 --unpin
+```
+
+Averaging runs entirely on the CPU in Rust. It accepts 2–16 native snapshots or
+resume checkpoints from the same run/software, sorts by optimizer step, and
+rejects duplicate steps, incompatible tensor layouts, nonfinite values or
+checksum mismatches. Export and average validate full model payloads; listing
+checks metadata and length without scanning weights. Exporting an average retains
+its provenance; averaged outputs cannot themselves be averaging inputs. Current
+artifact commands require the native `artifact.json` manifest and canonical
+tensor layout; they do not import arbitrary third-party checkpoint formats.
+
+For snapshot EMA, the first selected model initializes the accumulator. Each
+subsequent snapshot uses `beta = 2^(-step_gap / half_life_steps)` and
+`ema = beta * ema + (1 - beta) * model`. Half-life is measured in optimizer
+updates, independent of accumulation. This is EMA over saved snapshots, not EMA
+over every training update, and cannot reconstruct unrecorded intermediate
+weights. All accumulation is FP32, with one final conversion to each tensor's
+original dtype. Tensor working buffers use at most 48 MiB, plus bounded headers
+and metadata. No EMA buffers are allocated during training.
+
+Outputs are synced and published atomically without replacing existing paths.
+Retention runs after publication and skips pinned artifacts, artifacts from
+other runs, and directories held open by evaluation/export/averaging/resume.
+Failed writes preserve prior completed artifacts. A model is about 24 GiB.
+Budget roughly **180 GiB of output capacity** for a 48 GiB resume checkpoint,
+two 24 GiB snapshots, a 24 GiB average, and the next 48 GiB resume checkpoint
+before pruning, plus margin. Hard links can reduce physical usage. Each write
+checks its actual additional payload plus 2 GiB free-space margin; pinning more
+models or saving more averages requires additional capacity.
+
+CPU tests cover averaging oracles, chunk boundaries, corrupted sources, atomic
+publication, pins and active readers. The small GPU fixture verifies that a
+model-only save preserves training state and matches resumable model bytes.
+Full-size throughput and RAW quality comparisons remain resource-dependent.
+Compare the raw final snapshot, a uniform average and a snapshot EMA with the
+same prompts and seeds, including both the new domain and general prompts to
+check forgetting. Averaging is optional; numerical correctness alone does not
+establish a quality improvement.
+
+```sh
+cargo bench --bench checkpoint
+# Place streamed fixtures on the filesystem to measure; sources are warm-cached:
+KREA2_CHECKPOINT_BENCH_DIR=/runs cargo bench --bench checkpoint -- checkpoint/stream
+cargo bench --bench checkpoint -- --test
+```
+
+These Criterion benches measure FP32/BF16 chunk blending and complete mixed-dtype
+streaming averages, including checksums, encoding, fsync and publication. Fixture
+construction and cleanup are excluded. They do not establish cold full-model
+disk throughput; keep timing reports outside the repository.

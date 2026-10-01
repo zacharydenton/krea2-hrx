@@ -24,6 +24,8 @@ use std::time::Instant;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct State {
+    #[serde(default)]
+    format: u32,
     config: TrainConfig,
     step: usize,
     epoch: u64,
@@ -42,6 +44,8 @@ pub struct MemoryEstimate {
     pub frozen: usize,
     /// FP32 masters, gradients and two moments, plus BF16 factors.
     pub adapters: usize,
+    /// Full-tuning weights, gradients, moments and quantization scales.
+    pub full_parameters: usize,
     /// Saved block boundaries or complete activation tapes.
     pub activations: usize,
     /// Recomputed block, temporary gradients, bounded staging and scratch pool.
@@ -61,9 +65,16 @@ impl MemoryEstimate {
         // their BF16 execution copy, and BF16 norms gain a lazy F32 scale copy.
         let mut frozen: usize = 28 * 6 * 6144 * 2 + 2 * 4096;
         let mut conversion = 0;
+        let mut block_conversion = 0;
         for name in file.names() {
             let t = file.get(name)?;
-            conversion = conversion.max(host_weight_bytes(t.dtype, t.bytes.len(), t.shape)?);
+            let host = host_weight_bytes(t.dtype, t.bytes.len(), t.shape)?;
+            conversion = conversion.max(host);
+            // Transformer::load reads main-block weights while the adapter is
+            // resident. Include modulation tables too as a conservative bound.
+            if name.starts_with("blocks.") {
+                block_conversion = block_conversion.max(host);
+            }
             frozen = frozen
                 .checked_add(resident_weight_bytes(
                     t.dtype,
@@ -72,24 +83,45 @@ impl MemoryEstimate {
                 )?)
                 .ok_or_else(|| Error::invalid("checkpoint size overflow"))?;
         }
+        let full_parameters = if c.mode == super::TrainingMode::Full {
+            let schema = super::full::spec::validate(&file)?;
+            frozen = 28 * 6 * 6144 * 2;
+            super::full::spec::persistent_bytes(&schema)
+                + schema.values().map(|p| p.count.div_ceil(1024) * 4).sum::<usize>()
+        } else {
+            0
+        };
         // Upload staging is bounded by HRX, not the size of the file.
-        let parameters: usize =
-            c.targets.layers().iter().map(|(_, o, i)| (o + i) * c.rank).sum();
+        let parameters: usize = if full_parameters != 0 {
+            0
+        } else {
+            c.targets.layers().iter().map(|(_, o, i)| (o + i) * c.rank).sum()
+        };
         let adapters = parameters * 18;
-        let largest_factor =
-            c.targets.layers().iter().map(|(_, o, i)| o.max(i) * c.rank).max().unwrap_or(0);
-        // Loading holds FP32 adapter values and one weight conversion. Saving
-        // holds the FP32 adapter (4P), serialized masters/moments (12P), and
-        // transient download/byte-conversion buffers for one factor (8F).
-        // These phases do not overlap; neither needs another fixed GiB reserve.
-        let host_transient =
-            (parameters * 4 + conversion).max(parameters * 16 + largest_factor * 8);
+        let largest_factor = if full_parameters != 0 {
+            0
+        } else {
+            c.targets.layers().iter().map(|(_, o, i)| o.max(i) * c.rank).max().unwrap_or(0)
+        };
+        // Auxiliary weights load before the FP32 adapter is initialized. Only
+        // main-block conversion can overlap those adapter values (4P). Portable
+        // export holds FP32 factors (4P) and BF16 serialization (2P), then drops
+        // both before collecting optimizer state (12P plus 8F for one factor's
+        // download/conversion). The optimizer phase bounds the portable export;
+        // these phases do not overlap and need no additional fixed reserve.
+        let host_transient = if full_parameters != 0 {
+            64 << 20
+        } else {
+            conversion
+                .max(parameters * 4 + block_conversion)
+                .max(parameters * 12 + largest_factor * 8)
+        };
         let mut tokens = 0;
         let mut text_tokens = 0;
         for sample in &data.samples {
             let f = Checkpoint::open(&prepare::cache_path(c, sample, "text"))?;
             let text = f.get(prepare::text_spec(c).0)?.shape[0]
-                / if c.targets == Targets::All { 12 } else { 1 };
+                / if c.trains_conditioning() { 12 } else { 1 };
             text_tokens = text_tokens.max(text);
             tokens = tokens.max(sample.width / 16 * (sample.height / 16) + text);
         }
@@ -108,10 +140,11 @@ impl MemoryEstimate {
             * (6144 * 2 + 1536 * 3)
             * 2;
         // Reuse each adapter's rank-sized forward activation in its reverse pass.
-        activations += if c.gradient_checkpointing { 1 } else { 28 } * 8 * tokens * c.rank * 2;
-        if c.targets == Targets::All {
+        let rank = if full_parameters != 0 { 0 } else { c.rank };
+        activations += if c.gradient_checkpointing { 1 } else { 28 } * 8 * tokens * rank * 2;
+        if c.trains_conditioning() {
             // Bound every auxiliary projection by the longest possible input sequence.
-            activations += 40 * tokens.max(text_tokens * 12) * c.rank * 2;
+            activations += 40 * tokens.max(text_tokens * 12) * rank * 2;
             // Four extra main-block tensors only when modulation is trainable.
             if !c.gradient_checkpointing {
                 activations += 28 * tokens * 4 * 6144 * 2;
@@ -127,10 +160,19 @@ impl MemoryEstimate {
         // staging (2 * 64 MiB), plus 128 MiB for dispatch/code/graph storage.
         let runtime_overhead = 256usize << 20;
         let scratch = tokens * (6144 * 24 + 16384 * 10) * 2
+            + if full_parameters != 0 { 864 << 20 } else { 0 }
             + runtime_overhead
             + (c.scratch_pool_mib << 20);
-        let total = frozen + adapters + activations + scratch;
-        Ok(Self { frozen, adapters, activations, scratch, host_transient, total })
+        let total = frozen + adapters + full_parameters + activations + scratch;
+        Ok(Self {
+            frozen,
+            adapters,
+            full_parameters,
+            activations,
+            scratch,
+            host_transient,
+            total,
+        })
     }
 }
 
@@ -185,7 +227,7 @@ pub struct Trainer {
     data: PreparedDataset,
     models: Models,
     model: Transformer,
-    optimizer: optimizer::PreparedOptimizer,
+    optimizer: Option<optimizer::PreparedOptimizer>,
     stream: Stream,
     state: State,
     rng: ChaCha8Rng,
@@ -224,14 +266,31 @@ impl Trainer {
 
     /// Resume exact FP32 master/optimizer state at a complete update boundary.
     pub fn resume(checkpoint: &Path) -> Result<Self> {
+        let artifact = if checkpoint.join("artifact.json").is_file() {
+            let a = super::full::artifacts::Artifact::open(checkpoint)?;
+            if a.manifest().kind != super::full::artifacts::Kind::Resume {
+                return Err(Error::invalid(
+                    "model-only and averaged artifacts cannot resume training; use a resumable checkpoint",
+                ));
+            }
+            Some(a)
+        } else {
+            None
+        };
         let state: State =
             serde_json::from_slice(&std::fs::read(checkpoint.join("state.json")).map_err(io)?)
                 .map_err(io)?;
-        Self::build(state.config.clone(), Some((checkpoint, state)))
+        let result = Self::build(state.config.clone(), Some((checkpoint, state)));
+        drop(artifact);
+        result
     }
 
     fn build(config: TrainConfig, resume: Option<(&Path, State)>) -> Result<Self> {
         config.validate()?;
+        if config.mode == super::TrainingMode::Full {
+            std::fs::create_dir_all(&config.output).map_err(io)?;
+            super::full::checkpoint::preflight(&config.output)?;
+        }
         super::memory::during_run()?;
         let data = prepare::load(&config)?;
         let memory = MemoryEstimate::for_run(&config, &data)?;
@@ -254,6 +313,7 @@ impl Trainer {
         let mut stream = Stream::open()?.with_memory_budget(budget.budget());
         let target = stream.target().as_str().to_owned();
         let mut state = State {
+            format: if config.mode == super::TrainingMode::Full { 1 } else { 0 },
             config: config.clone(),
             step: 0,
             epoch: 0,
@@ -267,7 +327,8 @@ impl Trainer {
             target,
         };
         if let Some((_, saved)) = &resume {
-            if saved.fingerprint != data.fingerprint
+            if saved.format != state.format
+                || saved.fingerprint != data.fingerprint
                 || saved.software != state.software
                 || saved.compiler != state.compiler
                 || saved.target != state.target
@@ -280,50 +341,89 @@ impl Trainer {
             }
             state = saved.clone();
         }
-        let adapter = match &resume {
-            Some((path, _)) => {
-                read_master_adapter(&path.join("optimizer.safetensors"), &config)?
-            }
-            None => Adapter::initialize_targets(
-                config.rank,
-                config.alpha,
-                config.seed,
-                config.targets,
-            )?,
-        };
-        let mut models =
-            Models::load_parts(&mut stream, &config.model, None, None, None, None)?;
-        models.ops = crate::ops::Ops::new(std::sync::Arc::new(hrx::BufferPool::with_limit(
-            config.scratch_pool_mib << 20,
-        )));
-        let model = Transformer::load(&models.ops, &mut stream, &config.model, Some(&adapter))?;
-        super::memory::during_run()?;
-        drop(adapter);
-        if let Some((path, _)) = &resume {
-            let file = Checkpoint::open(&path.join("optimizer.safetensors"))?;
-            for (name, p) in &model.adapters {
-                for (part, p) in [("a", &p.a), ("b", &p.b)] {
-                    for (kind, tensor) in [("first", &p.first), ("second", &p.second)] {
-                        let t = file.get(&format!("{name}.{part}.{kind}"))?;
-                        if t.dtype != crate::checkpoint::DType::F32
-                            || t.shape != [tensor.rows(), tensor.cols()]
-                        {
-                            return Err(Error::invalid("optimizer state shape/dtype mismatch"));
-                        }
-                        let values = floats(t)?;
-                        if values
-                            .iter()
-                            .any(|v| !v.is_finite() || (kind == "second" && *v < 0.0))
-                        {
-                            return Err(Error::invalid("invalid optimizer moments"));
-                        }
-                        stream.upload(tensor.binding(), t.bytes)?;
+        let (models, model, optimizer) = if config.mode == super::TrainingMode::Full {
+            let checkpoint = resume
+                .as_ref()
+                .map(|(p, _)| p.join("model.safetensors"))
+                .unwrap_or_else(|| config.model.clone());
+            let file = Checkpoint::open(&checkpoint)?;
+            if resume.is_some() {
+                for (name, spec) in super::full::spec::validate(&file)? {
+                    let expected = if spec.small {
+                        crate::checkpoint::DType::F32
+                    } else {
+                        crate::checkpoint::DType::BF16
+                    };
+                    if file.get(&name)?.dtype != expected {
+                        return Err(Error::invalid(format!(
+                            "resume precision mismatch: {name}"
+                        )));
                     }
                 }
             }
-        }
-        let parameters: Vec<_> = model.adapters.values().flat_map(|p| [&p.a, &p.b]).collect();
-        let optimizer = optimizer::PreparedOptimizer::new(&stream, &parameters)?;
+            let (parameters, main, auxiliary) =
+                super::full::parameters::Parameters::load(&mut stream, &file, config.seed)?;
+            if let Some((path, _)) = &resume {
+                parameters.restore(&mut stream, &path.join("optimizer.safetensors"))?;
+            }
+            let ops = crate::ops::Ops::new(std::sync::Arc::new(hrx::BufferPool::with_limit(
+                config.scratch_pool_mib << 20,
+            )));
+            let models = Models::trainable(&stream, ops, auxiliary)?;
+            (models, Transformer::full(main, parameters), None)
+        } else {
+            // Large auxiliary weight conversions need no adapter values. Finish
+            // them before retaining the FP32 host factors for main-block loading.
+            let mut models =
+                Models::load_parts(&mut stream, &config.model, None, None, None, None)?;
+            let adapter = match &resume {
+                Some((path, _)) => {
+                    read_master_adapter(&path.join("optimizer.safetensors"), &config)?
+                }
+                None => Adapter::initialize_targets(
+                    config.rank,
+                    config.alpha,
+                    config.seed,
+                    config.targets,
+                )?,
+            };
+            models.ops = crate::ops::Ops::new(std::sync::Arc::new(
+                hrx::BufferPool::with_limit(config.scratch_pool_mib << 20),
+            ));
+            let model =
+                Transformer::load(&models.ops, &mut stream, &config.model, Some(&adapter))?;
+            super::memory::during_run()?;
+            drop(adapter);
+            if let Some((path, _)) = &resume {
+                let file = Checkpoint::open(&path.join("optimizer.safetensors"))?;
+                for (name, p) in &model.adapters {
+                    for (part, p) in [("a", &p.a), ("b", &p.b)] {
+                        for (kind, tensor) in [("first", &p.first), ("second", &p.second)] {
+                            let t = file.get(&format!("{name}.{part}.{kind}"))?;
+                            if t.dtype != crate::checkpoint::DType::F32
+                                || t.shape != [tensor.rows(), tensor.cols()]
+                            {
+                                return Err(Error::invalid(
+                                    "optimizer state shape/dtype mismatch",
+                                ));
+                            }
+                            let values = floats(t)?;
+                            if values
+                                .iter()
+                                .any(|v| !v.is_finite() || (kind == "second" && *v < 0.0))
+                            {
+                                return Err(Error::invalid("invalid optimizer moments"));
+                            }
+                            stream.upload(tensor.binding(), t.bytes)?;
+                        }
+                    }
+                }
+            }
+            let parameters: Vec<_> =
+                model.adapters.values().flat_map(|p| [&p.a, &p.b]).collect();
+            let optimizer = Some(optimizer::PreparedOptimizer::new(&stream, &parameters)?);
+            (models, model, optimizer)
+        };
         let mut rng = ChaCha8Rng::seed_from_u64(config.seed ^ 0x1234_5678_abcd_ef01);
         rng.set_word_pos(state.rng_word.parse().map_err(io)?);
         let order = order(data.samples.len(), config.seed, state.epoch);
@@ -368,7 +468,10 @@ impl Trainer {
         ops::clear_host_timings();
         let started = Instant::now();
         let mut loss = 0.0;
-        for _ in 0..self.config.accumulation {
+        for microbatch in 0..self.config.accumulation {
+            if let Some(full) = &self.model.full {
+                full.set_clock(&mut self.stream, self.state.step + 1, microbatch, false)?;
+            }
             if self.state.cursor == self.order.len() {
                 self.state.epoch += 1;
                 self.state.cursor = 0;
@@ -380,7 +483,17 @@ impl Trainer {
         }
         let next = self.state.step + 1;
         let optimizer_started = Instant::now();
-        let norm = self.optimizer.update(&mut self.stream, &self.config, next)?;
+        let norm = if let Some(full) = &self.model.full {
+            let norm = full.update(&self.models.ops, &mut self.stream, &self.config, next)?;
+            self.models.tables(&self.stream)?;
+            norm
+        } else {
+            self.optimizer.as_mut().expect("LoRA optimizer").update(
+                &mut self.stream,
+                &self.config,
+                next,
+            )?
+        };
         self.stream.synchronize()?;
         if crate::kernels::native_profile() {
             eprintln!(
@@ -408,11 +521,17 @@ impl Trainer {
         while let Some(stats) = self.train_step()? {
             let next = stats.step;
             let keep_going = progress(next, stats.loss, stats.gradient_norm, stats.seconds);
+            let snapshot = self
+                .config
+                .snapshot_every
+                .is_some_and(|interval| next.is_multiple_of(interval));
             if next.is_multiple_of(self.config.save_every)
                 || next == self.config.steps
                 || !keep_going
             {
                 self.save()?;
+            } else if snapshot {
+                self.save_snapshot()?;
             }
             if !keep_going {
                 break;
@@ -439,7 +558,7 @@ impl Trainer {
             text.bytes.as_chunks::<2>().0.iter().map(|v| u16::from_le_bytes(*v)).collect();
         let text =
             Tensor::from_slice(ops.pool(), stream, &textbits, text.shape[0], text.shape[1])?;
-        let full = self.config.targets == Targets::All;
+        let full = self.config.trains_conditioning();
         let mut auxiliary = Tape::new(&self.models, &self.model, 1.0);
         let (text, embedding, modvec, image, roots) = if full {
             let text_id = auxiliary.text(stream, &text)?;
@@ -603,61 +722,91 @@ impl Trainer {
         let root = self.config.output.join("checkpoints");
         std::fs::create_dir_all(&root).map_err(io)?;
         let path = root.join(format!("step-{:06}", self.state.step));
-        if path.exists() {
-            return Err(Error::invalid(format!(
-                "checkpoint already exists: {}",
-                path.display()
-            )));
-        }
-        let temporary =
-            root.join(format!(".step-{:06}-{}.tmp", self.state.step, std::process::id()));
-        std::fs::create_dir(&temporary).map_err(io)?;
-        let result: Result<()> = (|| {
-            let adapter = self.model.adapter(&mut self.stream)?;
-            let metadata = [
-                ("base_model".into(), self.config.model.display().to_string()),
-                ("trigger".into(), self.config.trigger.clone()),
-                ("step".into(), self.state.step.to_string()),
-                (
-                    "targets".into(),
-                    match self.config.targets {
-                        Targets::All => "all",
-                        Targets::MainBlocks => "main_blocks",
-                    }
-                    .into(),
-                ),
-            ]
-            .into();
-            adapter.save(&temporary.join("adapter.safetensors"), metadata)?;
-            let mut tensors = BTreeMap::new();
-            for (name, p) in &self.model.adapters {
-                for (part, p) in [("a", &p.a), ("b", &p.b)] {
-                    for (kind, t) in
-                        [("master", &p.master), ("first", &p.first), ("second", &p.second)]
-                    {
-                        let values = t.download(&mut self.stream)?;
-                        tensors.insert(
-                            format!("{name}.{part}.{kind}"),
-                            SavedTensor {
-                                dtype: "F32",
-                                shape: vec![t.rows(), t.cols()],
-                                bytes: values.into_iter().flat_map(f32::to_le_bytes).collect(),
-                            },
-                        );
+        super::full::checkpoint::publish(&path, |temporary| {
+            if let Some(full) = &self.model.full {
+                let digest = full.save(&mut self.stream, temporary)?;
+                super::full::artifacts::Manifest::training(
+                    &self.config,
+                    self.state.step,
+                    &self.state.fingerprint,
+                    &self.state.software,
+                    digest,
+                    super::full::artifacts::Kind::Resume,
+                )?
+                .write(temporary)?;
+            } else {
+                let adapter = self.model.adapter(&mut self.stream)?;
+                let metadata = [
+                    ("base_model".into(), self.config.model.display().to_string()),
+                    ("trigger".into(), self.config.trigger.clone()),
+                    ("step".into(), self.state.step.to_string()),
+                    (
+                        "targets".into(),
+                        match self.config.targets {
+                            Targets::All => "all",
+                            Targets::MainBlocks => "main_blocks",
+                        }
+                        .into(),
+                    ),
+                ]
+                .into();
+                adapter.save(&temporary.join("adapter.safetensors"), metadata)?;
+                // Portable export is complete. Release its FP32 host copy before
+                // collecting the much larger resumable master/moment checkpoint.
+                drop(adapter);
+                let mut tensors = BTreeMap::new();
+                for (name, p) in &self.model.adapters {
+                    for (part, p) in [("a", &p.a), ("b", &p.b)] {
+                        for (kind, t) in
+                            [("master", &p.master), ("first", &p.first), ("second", &p.second)]
+                        {
+                            let values = t.download(&mut self.stream)?;
+                            tensors.insert(
+                                format!("{name}.{part}.{kind}"),
+                                SavedTensor {
+                                    dtype: "F32",
+                                    shape: vec![t.rows(), t.cols()],
+                                    bytes: values
+                                        .into_iter()
+                                        .flat_map(f32::to_le_bytes)
+                                        .collect(),
+                                },
+                            );
+                        }
                     }
                 }
+                save_tensors(
+                    &temporary.join("optimizer.safetensors"),
+                    tensors,
+                    BTreeMap::new(),
+                )?;
             }
-            save_tensors(&temporary.join("optimizer.safetensors"), tensors, BTreeMap::new())?;
             self.state.rng_word = self.rng.get_word_pos().to_string();
             prepare::write_json(&temporary.join("state.json"), &self.state)?;
-            std::fs::rename(&temporary, &path).map_err(io)?;
-            prepare::write_json(&self.config.output.join("run.json"), &self.config)?;
             Ok(())
-        })();
-        if result.is_err() {
-            let _ = std::fs::remove_dir_all(&temporary);
+        })?;
+        prepare::write_json(&self.config.output.join("run.json"), &self.config)?;
+        if self.config.mode == super::TrainingMode::Full {
+            let artifact = super::full::artifacts::Artifact::open(&path)?;
+            let run_id = &artifact.manifest().run_id;
+            if self
+                .config
+                .snapshot_every
+                .is_some_and(|interval| self.state.step.is_multiple_of(interval))
+            {
+                let snapshot_root = self.config.output.join("snapshots");
+                std::fs::create_dir_all(&snapshot_root).map_err(io)?;
+                let snapshot = snapshot_root.join(format!("step-{:06}", self.state.step));
+                super::full::artifacts::export_saved(&path, &snapshot)?;
+                super::full::artifacts::retain(
+                    &snapshot_root,
+                    self.config.keep_snapshots,
+                    run_id,
+                )?;
+            }
+            super::full::artifacts::retain(&root, self.config.keep_checkpoints, run_id)?;
+            return Ok(path);
         }
-        result?;
         let mut complete = std::fs::read_dir(&root)
             .map_err(io)?
             .filter_map(|e| e.ok())
@@ -672,6 +821,41 @@ impl Trainer {
         for old in complete.into_iter().take(remove) {
             std::fs::remove_dir_all(old).map_err(io)?;
         }
+        Ok(path)
+    }
+    /// Save inference weights without optimizer state; never a substitute for exact resume.
+    pub fn save_snapshot(&mut self) -> Result<PathBuf> {
+        if self.failed {
+            return Err(Error::invalid("cannot snapshot a failed training update"));
+        }
+        let full = self
+            .model
+            .full
+            .as_ref()
+            .ok_or_else(|| Error::invalid("model-only snapshots require full mode"))?;
+        self.stream.synchronize()?;
+        let root = self.config.output.join("snapshots");
+        std::fs::create_dir_all(&root).map_err(io)?;
+        let path = root.join(format!("step-{:06}", self.state.step));
+        super::full::checkpoint::publish(&path, |tmp| {
+            let digest = full.save_model(&mut self.stream, tmp)?;
+            super::full::artifacts::Manifest::training(
+                &self.config,
+                self.state.step,
+                &self.state.fingerprint,
+                &self.state.software,
+                digest,
+                super::full::artifacts::Kind::Model,
+            )?
+            .write(tmp)
+        })?;
+        prepare::write_json(&self.config.output.join("run.json"), &self.config)?;
+        let artifact = super::full::artifacts::Artifact::open(&path)?;
+        super::full::artifacts::retain(
+            &root,
+            self.config.keep_snapshots,
+            &artifact.manifest().run_id,
+        )?;
         Ok(path)
     }
 }

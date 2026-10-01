@@ -1,0 +1,65 @@
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_full_norm_inv.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_inv.grid_y : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_inv.rows : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_inv.cols : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_norm_inv.size : %value: index where [range(%value, 1, 1073741824)]
+kernel.def target(@target) export("krea2_train_full_norm_inv") @krea2_train_full_norm_inv(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 32 : index
+ %gx = config.get @krea2.train_full_norm_inv.grid_x : index
+ %gy = config.get @krea2.train_full_norm_inv.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %input: buffer, %output: buffer) {
+ %offset = index.constant 0 : offset
+ %zero = index.constant 0 : index
+ %step = index.constant 32 : index
+ %lane = kernel.workitem.id<x> : index
+ %group = kernel.workgroup.id<x> : index
+ %rows = config.get @krea2.train_full_norm_inv.rows : index
+ %cols = config.get @krea2.train_full_norm_inv.cols : index
+ %size = config.get @krea2.train_full_norm_inv.size : index
+ %row = index.assume %group [range(%group, 0, 1073741824), lt(%group, %rows)] : index
+ %base = index.mul %row, %cols : index
+ %ig = buffer.assume.memory_space<global> %input : buffer
+ %iv = buffer.view %ig[%offset] : buffer -> view<[%size]xbf16>
+ %og = buffer.assume.memory_space<global> %output : buffer
+ %ov = buffer.view %og[%offset] : buffer -> view<[%rows]xf32>
+ %zf = scalar.constant 0.0 : f32
+ %sum = scf.for %c = [%lane to %cols step %step](%acc = %zf : f32) -> (f32) {
+  %at = index.add %base, %c : index
+  %i = index.assume %at [range(%at, 0, 1073741824), lt(%at, %size)] : index
+  %b = view.load %iv[%i] : view<[%size]xbf16> -> bf16
+  %v = scalar.extf %b : bf16 to f32
+  %sq = scalar.mulf %v, %v : f32
+  %next = scalar.addf %acc, %sq : f32
+  scf.yield %next : f32
+ }
+ %warp = scalar.constant 32 : i32
+ %off16 = scalar.constant 16 : i32
+ %peer16, %valid16 = kernel.subgroup.shuffle<xor> %sum, %off16, %warp : f32, i32, i32
+ %sum16 = scalar.addf %sum, %peer16 : f32
+ %off8 = scalar.constant 8 : i32
+ %peer8, %valid8 = kernel.subgroup.shuffle<xor> %sum16, %off8, %warp : f32, i32, i32
+ %sum8 = scalar.addf %sum16, %peer8 : f32
+ %off4 = scalar.constant 4 : i32
+ %peer4, %valid4 = kernel.subgroup.shuffle<xor> %sum8, %off4, %warp : f32, i32, i32
+ %sum4 = scalar.addf %sum8, %peer4 : f32
+ %off2 = scalar.constant 2 : i32
+ %peer2, %valid2 = kernel.subgroup.shuffle<xor> %sum4, %off2, %warp : f32, i32, i32
+ %sum2 = scalar.addf %sum4, %peer2 : f32
+ %off1 = scalar.constant 1 : i32
+ %peer1, %valid1 = kernel.subgroup.shuffle<xor> %sum2, %off1, %warp : f32, i32, i32
+ %sum1 = scalar.addf %sum2, %peer1 : f32
+ %widthi = index.cast %cols : index to i32
+ %width = scalar.sitofp %widthi : i32 to f32
+ %mean = scalar.divf %sum1, %width : f32
+ %eps = scalar.constant 0.00001 : f32
+ %onef = scalar.constant 1.0 : f32
+ %var = scalar.addf %mean, %eps : f32
+ %root = scalar.sqrtf %var : f32
+ %inv = scalar.divf %onef, %root : f32
+ %first = index.cmp eq, %lane, %zero : index
+ scf.if %first { view.store %inv, %ov[%row] : f32, view<[%rows]xf32> }
+ kernel.return
+}

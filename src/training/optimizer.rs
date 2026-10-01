@@ -222,7 +222,7 @@ fn validate_update(c: &TrainConfig, step: usize) -> Result<()> {
     Ok(())
 }
 
-fn update_controls(
+pub(crate) fn update_controls(
     values: &[f32],
     config: &TrainConfig,
     step: usize,
@@ -231,7 +231,7 @@ fn update_controls(
     for &value in values {
         if !value.is_finite() || value < 0.0 {
             return Err(Error::invalid(
-                "nonfinite adapter gradient; optimizer update cancelled",
+                "nonfinite parameter gradient; optimizer update cancelled",
             ));
         }
         sum += f64::from(value);

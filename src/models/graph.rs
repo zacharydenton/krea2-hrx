@@ -38,6 +38,19 @@ pub struct Models {
 }
 
 impl Models {
+    pub(crate) fn trainable(stream: &Stream, ops: Ops, transformer: Weights) -> Result<Self> {
+        let block_tables = Tensor::new(ops.pool(), stream, 28 * 6, WIDTH)?;
+        let model = Self {
+            ops,
+            tokenizer: Tokenizer::embedded()?,
+            text: Weights::empty(),
+            transformer,
+            vae: Weights::empty(),
+            block_tables,
+        };
+        model.tables(stream)?;
+        Ok(model)
+    }
     /// `compiler` is the `loom-compile` this graph's auxiliary kernels are
     /// built with; `None` takes `HRX_LOOM_LIBRARY` or the pinned bundle.
     pub fn open(stream: &mut Stream, files: &Files, compiler: Option<&str>) -> Result<Models> {
@@ -455,7 +468,7 @@ impl Models {
     }
 
     /// The 28 blocks' modulation tables gathered into one tensor, once.
-    fn tables(&self, stream: &Stream) -> Result<()> {
+    pub(crate) fn tables(&self, stream: &Stream) -> Result<()> {
         for index in 0..28 {
             let table = self.transformer.get(&format!("blocks.{index}.mod.lin"))?;
             if table.count != 6 * WIDTH {

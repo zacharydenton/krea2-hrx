@@ -1,0 +1,31 @@
+amdgpu.target<gfx11-generic> @target {subgroup_size = 32}
+config.decl @krea2.train_full_upcast.grid_x : %value: index where [range(%value, 1, 1073741824)]
+config.decl @krea2.train_full_upcast.grid_y : %value: index where [range(%value, 1, 1073741824)]
+
+kernel.def target(@target) export("krea2_train_full_upcast") @krea2_train_full_upcast(%count: index) {
+ %one = index.constant 1 : index
+ %threads = index.constant 256 : index
+ %gx = config.get @krea2.train_full_upcast.grid_x : index
+ %gy = config.get @krea2.train_full_upcast.grid_y : index
+ kernel.launch.config workgroups(%gx, %gy, %one) workgroup_size(%threads, %one, %one) : index
+} launch(%count: index, %input: buffer, %output: buffer) {
+ %offset = index.constant 0 : offset
+ %n = index.assume %count [range(%count, 1, 1073741824)] : index
+ %lane = kernel.workitem.id<x> : index
+ %group = kernel.workgroup.id<x> : index
+ %step = index.constant 256 : index
+ %base = index.mul %group, %step : index
+ %idx = index.add %base, %lane : index
+ %ok = index.cmp ult, %idx, %n : index
+ %ig = buffer.assume.memory_space<global> %input : buffer
+ %iv = buffer.view %ig[%offset] : buffer -> view<[%n]xbf16>
+ %og = buffer.assume.memory_space<global> %output : buffer
+ %ov = buffer.view %og[%offset] : buffer -> view<[%n]xf32>
+ scf.if %ok {
+  %i = index.assume %idx [range(%idx, 0, 1073741824), lt(%idx, %n)] : index
+  %b = view.load %iv[%i] : view<[%n]xbf16> -> bf16
+  %v = scalar.extf %b : bf16 to f32
+  view.store %v, %ov[%i] : f32, view<[%n]xf32>
+ }
+ kernel.return
+}

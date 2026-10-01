@@ -164,6 +164,7 @@ impl Projection {
 
 /// Frozen dense main-block weights plus original-basis adapter parameters.
 pub struct Transformer {
+    pub(crate) full: Option<super::full::parameters::Parameters>,
     weights: Weights,
     quantized: BTreeMap<String, super::quantized::Quantized>,
     /// Adapter projections, in stable checkpoint order.
@@ -199,6 +200,18 @@ pub struct BlockTape {
 }
 
 impl Transformer {
+    pub(crate) fn full(
+        weights: Weights,
+        parameters: super::full::parameters::Parameters,
+    ) -> Self {
+        Self {
+            full: Some(parameters),
+            weights,
+            quantized: BTreeMap::new(),
+            adapters: BTreeMap::new(),
+            layers: 28,
+        }
+    }
     #[cfg(test)]
     pub(crate) fn auxiliary_test_model(
         ops: &Ops,
@@ -210,7 +223,13 @@ impl Transformer {
             .iter()
             .map(|(name, f)| Ok((name.clone(), Projection::new(ops, stream, f)?)))
             .collect::<Result<_>>()?;
-        Ok(Self { weights: Weights::empty(), quantized: BTreeMap::new(), adapters, layers: 28 })
+        Ok(Self {
+            full: None,
+            weights: Weights::empty(),
+            quantized: BTreeMap::new(),
+            adapters,
+            layers: 28,
+        })
     }
 
     /// Validate all RAW projection shapes and storage on CPU, without opening a device.
@@ -321,12 +340,12 @@ impl Transformer {
             })
             .transpose()?
             .unwrap_or_default();
-        Ok(Self { weights, quantized, adapters, layers: 28 })
+        Ok(Self { full: None, weights, quantized, adapters, layers: 28 })
     }
 
     /// Whether any auxiliary DiT projection has an adapter.
     pub(crate) fn has_auxiliary(&self) -> bool {
-        self.adapters.keys().any(|name| !name.starts_with("blocks."))
+        self.full.is_some() || self.adapters.keys().any(|name| !name.starts_with("blocks."))
     }
 
     fn weight(&self, name: &str) -> Result<&Weight> {
@@ -377,6 +396,9 @@ impl Transformer {
         let w = self.weight(name)?;
         let base_grad =
             train::matmul_nn(ops, stream, grad, &w.tensor(w.shape[0], w.shape[1])?, 1.0)?;
+        if let Some(full) = &self.full {
+            full.linear_gradient(ops, stream, name, x, grad)?;
+        }
         if let Some(adapter) = self.adapters.get(name) {
             let recomputed;
             let low = match low {
@@ -487,9 +509,7 @@ impl Transformer {
             mlp_gate,
             up,
             mixed,
-            modulation: self
-                .adapters
-                .contains_key("tproj.1")
+            modulation: (self.full.is_some() || self.adapters.contains_key("tproj.1"))
                 .then_some([norm1, projected, norm2, down]),
             output,
         })
@@ -569,6 +589,14 @@ impl Transformer {
         }
         let post_scale =
             self.weights.get(&format!("{p}.postnorm.scale"))?.f32_values(stream)?;
+        if let Some(full) = &self.full {
+            let factor = train::one_plus(ops, stream, &row(3)?)?;
+            let dy = ops.binary(stream, &gp, &factor, Binary::Mul)?;
+            full.norm_gradient(ops, stream, &format!("{p}.postnorm.scale"), &t.residual, &dy)?;
+            let dst = full.gradient_matrix(&format!("{p}.mod.lin"), 6, 6144)?;
+            let [_, _, norm2, down] = t.modulation.as_ref().expect("full modulation tape");
+            train::modulation_backward(ops, stream, grad, down, &gp, norm2, &dst, 3)?;
+        }
         let gr = train::norm_modulated_backward(
             ops,
             stream,
@@ -602,6 +630,24 @@ impl Transformer {
             train::attention_backward(ops, stream, &t.q, &t.k, &t.v, &t.attention, &gat)?;
         let qscale =
             self.weights.get(&format!("{p}.attn.qknorm.qnorm.scale"))?.f32_values(stream)?;
+        if let Some(full) = &self.full {
+            let dy = train::rope(ops, stream, &gq, cos, sin, true)?;
+            full.norm_gradient(
+                ops,
+                stream,
+                &format!("{p}.attn.qknorm.qnorm.scale"),
+                &t.q0,
+                &dy,
+            )?;
+            let dy = train::rope(ops, stream, &gk, cos, sin, true)?;
+            full.norm_gradient(
+                ops,
+                stream,
+                &format!("{p}.attn.qknorm.knorm.scale"),
+                &t.k0,
+                &dy,
+            )?;
+        }
         let gq = train::rope_norm_backward(ops, stream, &t.q0, &gq, qscale, cos, sin, 1e-5)?;
         let kscale =
             self.weights.get(&format!("{p}.attn.qknorm.knorm.scale"))?.f32_values(stream)?;
@@ -635,6 +681,14 @@ impl Transformer {
             train::modulation_backward(ops, stream, &gr, projected, &pre_grad, norm1, dst, 0)?;
         }
         let pre_scale = self.weights.get(&format!("{p}.prenorm.scale"))?.f32_values(stream)?;
+        if let Some(full) = &self.full {
+            let factor = train::one_plus(ops, stream, &row(0)?)?;
+            let dy = ops.binary(stream, &pre_grad, &factor, Binary::Mul)?;
+            full.norm_gradient(ops, stream, &format!("{p}.prenorm.scale"), &t.input, &dy)?;
+            let dst = full.gradient_matrix(&format!("{p}.mod.lin"), 6, 6144)?;
+            let [norm1, projected, _, _] = t.modulation.as_ref().expect("full modulation tape");
+            train::modulation_backward(ops, stream, &gr, projected, &pre_grad, norm1, &dst, 0)?;
+        }
         train::norm_modulated_backward(
             ops,
             stream,
@@ -711,7 +765,13 @@ mod full_target_tests {
                 Projection::new(&ops, &mut stream, &factors).unwrap(),
             );
         }
-        let model = Transformer { weights, quantized: BTreeMap::new(), adapters, layers: 28 };
+        let model = Transformer {
+            full: None,
+            weights,
+            quantized: BTreeMap::new(),
+            adapters,
+            layers: 28,
+        };
         let upload = |s: &mut Stream, rows, offset, gain| {
             let bits: Vec<_> = (0..rows * 6144)
                 .map(|i| from_f32((((i * 17 + offset) % 71) as f32 / 71.0 - 0.5) * gain))

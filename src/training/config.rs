@@ -3,10 +3,23 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Which transformer parameters are updated; Qwen and the VAE stay frozen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrainingMode {
+    /// Train low-rank adapters with FP32 AdamW.
+    #[default]
+    Lora,
+    /// Train every RAW transformer parameter with bounded-memory AdamW.
+    Full,
+}
+
 /// Reproducible character-training settings; paths are relative to the config file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrainConfig {
+    /// Parameter selection and optimizer representation.
+    pub mode: TrainingMode,
     /// Original-basis RAW BF16 safetensors checkpoint.
     pub model: PathBuf,
     /// BF16 text encoder override; otherwise use the existing pinned HF cache.
@@ -15,7 +28,7 @@ pub struct TrainConfig {
     pub vae: Option<PathBuf>,
     /// Image and caption directory, scanned recursively.
     pub dataset: PathBuf,
-    /// Character trigger, required in every caption.
+    /// Character trigger, required in every LoRA caption; ignored in full mode.
     pub trigger: String,
     /// Run directory, holding cache, checkpoints and evaluation output.
     pub output: PathBuf,
@@ -36,7 +49,7 @@ pub struct TrainConfig {
     pub gradient_checkpointing: bool,
     /// Constant AdamW learning rate.
     pub learning_rate: f32,
-    /// AdamW decay on adapter parameters only.
+    /// AdamW decay on trained parameters.
     pub weight_decay: f32,
     /// Adam first moment coefficient.
     pub beta1: f32,
@@ -50,6 +63,10 @@ pub struct TrainConfig {
     pub save_every: usize,
     /// Number of complete checkpoints retained.
     pub keep_checkpoints: usize,
+    /// Full-mode model-only snapshot interval; absent disables automatic snapshots.
+    pub snapshot_every: Option<usize>,
+    /// Number of unpinned model-only snapshots retained separately from resume state.
+    pub keep_snapshots: usize,
     /// Seed for initialization, shuffling, posterior sampling, timesteps and noise.
     pub seed: u64,
     /// Maximum planned GPU allocation in GiB.
@@ -58,13 +75,14 @@ pub struct TrainConfig {
     pub scratch_pool_mib: usize,
     /// Prevent model downloads on a cache miss.
     pub offline: bool,
-    /// Fixed prompts for Turbo checkpoint evaluation.
+    /// Fixed prompts for Turbo LoRA or RAW full-checkpoint evaluation.
     pub validation_prompts: Vec<String>,
 }
 
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
+            mode: TrainingMode::Lora,
             model: PathBuf::new(),
             text_encoder: None,
             vae: None,
@@ -86,6 +104,8 @@ impl Default for TrainConfig {
             max_grad_norm: 1.0,
             save_every: 250,
             keep_checkpoints: 4,
+            snapshot_every: None,
+            keep_snapshots: 2,
             seed: 37,
             memory_gib: 96,
             scratch_pool_mib: 2048,
@@ -96,6 +116,24 @@ impl Default for TrainConfig {
 }
 
 impl TrainConfig {
+    /// Full-tuning starting point for 128 GiB Strix Halo; paths remain required.
+    pub fn full_preset() -> Self {
+        Self {
+            mode: TrainingMode::Full,
+            resolution: 512,
+            learning_rate: 1e-5,
+            gradient_checkpointing: false,
+            memory_gib: 112,
+            scratch_pool_mib: 8192,
+            keep_checkpoints: 1,
+            snapshot_every: Some(250),
+            ..Self::default()
+        }
+    }
+    /// Whether the conditioning towers are trainable and need cached Qwen taps.
+    pub(crate) fn trains_conditioning(&self) -> bool {
+        self.mode == TrainingMode::Full || self.targets == crate::lora::Targets::All
+    }
     /// Read and validate a configuration before any GPU work or model download.
     pub fn read(path: &Path) -> Result<Self> {
         let mut config: Self =
@@ -124,16 +162,19 @@ impl TrainConfig {
         if self.model.as_os_str().is_empty()
             || self.dataset.as_os_str().is_empty()
             || self.output.as_os_str().is_empty()
-            || self.trigger.trim().is_empty()
+            || (self.mode == TrainingMode::Lora && self.trigger.trim().is_empty())
         {
             return Err(Error::invalid("model, dataset, output and trigger are required"));
         }
         if ![512, 768, 1024].contains(&self.resolution)
-            || !(1..=128).contains(&self.rank)
+            || (self.mode == TrainingMode::Lora && !(1..=128).contains(&self.rank))
             || self.steps == 0
             || self.accumulation == 0
             || self.save_every == 0
             || self.keep_checkpoints == 0
+            || self.snapshot_every == Some(0)
+            || (self.snapshot_every.is_some()
+                && (self.mode != TrainingMode::Full || self.keep_snapshots == 0))
             || self.memory_gib == 0
             || self.memory_gib > 128
             || self.scratch_pool_mib > 16384
@@ -142,7 +183,12 @@ impl TrainConfig {
                 "invalid resolution, rank, step count, checkpoint interval or memory budget",
             ));
         }
-        for value in [self.alpha, self.learning_rate, self.epsilon, self.max_grad_norm] {
+        for value in [
+            if self.mode == TrainingMode::Full { 1.0 } else { self.alpha },
+            self.learning_rate,
+            self.epsilon,
+            self.max_grad_norm,
+        ] {
             if !value.is_finite() || value <= 0.0 {
                 return Err(Error::invalid("training scales must be finite and positive"));
             }
@@ -161,6 +207,25 @@ impl TrainConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_preset_ignores_adapter_settings_and_keeps_lora_defaults() {
+        let c = TrainConfig {
+            model: "raw.safetensors".into(),
+            dataset: "images".into(),
+            output: "run".into(),
+            rank: 0,
+            alpha: 0.0,
+            ..TrainConfig::full_preset()
+        };
+        c.validate().unwrap();
+        assert!(c.trains_conditioning());
+        assert_eq!(c.resolution, 512);
+        assert!(!c.gradient_checkpointing);
+        assert_eq!(c.scratch_pool_mib, 8192);
+        assert_eq!(c.snapshot_every, Some(250));
+        assert_eq!(c.keep_snapshots, 2);
+        assert_eq!(TrainConfig::default().mode, TrainingMode::Lora);
+    }
     #[test]
     fn rejects_typos_and_nonfinite_or_empty_training_settings() {
         assert_eq!(
@@ -181,6 +246,17 @@ mod tests {
             trigger: "bluej".into(),
             ..Default::default()
         };
+        c.validate().unwrap();
+        c.snapshot_every = Some(250);
+        assert!(c.validate().is_err());
+        c.mode = TrainingMode::Full;
+        c.validate().unwrap();
+        c.snapshot_every = Some(0);
+        assert!(c.validate().is_err());
+        c.snapshot_every = Some(1);
+        c.keep_snapshots = 0;
+        assert!(c.validate().is_err());
+        c.snapshot_every = None;
         c.validate().unwrap();
         c.beta1 = f32::NAN;
         assert!(c.validate().is_err());

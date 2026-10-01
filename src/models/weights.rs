@@ -74,6 +74,9 @@ impl Item<'_> {
 }
 
 impl Weights {
+    pub(crate) fn from_values(values: BTreeMap<String, Weight>) -> Self {
+        Self { values }
+    }
     pub(crate) fn empty() -> Self {
         Self { values: BTreeMap::new() }
     }

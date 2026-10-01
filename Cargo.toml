@@ -39,6 +39,10 @@ harness = false
 name = "training"
 harness = false
 
+[[bench]]
+name = "checkpoint"
+harness = false
+
 [lints.rust]
 missing_docs = "warn"
 unsafe_op_in_unsafe_fn = "deny"
@@ -70,6 +74,7 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 serde = { version = "1.0.229", features = ["derive"] }
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 blake3 = { version = "1.8.7", features = ["pure"] }
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }

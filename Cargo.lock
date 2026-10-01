@@ -1733,6 +1733,7 @@ dependencies = [
  "rand 0.9.5",
  "rand_chacha",
  "rand_distr",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

@@ -405,61 +405,132 @@ fn adapter_gradients(c: &mut Criterion) {
         (16384, 32, 4115),
     ] {
         let mut prepared = None;
-        group.bench_function(format!("{m}x{n}x{k}"), |b| {
-            let (stream, kernel, constants, a, weight, out) =
+        let mut paired = PairedTimings::default();
+        let label = format!("{m}x{n}x{k}");
+        group.bench_function(&label, |b| {
+            let (stream, kernels, a, weight, outputs, grid) =
                 prepared.get_or_insert_with(|| {
                     let mut stream = Stream::open().unwrap();
                     let ops = Ops::new(BufferPool::new());
                     let a = tensor(&ops, &mut stream, k, m);
                     let weight = tensor(&ops, &mut stream, k, n);
-                    let out = train::FloatTensor::zero(&stream, m, n).unwrap();
-                    let mut request = hrx::loom::Specialization::new(format!("krea2_{name}"));
-                    for (key, value) in
-                        [("m", m), ("n", n), ("k", k), ("grid_x", n / 32), ("grid_y", m / 32)]
-                    {
-                        request.set_config(format!("krea2.{name}.{key}"), value.to_string());
+                    let outputs = std::array::from_fn::<_, 2, _>(|_| {
+                        train::FloatTensor::from_slice(&mut stream, m, n, &vec![0.25; m * n])
+                            .unwrap()
+                    });
+                    let grid = [n.div_ceil(32) as u32, m.div_ceil(32) as u32, 1];
+                    let kernels = std::array::from_fn::<_, 2, _>(|side| {
+                        let mut request =
+                            hrx::loom::Specialization::new(format!("krea2_{name}"));
+                        for (key, value) in [
+                            ("m", m),
+                            ("n", n),
+                            ("k", k),
+                            ("grid_x", grid[0] as usize),
+                            ("grid_y", grid[1] as usize),
+                        ] {
+                            request
+                                .set_config(format!("krea2.{name}.{key}"), value.to_string());
+                        }
+                        request.set_report(hrx::loom::ReportMode::Details);
+                        let source = if side == 0 {
+                            std::env::var_os("KREA2_BENCH_REFERENCE_DIR")
+                                .map(|dir| {
+                                    std::fs::read_to_string(
+                                        Path::new(&dir).join(format!("{name}.loom")),
+                                    )
+                                    .unwrap()
+                                })
+                                .unwrap_or_else(|| {
+                                    krea2::kernels::sources::auxiliary(name).unwrap().to_owned()
+                                })
+                        } else {
+                            kernel_source(name)
+                        };
+                        let artifact = krea2::kernels::compiler(None)
+                            .unwrap()
+                            .module(&source)
+                            .compile(&request)
+                            .unwrap();
+                        if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
+                            let directory = Path::new(&directory);
+                            std::fs::create_dir_all(directory).unwrap();
+                            std::fs::write(
+                                directory
+                                    .join(format!("{name}-{m}x{n}x{k}-{side}-compiler.json")),
+                                artifact.report().unwrap().json().to_string(),
+                            )
+                            .unwrap();
+                        }
+                        // SAFETY: both sources use the same accumulation ABI and 32x32 output tiles.
+                        let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
+                        let constants = krea2::kernels::Scalars::new()
+                            .index(m * n)
+                            .float(0.001)
+                            .pack(name, &kernel)
+                            .unwrap();
+                        (kernel, constants)
+                    });
+                    // Independent output buffers preserve equal accumulation histories in paired runs.
+                    for _ in 0..3 {
+                        for (side, (kernel, constants)) in kernels.iter().enumerate() {
+                            // SAFETY: each workgroup accumulates its own output tile; all extents match.
+                            unsafe {
+                                stream
+                                    .dispatch(
+                                        kernel,
+                                        grid,
+                                        [128, 1, 1],
+                                        constants,
+                                        &[
+                                            a.binding().unwrap(),
+                                            weight.binding().unwrap(),
+                                            outputs[side].binding(),
+                                        ],
+                                    )
+                                    .unwrap();
+                            }
+                        }
+                        let reference = outputs[0].download(&mut stream).unwrap();
+                        let candidate = outputs[1].download(&mut stream).unwrap();
+                        assert!(
+                            reference
+                                .iter()
+                                .zip(&candidate)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "adapter gradient candidate differs from reference: {label}"
+                        );
                     }
-                    request.set_report(hrx::loom::ReportMode::Details);
-                    let artifact = krea2::kernels::compiler(None)
-                        .unwrap()
-                        .module(&kernel_source(name))
-                        .compile(&request)
-                        .unwrap();
-                    if let Some(directory) = std::env::var_os("KREA2_BENCH_REPORT_DIR") {
-                        let directory = Path::new(&directory);
-                        std::fs::create_dir_all(directory).unwrap();
-                        std::fs::write(
-                            directory.join(format!("{name}-{m}x{n}x{k}-compiler.json")),
-                            artifact.report().unwrap().json().to_string(),
-                        )
-                        .unwrap();
-                    }
-                    // SAFETY: the configured input/output matrices match the kernel ABI.
-                    let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
-                    let constants = krea2::kernels::Scalars::new()
-                        .index(m * n)
-                        .float(0.001)
-                        .pack(name, &kernel)
-                        .unwrap();
-                    stream.synchronize().unwrap();
-                    (stream, kernel, constants, a, weight, out)
+                    (stream, kernels, a, weight, outputs, grid)
                 });
-            b.iter(|| {
-                // SAFETY: each workgroup accumulates its own 32x32 output tile.
+            let mut run = |candidate: bool| {
+                let side = usize::from(candidate);
+                let (kernel, constants) = &kernels[side];
+                // SAFETY: the resident matrices and launch dimensions were validated during setup.
                 unsafe {
                     stream
                         .dispatch(
                             kernel,
-                            [(n / 32) as u32, (m / 32) as u32, 1],
+                            *grid,
                             [128, 1, 1],
                             constants,
-                            &[a.binding().unwrap(), weight.binding().unwrap(), out.binding()],
+                            &[
+                                a.binding().unwrap(),
+                                weight.binding().unwrap(),
+                                outputs[side].binding(),
+                            ],
                         )
                         .unwrap();
                 }
                 stream.synchronize().unwrap();
-            });
+            };
+            if std::env::var_os("KREA2_BENCH_REFERENCE_DIR").is_some() {
+                b.iter_custom(|iterations| paired.measure(iterations, &mut run));
+            } else {
+                b.iter(|| run(true));
+            }
         });
+        paired.report(&label);
     }
     group.finish();
 }
@@ -1717,8 +1788,157 @@ fn full_step(c: &mut Criterion) {
     group.finish();
 }
 
+fn full_adamw(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/full_adamw");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for n in [262_144usize, 6144 * 6144] {
+        let mut prepared = None;
+        group.throughput(criterion::Throughput::Elements(n as u64));
+        group.bench_function(n.to_string(), |b| {
+            let (stream, kernel, constants, buffers, parts) =
+                prepared.get_or_insert_with(|| {
+                    let mut stream = Stream::open().unwrap();
+                    let parts = n.div_ceil(256);
+                    let buffers: Vec<_> = [32, n * 2, n * 2, n, n, parts * 8, 2048, 16]
+                        .into_iter()
+                        .map(|bytes| {
+                            let b = stream.allocate(bytes).unwrap();
+                            stream.fill(b.binding(), 0).unwrap();
+                            b
+                        })
+                        .collect();
+                    let controls = [1e-5f32, 0.01, 0.9, 0.999, 1e-8, 1.0, 0.1, 0.001];
+                    stream
+                        .upload(buffers[0].binding(), bytemuck::cast_slice(&controls))
+                        .unwrap();
+                    let maps: Vec<_> = krea2::training::full::numerics::codebook(true)
+                        .into_iter()
+                        .chain(krea2::training::full::numerics::codebook(false))
+                        .collect();
+                    stream.upload(buffers[6].binding(), bytemuck::cast_slice(&maps)).unwrap();
+                    stream
+                        .upload(
+                            buffers[7].binding(),
+                            bytemuck::cast_slice(&[1u32, 0, 0, 0x57454947]),
+                        )
+                        .unwrap();
+                    let source = kernel_source("train_full_adamw");
+                    let compiler = krea2::kernels::compiler(None).unwrap();
+                    let mut request = hrx::loom::Specialization::new("krea2_train_full_adamw");
+                    for (key, value) in [("grid_x", parts), ("grid_y", 1), ("parts", parts)] {
+                        request.set_config(
+                            format!("krea2.train_full_adamw.{key}"),
+                            value.to_string(),
+                        );
+                    }
+                    let reports = std::env::var_os("KREA2_BENCH_REPORT_DIR");
+                    if reports.is_some() {
+                        request.set_report(hrx::loom::ReportMode::Details);
+                    }
+                    let artifact = compiler.module(&source).compile(&request).unwrap();
+                    if let Some(dir) = reports {
+                        let dir = std::path::PathBuf::from(dir);
+                        std::fs::create_dir_all(&dir).unwrap();
+                        std::fs::write(
+                            dir.join(format!("full-adamw-{n}-compiler.json")),
+                            artifact.report().unwrap().json().to_string(),
+                        )
+                        .unwrap();
+                    }
+                    // SAFETY: resident buffers follow train_full_adamw's complete blockwise ABI.
+                    let kernel = unsafe { stream.load_artifact(&artifact).unwrap() };
+                    let constants = krea2::kernels::Scalars::new()
+                        .index(n)
+                        .index(37)
+                        .index(103)
+                        .pack("train_full_adamw", &kernel)
+                        .unwrap();
+                    stream.synchronize().unwrap();
+                    (stream, kernel, constants, buffers, parts)
+                });
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    // Reset nonzero weights/gradients outside timing: each measured update is identical.
+                    stream
+                        .upload(
+                            buffers[1].binding(),
+                            bytemuck::cast_slice(&vec![from_f32(0.125); n]),
+                        )
+                        .unwrap();
+                    stream
+                        .upload(
+                            buffers[2].binding(),
+                            bytemuck::cast_slice(&vec![from_f32(0.03125); n]),
+                        )
+                        .unwrap();
+                    for i in [3, 4, 5] {
+                        stream.fill(buffers[i].binding(), 0).unwrap();
+                    }
+                    stream.synchronize().unwrap();
+                    let bindings: Vec<_> = buffers.iter().map(|b| b.binding()).collect();
+                    let started = Instant::now();
+                    // SAFETY: each wave owns one 256-element block; tail and scale extents match.
+                    unsafe {
+                        stream
+                            .dispatch(
+                                kernel,
+                                [*parts as u32, 1, 1],
+                                [32, 1, 1],
+                                constants,
+                                &bindings,
+                            )
+                            .unwrap();
+                    }
+                    stream.synchronize().unwrap();
+                    elapsed += started.elapsed();
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
+fn full_weight_gradients(c: &mut Criterion) {
+    let mut group = c.benchmark_group("training/full_weight_gradient");
+    group.sample_size(10).sampling_mode(SamplingMode::Flat);
+    for (outputs, inputs, tokens) in
+        [(6144usize, 6144usize, 1043usize), (16384, 6144, 1043), (36864, 6144, 1)]
+    {
+        let mut prepared = None;
+        group.bench_function(format!("{outputs}x{inputs}x{tokens}"), |b| {
+            let (stream, ops, x, dy, dw) = prepared.get_or_insert_with(|| {
+                let mut stream = Stream::open().unwrap();
+                let ops = Ops::new(BufferPool::new());
+                let x = tensor(&ops, &mut stream, tokens, inputs);
+                let dy = tensor(&ops, &mut stream, tokens, outputs);
+                let dw = train::FloatTensor::zero(&stream, outputs, inputs).unwrap();
+                train::matmul_tn_accumulate(&ops, &stream, &dy, &x, &dw, 1.0).unwrap();
+                stream.synchronize().unwrap();
+                (stream, ops, x, dy, dw)
+            });
+            b.iter_custom(|iterations| {
+                let mut elapsed = Duration::ZERO;
+                for _ in 0..iterations {
+                    dw.clear(stream).unwrap();
+                    stream.synchronize().unwrap();
+                    let start = Instant::now();
+                    train::matmul_tn_accumulate(ops, stream, dy, x, dw, 1.0).unwrap();
+                    stream.synchronize().unwrap();
+                    elapsed += start.elapsed();
+                }
+                elapsed
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    full_adamw,
+    full_weight_gradients,
     dense,
     narrow_gemms,
     adapter_gradients,

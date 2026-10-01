@@ -8,6 +8,11 @@ fn checkpoint_resume_matches_two_uninterrupted_updates() {
     let path = std::env::var_os("KREA2_TRAIN_TEST_CONFIG")
         .expect("set KREA2_TRAIN_TEST_CONFIG to an external prepared configuration");
     let mut config = TrainConfig::read(std::path::Path::new(&path)).unwrap();
+    let model_file = if config.mode == krea2::training::TrainingMode::Full {
+        "model.safetensors"
+    } else {
+        "adapter.safetensors"
+    };
     // Checkpoints can exceed a GiB; keep them beside the external run rather
     // than on a potentially RAM-backed /tmp filesystem.
     let temporary = tempfile::tempdir_in(config.output.parent().unwrap()).unwrap();
@@ -18,6 +23,10 @@ fn checkpoint_resume_matches_two_uninterrupted_updates() {
     config.output = output.clone();
     config.steps = 2;
     config.keep_checkpoints = 4;
+    if config.mode == krea2::training::TrainingMode::Full {
+        config.snapshot_every = Some(1);
+        config.keep_snapshots = 2;
+    }
 
     let mut uninterrupted = Trainer::open(config).unwrap();
     eprintln!("validating uninterrupted update 1");
@@ -33,8 +42,18 @@ fn checkpoint_resume_matches_two_uninterrupted_updates() {
     assert!(second.gradient_norm.is_finite() && second.gradient_norm > 0.0);
     assert!(uninterrupted.train_step().unwrap().is_none());
     let complete = uninterrupted.save().unwrap();
-    let reference = temporary.path().join("continuous");
-    std::fs::rename(&complete, &reference).unwrap();
+    if model_file == "model.safetensors" {
+        let snapshot = output.join("snapshots/step-000002");
+        assert_eq!(
+            file_hash(&snapshot.join(model_file)).unwrap(),
+            file_hash(&complete.join(model_file)).unwrap()
+        );
+        assert!(!snapshot.join("optimizer.safetensors").exists());
+    }
+    let reference = [model_file, "optimizer.safetensors", "state.json"]
+        .map(|name| (name, file_hash(&complete.join(name)).unwrap()));
+    // A full checkpoint is about 48 GiB; compare hashes without retaining a third copy.
+    std::fs::remove_dir_all(&complete).unwrap();
     drop(uninterrupted);
 
     eprintln!("update 2 loss {}; validating resumed update 2", second.loss);
@@ -45,9 +64,9 @@ fn checkpoint_resume_matches_two_uninterrupted_updates() {
     assert_eq!(second.gradient_norm, resumed_second.gradient_norm);
     let resumed_path = resumed.save().unwrap();
     drop(resumed);
-    for file in ["adapter.safetensors", "optimizer.safetensors", "state.json"] {
+    for (file, hash) in reference {
         assert_eq!(
-            file_hash(&reference.join(file)).unwrap(),
+            hash,
             file_hash(&resumed_path.join(file)).unwrap(),
             "resume differs in {file}"
         );

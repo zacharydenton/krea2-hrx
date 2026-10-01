@@ -11,6 +11,7 @@ use hrx::Stream;
 type Id = usize;
 enum Operation {
     Input,
+    Parameter(String, usize),
     Linear(Id, String, Option<Tensor>),
     Norm(Id, String),
     Unary(Id, Unary),
@@ -45,6 +46,13 @@ impl<'a> Tape<'a> {
     }
     pub(crate) fn input(&mut self, x: &Tensor) -> Id {
         self.push(x.clone(), Operation::Input)
+    }
+    fn parameter(&mut self, x: &Tensor, name: &str, offset: usize) -> Id {
+        if self.model.full.is_some() {
+            self.push(x.clone(), Operation::Parameter(name.into(), offset))
+        } else {
+            self.input(x)
+        }
     }
     fn reshape(&mut self, x: Id, rows: usize, cols: usize) -> Result<Id> {
         if rows.checked_mul(cols) != Some(self.value(x).size()) {
@@ -171,8 +179,8 @@ impl<'a> Tape<'a> {
     }
     pub(crate) fn last(&mut self, s: &mut Stream, x: Id, embedding: Id) -> Result<Id> {
         let table = self.models.transformer.get("last.modulation.lin")?.tensor(2, 6144)?;
-        let scale = self.input(&table.view(1, 6144, 0)?);
-        let shift = self.input(&table.view(1, 6144, 6144)?);
+        let scale = self.parameter(&table.view(1, 6144, 0)?, "last.modulation.lin", 0);
+        let shift = self.parameter(&table.view(1, 6144, 6144)?, "last.modulation.lin", 6144);
         let scale = self.binary(s, embedding, scale, Binary::Add)?;
         let shift = self.binary(s, embedding, shift, Binary::Add)?;
         let factor = self.one_plus(s, scale)?;
@@ -219,10 +227,20 @@ impl<'a> Tape<'a> {
                 Operation::Input => {
                     grads[id] = Some(g);
                 }
+                Operation::Parameter(name, offset) => {
+                    self.model
+                        .full
+                        .as_ref()
+                        .expect("full parameter leaf")
+                        .add_gradient_slice(ops, s, name, *offset, &g)?;
+                }
                 Operation::Linear(x, name, low) => {
                     let w = self.models.transformer.get(&format!("{name}.weight"))?;
                     let dx =
                         train::matmul_nn(ops, s, &g, &w.tensor(w.shape[0], w.shape[1])?, 1.0)?;
+                    if let Some(full) = &self.model.full {
+                        full.linear_gradient(ops, s, name, self.value(*x), &g)?;
+                    }
                     let dx = match (self.model.adapters.get(name), low) {
                         (Some(p), Some(low)) => {
                             p.backward_cached(ops, s, self.value(*x), &g, &dx, low)?
@@ -233,6 +251,9 @@ impl<'a> Tape<'a> {
                     add(&mut grads, s, *x, dx)?;
                 }
                 Operation::Norm(x, name) => {
+                    if let Some(full) = &self.model.full {
+                        full.norm_gradient(ops, s, name, self.value(*x), &g)?;
+                    }
                     let scales = self.models.transformer.get(name)?.f32_values(s)?;
                     let dx = train::norm_backward(ops, s, self.value(*x), &g, scales, 1e-5)?;
                     add(&mut grads, s, *x, dx)?;

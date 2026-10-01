@@ -65,9 +65,18 @@ pub struct FloatTensor {
 enum FloatStorage {
     Owned(Buffer),
     Pooled(PooledBuffer),
+    Shared(Arc<Buffer>),
 }
 
 impl FloatTensor {
+    pub(crate) fn shared(buffer: &Arc<Buffer>, rows: usize, cols: usize) -> Result<Self> {
+        let bytes = rows
+            .checked_mul(cols)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| Error::invalid("FP32 shared tensor dimensions"))?;
+        buffer.try_slice(0, bytes)?;
+        Ok(Self { rows, cols, buffer: Arc::new(FloatStorage::Shared(Arc::clone(buffer))) })
+    }
     /// Number of rows, fixed when the allocation is created.
     pub fn rows(&self) -> usize {
         self.rows
@@ -127,6 +136,7 @@ impl FloatTensor {
     /// The checked allocation view.
     pub fn binding(&self) -> View<'_> {
         let buffer = match &*self.buffer {
+            FloatStorage::Shared(buffer) => buffer,
             FloatStorage::Owned(buffer) => buffer,
             FloatStorage::Pooled(buffer) => buffer.buffer(),
         };
