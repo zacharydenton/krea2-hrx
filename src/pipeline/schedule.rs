@@ -25,9 +25,26 @@ pub fn sigma(step: usize, steps: usize, mu: f64) -> f32 {
     shift / (shift + offset)
 }
 
+/// Where `step` lands when the run ends after step `last` of `steps`: the
+/// schedule's next sigma, or zero for the last step of a run finished early.
+/// A step to zero takes the model's estimate of the clean image, so a run cut
+/// short decodes sharp rather than as its noisy intermediate latents.
+pub fn next_sigma(step: usize, last: usize, steps: usize, mu: f64) -> f32 {
+    if step + 1 >= last { 0.0 } else { sigma(step + 1, steps, mu) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_finished_early_lands_its_last_step_at_zero() {
+        for step in 0..8 {
+            assert_eq!(next_sigma(step, 8, 8, 1.15), sigma(step + 1, 8, 1.15));
+        }
+        assert_eq!(next_sigma(2, 4, 8, 1.15), sigma(3, 8, 1.15));
+        assert_eq!(next_sigma(3, 4, 8, 1.15), 0.0);
+    }
 
     #[test]
     fn the_turbo_curve_starts_at_one_and_ends_at_zero() {

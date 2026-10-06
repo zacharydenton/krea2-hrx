@@ -1,7 +1,7 @@
 //! Byte-exact pipeline regression check. Record outputs with a reference build,
 //! then compare a changed build against them; recording never overwrites.
 use anyhow::{Context, Result, ensure};
-use krea2::pipeline::{Files, Pipeline, Request};
+use krea2::pipeline::{Control, Files, Pipeline, Request};
 use std::{io::Write, path::Path};
 
 fn main() -> Result<()> {
@@ -79,12 +79,16 @@ fn main() -> Result<()> {
             && warm.copy_streams_created == replayed.copy_streams_created,
         "warm native graphs or copy streams grew"
     );
-    let cancelled = pipeline.generate(&request, Some(&mut |_, _, _| false));
+    let cancelled = pipeline.generate(&request, Some(&mut |_, _, _| Control::Cancel));
     ensure!(
         cancelled.is_err_and(|e| matches!(e, krea2::Error::Cancelled)),
         "cancellation not observed"
     );
     ensure!(pipeline.generate(&request, None)? == rgb, "retry after cancellation changed");
+    // Finishing after the first of two steps changes nothing: the second
+    // already lands at zero.
+    let finished = pipeline.generate(&request, Some(&mut |_, _, _| Control::Finish))?;
+    ensure!(finished == rgb, "finishing at the last step changed the image");
     eprintln!(
         "warm tracked bytes: {}; allocations: {}; cancellation/retry matched",
         replayed.live_bytes, replayed.allocations

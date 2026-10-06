@@ -147,15 +147,14 @@ fn usage(message: impl Into<String>) -> anyhow::Error {
 }
 
 /// One line of sampling progress, redrawn in place, with the time left.
-/// Returning true carries on; the pipeline stops on false.
-fn report(step: usize, steps: usize, seconds: f64) -> bool {
+fn report(step: usize, steps: usize, seconds: f64) -> krea2::pipeline::Control {
     let left = if step > 0 { seconds / step as f64 * (steps - step) as f64 } else { 0.0 };
     eprint!("\r  step {step}/{steps}  {seconds:.1} s  ({left:.0} s left)   ");
     if step == steps {
         eprintln!();
     }
     let _ = std::io::stderr().flush();
-    true
+    krea2::pipeline::Control::Continue
 }
 
 fn prompt_from_stdin() -> Result<String> {

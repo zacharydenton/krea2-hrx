@@ -28,13 +28,29 @@ pub use crate::{Error, Result};
 const WIDTH: usize = 6144;
 const PATCH: usize = 16;
 
-/// Called after each sampling step with the seconds spent so far. Returning
-/// false abandons the image.
+/// Called after each sampling step with the steps done, the steps the run
+/// will take and the seconds spent so far; answers what to do next.
 ///
 /// It runs on the calling thread while the pipeline's lock is held, so it must
 /// not call back into the same pipeline: `encode`, `decode`, `transformer` and
 /// `generate` would all deadlock on a lock this closure is already inside.
-pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, f64) -> bool;
+pub type Progress<'a> = &'a mut dyn FnMut(usize, usize, f64) -> Control;
+
+/// What a `Progress` callback wants after a step.
+///
+/// `Finish` keeps the work done so far: the next step lands at sigma zero and
+/// is the last, and the image is decoded as usual -- the model's estimate of
+/// the clean image from where the run had got to, rather than nothing.
+/// `Cancel` abandons the image with `Error::Cancelled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// Take the next step.
+    Continue,
+    /// Make the next step the last, landing at zero, and decode.
+    Finish,
+    /// Abandon the image.
+    Cancel,
+}
 
 /// What one image asks for. `guidance` and `steps` of `None` take the
 /// checkpoint's defaults: Turbo 0 and 8, Raw 3.5 and 52.
@@ -321,9 +337,12 @@ impl Pipeline {
 
         // Turbo's shift is fixed; Raw's follows the image's token count.
         let mu = if self.distilled() { 1.15 } else { schedule::dynamic_mu(image_tokens) };
-        for step in 0..steps {
+        // The step after which the run ends; `Control::Finish` brings it in.
+        let mut last = steps;
+        let mut step = 0;
+        while step < last {
             let sigma = schedule::sigma(step, steps, mu);
-            let next = schedule::sigma(step + 1, steps, mu);
+            let next = schedule::next_sigma(step, last, steps, mu);
             // Both guidance branches see the same latents at the same timestep,
             // so they share the embeddings and the modulation tables.
             let inputs = self.step_inputs(stream, &latents, sigma)?;
@@ -337,10 +356,13 @@ impl Pipeline {
             self.models.ops.euler_step(stream, &latents, &velocity, next - sigma)?;
             if let Some(progress) = progress.as_deref_mut() {
                 stream.synchronize()?;
-                if !progress(step + 1, steps, began.elapsed().as_secs_f64()) {
-                    return Err(Error::Cancelled);
+                match progress(step + 1, last, began.elapsed().as_secs_f64()) {
+                    Control::Continue => {}
+                    Control::Finish => last = last.min(step + 2),
+                    Control::Cancel => return Err(Error::Cancelled),
                 }
             }
+            step += 1;
         }
         timing.mark(stream, "denoise")?;
         let rgb = self.models.decode(stream, &latents, width, height)?;
