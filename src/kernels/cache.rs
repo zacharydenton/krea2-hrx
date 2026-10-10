@@ -40,6 +40,7 @@ pub fn compiler_for_target(
             .min(NonZeroUsize::new(8).expect("nonzero")),
     };
     let options = hrx::loom::CompilerOptions {
+        sanitizer: hrx::loom::SanitizerOptions::default(),
         workers,
         module_cache_capacity: 256,
         target: target.clone(),

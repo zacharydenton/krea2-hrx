@@ -726,9 +726,9 @@ impl Session {
             sink,
             &self.kernels.rope,
             "qk norm + rope",
-            tokens,
-            1,
-            THREADS,
+            self.kernels.rope_launch.workgroup_count[0] as usize,
+            self.kernels.rope_launch.workgroup_count[1] as usize,
+            self.kernels.rope_launch.workgroup_size[0],
             &rope_scalars,
             &rope,
         )?;

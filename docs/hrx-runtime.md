@@ -1,9 +1,9 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs` 0.8.15](https://crates.io/crates/hrx-rs) or a compatible 0.8 release for keyed kernel
+Krea uses [`hrx-rs` 0.10.1](https://crates.io/crates/hrx-rs) for keyed kernel
 requests and the coordinated graph API.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
-The GPU runtime and Loom come from the unified HRX 0.8 native bundle.
+The GPU runtime and Loom come from the native bundle pinned by HRX.
 `Cargo.lock` pins the complete dependency
 graph. The shared implementation owns native loading, status conversion,
 allocation, streams, dispatch lifetimes and compiler caching.
@@ -55,7 +55,7 @@ let context = hrx::inference::ModelContext::new(hrx::execution::RuntimeOptions {
 let trainer = krea2::training::Trainer::open_in(config, &context)?;
 ```
 
-HRX 0.8 supports one allocation counter per native stream. Training preserves
+HRX supports one allocation counter per native stream. Training preserves
 its hard `memory_gib` ceiling by reserving that **entire allowance** in the
 context's global budget before loading, then enforcing the allowance on its
 private stream. The global counter reports reserved capacity, not instantaneous
@@ -94,7 +94,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 Install the matching CLI from crates.io:
 
 ```sh
-cargo install --locked hrx-rs --version 0.8.9
+cargo install --locked hrx-rs --version 0.10.1
 hrx prepare
 cargo build --release
 ```
@@ -130,6 +130,10 @@ kept across guidance shapes, avoiding repeated parsing and indexing. Prepared
 operation sets retain loaded kernels for their lifetime; there is no global
 loaded-kernel cache holding model resources after teardown. Artifacts load from
 owned bytes without a compiler subprocess or an extra filesystem round trip.
+
+RoPE dispatch uses the compiler's launch program, including any workgroup
+changes made during compilation. Contiguous checkpoint spans go directly to
+HRX's bounded upload path; host chunks remain only for row padding and packing.
 
 Kernel sources live in `kernels`; tokenizer assets live in `assets`. `build.rs`
 embeds every kernel and tests read the same paths, so package builds carry the

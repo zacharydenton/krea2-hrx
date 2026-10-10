@@ -49,12 +49,16 @@ impl Harness {
         let indices: Vec<_> = scalars.iter().map(|&v| u32::try_from(v).unwrap()).collect();
         let constants = Constants::indices(&kernel, &indices).unwrap();
         let bindings: Vec<_> = buffers.iter().map(Buffer::binding).collect();
+        let (grid, block) = if stem == "rope_qknorm_f16" {
+            let launch = kernel.launch_config(scalars).unwrap();
+            (launch.workgroup_count, launch.workgroup_size)
+        } else {
+            (grid, [threads, 1, 1])
+        };
         // SAFETY: every test sizes `buffers` from the dimensions it passes
         // as the kernel's configuration.
         unsafe {
-            self.stream
-                .dispatch(&kernel, grid, [threads, 1, 1], &constants, &bindings)
-                .unwrap();
+            self.stream.dispatch(&kernel, grid, block, &constants, &bindings).unwrap();
         }
         let reads: Vec<_> = bindings.iter().map(|&v| self.stream.read(v).unwrap()).collect();
         reads.into_iter().map(|r| r.wait(&mut self.stream).unwrap()).collect()
@@ -83,9 +87,14 @@ fn cfg(v: &[(&'static str, usize)]) -> Vec<(&'static str, String)> {
 #[test]
 #[ignore = "requires gfx1151 and provisioned HRX"]
 fn rotary_rounds_normalized_and_rotated_values_to_bf16() {
+    for (tokens, q_heads, kv_heads, stride) in [(3, 9, 2, 1664), (3, 48, 12, 15360)] {
+        check_rotary(tokens, q_heads, kv_heads, stride);
+    }
+}
+
+fn check_rotary(tokens: usize, q_heads: usize, kv_heads: usize, stride: usize) {
     let mut h = Harness::new();
-    let (tokens, q_heads, kv_heads, dim) = (3, 9, 2, 128);
-    let stride = (q_heads + 2 * kv_heads) * dim;
+    let dim = 128;
     let input: Vec<_> = values(tokens * stride, 0.7)
         .into_iter()
         .map(|x| f16::from_f32(bf16::from_f32(x).to_f32()))

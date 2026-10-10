@@ -100,7 +100,13 @@ pub(crate) fn fingerprint(
     h.update(&serde_json::to_vec(&identities).map_err(io)?);
     h.update(include_bytes!("../../assets/tokenizer.json"));
     h.update(preprocessing_hash().as_bytes());
-    h.update(crate::kernels::compiler(None)?.identity().as_bytes());
+    // Cache validation needs the compiler's content identity, not a loaded native
+    // library. Cached preparation must also work on CPU-only hosts with an older libc.
+    let compiler_path = match std::env::var_os("HRX_LOOM_LIBRARY") {
+        Some(path) => PathBuf::from(path),
+        None => hrx::bundle::resolve()?.join("libloomc.so"),
+    };
+    h.update(hrx::bundle::file_digest(&compiler_path)?.as_bytes());
     for s in &d.samples {
         h.update(s.key.as_bytes());
     }

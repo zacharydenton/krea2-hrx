@@ -2,7 +2,7 @@
 name = "krea2-hrx"
 version = "0.1.0"
 edition = "2024"
-# hrx-rs 0.8 requires 1.91.
+# hrx-rs requires Rust 1.91.
 rust-version = "1.91"
 description = "Krea 2 image generation on AMD Strix Halo, powered by Loom kernels and HRX"
 readme = "README.md"
@@ -56,7 +56,7 @@ strip = true
 lto = "thin"
 
 [dependencies]
-hrx = { package = "hrx-rs", version = "0.8.15" }
+hrx = { package = "hrx-rs", version = "0.10.1" }
 
 # The CLI's error reporting.
 anyhow = "1"

@@ -56,17 +56,18 @@ impl Weights {
             let pitch = if span.rows > 0 { span.device_row_bytes } else { span.row_bytes };
             let width = span.row_bytes;
             if pitch == width {
-                // HRX copies each borrowed chunk into its own staging before returning.
+                // HRX bounds upload staging and splits native transfer commands.
                 // Contiguous rows need no second host copy, even across gathered segments.
                 let mut written = 0;
                 for segment in &span.segments {
                     let tensor = file.get(&segment.tensor)?;
                     let bytes =
                         &tensor.bytes[segment.rows.start * width..segment.rows.end * width];
-                    for chunk in bytes.chunks(STAGING_BYTES) {
-                        stream.upload(base.slice(written, chunk.len())?, chunk)?;
-                        written += chunk.len();
+                    if bytes.is_empty() {
+                        continue;
                     }
+                    stream.upload(base.slice(written, bytes.len())?, bytes)?;
+                    written += bytes.len();
                 }
                 continue;
             }
@@ -94,9 +95,7 @@ impl Weights {
                 stream.upload(chunk, &staging[..staged * pitch])?;
             }
         }
-        // Not what bounds host memory: Stream::upload copies into runtime
-        // staging and stops referencing the caller's slice, and it submits and
-        // waits on its own once staging passes 64 MB. Draining here is so a
+        // Stream::upload owns and bounds its staging. Draining here is so a
         // failed upload surfaces at load rather than at the first dispatch.
         stream.synchronize()?;
         Ok(Weights { plan, storage })

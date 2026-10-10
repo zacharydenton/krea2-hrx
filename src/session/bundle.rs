@@ -16,6 +16,7 @@ pub struct Kernels {
     pub(crate) gemm_wo: Kernel,
     pub(crate) gemm_down: Kernel,
     pub(crate) rope: Kernel,
+    pub(crate) rope_launch: hrx::loom::LaunchConfig,
     pub(crate) attention: Kernel,
 }
 
@@ -42,6 +43,8 @@ impl Kernels {
         };
         let attention =
             format!("krea2_{}", crate::kernels::shape::attention_source(bundle.shape().tokens));
+        let rope = load("rope_qknorm", "krea2_rope_qknorm_f16")?;
+        let rope_launch = rope.launch_config(&[bundle.shape().tokens as u64])?;
         Ok(Kernels {
             prepare_norm: load("prepare_norm_i8", "krea2_prepare_norm_i8")?,
             prepare_gated: load("prepare_gated_i8", "krea2_prepare_gated_i8")?,
@@ -50,7 +53,8 @@ impl Kernels {
             gemm_gu: load_gemm("gemm_gu", "gemm_i8_swiglu_256")?,
             gemm_wo: load_gemm("gemm_wo", "gemm_i8_resid_256")?,
             gemm_down: load_gemm("gemm_down", "gemm_i8_resid_256")?,
-            rope: load("rope_qknorm", "krea2_rope_qknorm_f16")?,
+            rope,
+            rope_launch,
             attention: load("attention", &attention)?,
         })
     }

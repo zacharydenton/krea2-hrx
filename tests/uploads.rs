@@ -36,6 +36,7 @@ fn contiguous_and_padded_uploads_preserve_rows_across_chunks() {
         host: vec![],
         segments: vec![
             Segment { tensor: "w".into(), rows: 3..5 },
+            Segment { tensor: "w".into(), rows: 2..2 },
             Segment { tensor: "w".into(), rows: 0..2 },
         ],
     };
