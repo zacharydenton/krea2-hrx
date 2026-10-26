@@ -47,7 +47,7 @@ kernel.def target(@target) export("krea2_train_gated_backward") @krea2_train_gat
   scf.if %ok {
     scf.if %packed {
       %limit = index.sub %n, %c4 : index
-      %i = index.assume %idx [range(%idx, 0, 1073741823), le(%idx, %limit), mul(%idx, 4)] : index
+      %i = index.assume %idx [range(%idx, 0, 1073741823), le(%idx, %limit), multiple_of(%idx, 4)] : index
       %xb = vector.load %xv[%i] : view<[%n]xbf16> -> vector<4xbf16>
       %xf = vector.extf %xb : vector<4xbf16> to vector<4xf32>
       %ab = vector.load %av[%i] : view<[%n]xbf16> -> vector<4xbf16>

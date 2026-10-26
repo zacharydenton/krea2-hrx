@@ -125,7 +125,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %a0off1 = index.add %a0off0, %kc : index
  %a0off2 = index.add %a0off1, %abatch : index
  %a0limit = index.sub %asize, %c8 : index
- %a0off = index.assume %a0off2 [range(%a0off2, 0, 1073741823), le(%a0off2, %a0limit), mul(%a0off2, 8)] : index
+ %a0off = index.assume %a0off2 [range(%a0off2, 0, 1073741823), le(%a0off2, %a0limit), multiple_of(%a0off2, 8)] : index
  %a0data = vector.load %av[%a0off] : view<[%asize]xbf16> -> vector<8xbf16>
  vector.store %a0data, %aa[%a0row, %stcol] : vector<8xbf16>, view<128x72xbf16>
  %a32row = index.add %strow, %c32 : index
@@ -136,7 +136,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %a32off1 = index.add %a32off0, %kc : index
  %a32off2 = index.add %a32off1, %abatch : index
  %a32limit = index.sub %asize, %c8 : index
- %a32off = index.assume %a32off2 [range(%a32off2, 0, 1073741823), le(%a32off2, %a32limit), mul(%a32off2, 8)] : index
+ %a32off = index.assume %a32off2 [range(%a32off2, 0, 1073741823), le(%a32off2, %a32limit), multiple_of(%a32off2, 8)] : index
  %a32data = vector.load %av[%a32off] : view<[%asize]xbf16> -> vector<8xbf16>
  vector.store %a32data, %aa[%a32row, %stcol] : vector<8xbf16>, view<128x72xbf16>
  %a64row = index.add %strow, %c64 : index
@@ -147,7 +147,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %a64off1 = index.add %a64off0, %kc : index
  %a64off2 = index.add %a64off1, %abatch : index
  %a64limit = index.sub %asize, %c8 : index
- %a64off = index.assume %a64off2 [range(%a64off2, 0, 1073741823), le(%a64off2, %a64limit), mul(%a64off2, 8)] : index
+ %a64off = index.assume %a64off2 [range(%a64off2, 0, 1073741823), le(%a64off2, %a64limit), multiple_of(%a64off2, 8)] : index
  %a64data = vector.load %av[%a64off] : view<[%asize]xbf16> -> vector<8xbf16>
  vector.store %a64data, %aa[%a64row, %stcol] : vector<8xbf16>, view<128x72xbf16>
  %a96row = index.add %strow, %c96 : index
@@ -158,7 +158,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %a96off1 = index.add %a96off0, %kc : index
  %a96off2 = index.add %a96off1, %abatch : index
  %a96limit = index.sub %asize, %c8 : index
- %a96off = index.assume %a96off2 [range(%a96off2, 0, 1073741823), le(%a96off2, %a96limit), mul(%a96off2, 8)] : index
+ %a96off = index.assume %a96off2 [range(%a96off2, 0, 1073741823), le(%a96off2, %a96limit), multiple_of(%a96off2, 8)] : index
  %a96data = vector.load %av[%a96off] : view<[%asize]xbf16> -> vector<8xbf16>
  vector.store %a96data, %aa[%a96row, %stcol] : vector<8xbf16>, view<128x72xbf16>
  %b0row = index.add %strow, %c0 : index
@@ -167,7 +167,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %b0off1 = index.add %b0off0, %kc : index
  %b0off2 = index.add %b0off1, %bbatch : index
  %b0limit = index.sub %bsize, %c8 : index
- %b0off = index.assume %b0off2 [range(%b0off2, 0, 1073741823), le(%b0off2, %b0limit), mul(%b0off2, 8)] : index
+ %b0off = index.assume %b0off2 [range(%b0off2, 0, 1073741823), le(%b0off2, %b0limit), multiple_of(%b0off2, 8)] : index
  %b0data = vector.load %bv[%b0off] : view<[%bsize]xbf16> -> vector<8xbf16>
  vector.store %b0data, %bb[%b0row, %stcol] : vector<8xbf16>, view<64x72xbf16>
  %b32row = index.add %strow, %c32 : index
@@ -176,7 +176,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %b32off1 = index.add %b32off0, %kc : index
  %b32off2 = index.add %b32off1, %bbatch : index
  %b32limit = index.sub %bsize, %c8 : index
- %b32off = index.assume %b32off2 [range(%b32off2, 0, 1073741823), le(%b32off2, %b32limit), mul(%b32off2, 8)] : index
+ %b32off = index.assume %b32off2 [range(%b32off2, 0, 1073741823), le(%b32off2, %b32limit), multiple_of(%b32off2, 8)] : index
  %b32data = vector.load %bv[%b32off] : view<[%bsize]xbf16> -> vector<8xbf16>
  vector.store %b32data, %bb[%b32row, %stcol] : vector<8xbf16>, view<64x72xbf16>
  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -251,7 +251,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p00_0off1 = index.add %p00_0off0, %p00_0c : index
  %p00_0off2 = index.add %p00_0off1, %cbatch : index
  %p00_0limit = index.sub %csize, %c4 : index
- %p00_0off = index.assume %p00_0off2 [range(%p00_0off2, 0, 1073741823), le(%p00_0off2, %p00_0limit), mul(%p00_0off2, 4)] : index
+ %p00_0off = index.assume %p00_0off2 [range(%p00_0off2, 0, 1073741823), le(%p00_0off2, %p00_0limit), multiple_of(%p00_0off2, 4)] : index
  vector.store %p00_0bf, %ov[%p00_0off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  %p00_8lr = index.add %pr, %c8 : index
@@ -268,7 +268,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p00_8off1 = index.add %p00_8off0, %p00_8c : index
  %p00_8off2 = index.add %p00_8off1, %cbatch : index
  %p00_8limit = index.sub %csize, %c4 : index
- %p00_8off = index.assume %p00_8off2 [range(%p00_8off2, 0, 1073741823), le(%p00_8off2, %p00_8limit), mul(%p00_8off2, 4)] : index
+ %p00_8off = index.assume %p00_8off2 [range(%p00_8off2, 0, 1073741823), le(%p00_8off2, %p00_8limit), multiple_of(%p00_8off2, 4)] : index
  vector.store %p00_8bf, %ov[%p00_8off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
@@ -288,7 +288,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p01_0off1 = index.add %p01_0off0, %p01_0c : index
  %p01_0off2 = index.add %p01_0off1, %cbatch : index
  %p01_0limit = index.sub %csize, %c4 : index
- %p01_0off = index.assume %p01_0off2 [range(%p01_0off2, 0, 1073741823), le(%p01_0off2, %p01_0limit), mul(%p01_0off2, 4)] : index
+ %p01_0off = index.assume %p01_0off2 [range(%p01_0off2, 0, 1073741823), le(%p01_0off2, %p01_0limit), multiple_of(%p01_0off2, 4)] : index
  vector.store %p01_0bf, %ov[%p01_0off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  %p01_8lr = index.add %pr, %c8 : index
@@ -305,7 +305,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p01_8off1 = index.add %p01_8off0, %p01_8c : index
  %p01_8off2 = index.add %p01_8off1, %cbatch : index
  %p01_8limit = index.sub %csize, %c4 : index
- %p01_8off = index.assume %p01_8off2 [range(%p01_8off2, 0, 1073741823), le(%p01_8off2, %p01_8limit), mul(%p01_8off2, 4)] : index
+ %p01_8off = index.assume %p01_8off2 [range(%p01_8off2, 0, 1073741823), le(%p01_8off2, %p01_8limit), multiple_of(%p01_8off2, 4)] : index
  vector.store %p01_8bf, %ov[%p01_8off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
@@ -325,7 +325,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p10_0off1 = index.add %p10_0off0, %p10_0c : index
  %p10_0off2 = index.add %p10_0off1, %cbatch : index
  %p10_0limit = index.sub %csize, %c4 : index
- %p10_0off = index.assume %p10_0off2 [range(%p10_0off2, 0, 1073741823), le(%p10_0off2, %p10_0limit), mul(%p10_0off2, 4)] : index
+ %p10_0off = index.assume %p10_0off2 [range(%p10_0off2, 0, 1073741823), le(%p10_0off2, %p10_0limit), multiple_of(%p10_0off2, 4)] : index
  vector.store %p10_0bf, %ov[%p10_0off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  %p10_8lr = index.add %pr, %c8 : index
@@ -342,7 +342,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p10_8off1 = index.add %p10_8off0, %p10_8c : index
  %p10_8off2 = index.add %p10_8off1, %cbatch : index
  %p10_8limit = index.sub %csize, %c4 : index
- %p10_8off = index.assume %p10_8off2 [range(%p10_8off2, 0, 1073741823), le(%p10_8off2, %p10_8limit), mul(%p10_8off2, 4)] : index
+ %p10_8off = index.assume %p10_8off2 [range(%p10_8off2, 0, 1073741823), le(%p10_8off2, %p10_8limit), multiple_of(%p10_8off2, 4)] : index
  vector.store %p10_8bf, %ov[%p10_8off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
@@ -362,7 +362,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p11_0off1 = index.add %p11_0off0, %p11_0c : index
  %p11_0off2 = index.add %p11_0off1, %cbatch : index
  %p11_0limit = index.sub %csize, %c4 : index
- %p11_0off = index.assume %p11_0off2 [range(%p11_0off2, 0, 1073741823), le(%p11_0off2, %p11_0limit), mul(%p11_0off2, 4)] : index
+ %p11_0off = index.assume %p11_0off2 [range(%p11_0off2, 0, 1073741823), le(%p11_0off2, %p11_0limit), multiple_of(%p11_0off2, 4)] : index
  vector.store %p11_0bf, %ov[%p11_0off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  %p11_8lr = index.add %pr, %c8 : index
@@ -379,7 +379,7 @@ kernel.def target(@target) export("krea2_train_gemm") @krea2_train_gemm(%count: 
  %p11_8off1 = index.add %p11_8off0, %p11_8c : index
  %p11_8off2 = index.add %p11_8off1, %cbatch : index
  %p11_8limit = index.sub %csize, %c4 : index
- %p11_8off = index.assume %p11_8off2 [range(%p11_8off2, 0, 1073741823), le(%p11_8off2, %p11_8limit), mul(%p11_8off2, 4)] : index
+ %p11_8off = index.assume %p11_8off2 [range(%p11_8off2, 0, 1073741823), le(%p11_8off2, %p11_8limit), multiple_of(%p11_8off2, 4)] : index
  vector.store %p11_8bf, %ov[%p11_8off] : vector<4xbf16>, view<[%csize]xbf16>
  }
  kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)

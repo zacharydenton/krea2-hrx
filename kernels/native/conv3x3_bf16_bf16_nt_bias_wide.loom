@@ -144,7 +144,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v77 = index.assume %v79 [range(%v79, 0, 1073741823), lt(%v79, %asize)] : index
       %v80 = scf.if %v71 -> (vector<4xbf16>) {
         %v82 = index.sub %asize, %v7 : index
-        %v81 = index.assume %v77 [range(%v77, 0, 1073741823), le(%v77, %v82), mul(%v77, 4)] : index
+        %v81 = index.assume %v77 [range(%v77, 0, 1073741823), le(%v77, %v82), multiple_of(%v77, 4)] : index
         %v83 = vector.load %a_view[%v81] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v83 : vector<4xbf16>
       } else {
@@ -160,7 +160,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v90 = index.add %v28, %v89 : index
       %v91 = scf.if %v87 -> (vector<4xbf16>) {
         %v93 = index.sub %bsize, %v7 : index
-        %v92 = index.assume %v90 [range(%v90, 0, 1073741823), le(%v90, %v93), mul(%v90, 4)] : index
+        %v92 = index.assume %v90 [range(%v90, 0, 1073741823), le(%v90, %v93), multiple_of(%v90, 4)] : index
         %v94 = vector.load %b_view[%v92] : view<[%bsize]xbf16> -> vector<4xbf16>
         scf.yield %v94 : vector<4xbf16>
       } else {
@@ -400,7 +400,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v281 = index.assume %v283 [range(%v283, 0, 1073741823), lt(%v283, %asize)] : index
       %v284 = scf.if %v275 -> (vector<4xbf16>) {
         %v286 = index.sub %asize, %v7 : index
-        %v285 = index.assume %v281 [range(%v281, 0, 1073741823), le(%v281, %v286), mul(%v281, 4)] : index
+        %v285 = index.assume %v281 [range(%v281, 0, 1073741823), le(%v281, %v286), multiple_of(%v281, 4)] : index
         %v287 = vector.load %a_view[%v285] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v287 : vector<4xbf16>
       } else {
@@ -416,7 +416,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v294 = index.add %v28, %v293 : index
       %v295 = scf.if %v291 -> (vector<4xbf16>) {
         %v297 = index.sub %bsize, %v7 : index
-        %v296 = index.assume %v294 [range(%v294, 0, 1073741823), le(%v294, %v297), mul(%v294, 4)] : index
+        %v296 = index.assume %v294 [range(%v294, 0, 1073741823), le(%v294, %v297), multiple_of(%v294, 4)] : index
         %v298 = vector.load %b_view[%v296] : view<[%bsize]xbf16> -> vector<4xbf16>
         scf.yield %v298 : vector<4xbf16>
       } else {
@@ -656,7 +656,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v484 = index.assume %v486 [range(%v486, 0, 1073741823), lt(%v486, %asize)] : index
       %v487 = scf.if %v478 -> (vector<4xbf16>) {
         %v489 = index.sub %asize, %v7 : index
-        %v488 = index.assume %v484 [range(%v484, 0, 1073741823), le(%v484, %v489), mul(%v484, 4)] : index
+        %v488 = index.assume %v484 [range(%v484, 0, 1073741823), le(%v484, %v489), multiple_of(%v484, 4)] : index
         %v490 = vector.load %a_view[%v488] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v490 : vector<4xbf16>
       } else {
@@ -840,7 +840,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v641 = index.assume %v643 [range(%v643, 0, 1073741823), lt(%v643, %asize)] : index
       %v644 = scf.if %v635 -> (vector<4xbf16>) {
         %v646 = index.sub %asize, %v7 : index
-        %v645 = index.assume %v641 [range(%v641, 0, 1073741823), le(%v641, %v646), mul(%v641, 4)] : index
+        %v645 = index.assume %v641 [range(%v641, 0, 1073741823), le(%v641, %v646), multiple_of(%v641, 4)] : index
         %v647 = vector.load %a_view[%v645] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v647 : vector<4xbf16>
       } else {
@@ -1041,7 +1041,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v809 = vector.splat %alpha : vector<4xf32>
       %v810 = vector.mulf %v808, %v809 : vector<4xf32>
       %v815 = index.sub %n, %v7 : index
-      %v811 = index.assume %v804 [range(%v804, 0, 1073741823), le(%v804, %v815), mul(%v804, 4)] : index
+      %v811 = index.assume %v804 [range(%v804, 0, 1073741823), le(%v804, %v815), multiple_of(%v804, 4)] : index
       %v812 = vector.load %bias_view[%v811] : view<[%n]xbf16> -> vector<4xbf16>
       %v813 = vector.extf %v812 : vector<4xbf16> to vector<4xf32>
       %v814 = vector.addf %v810, %v813 : vector<4xf32>
@@ -1050,7 +1050,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v818 = index.add %v817, %v804 : index
       %v819 = index.add %v30, %v818 : index
       %v821 = index.sub %csize, %v7 : index
-      %v820 = index.assume %v819 [range(%v819, 0, 1073741823), le(%v819, %v821), mul(%v819, 4)] : index
+      %v820 = index.assume %v819 [range(%v819, 0, 1073741823), le(%v819, %v821), multiple_of(%v819, 4)] : index
       vector.store %v816, %out_view[%v820] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1157,7 +1157,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v907 = vector.splat %alpha : vector<4xf32>
       %v908 = vector.mulf %v906, %v907 : vector<4xf32>
       %v913 = index.sub %n, %v7 : index
-      %v909 = index.assume %v902 [range(%v902, 0, 1073741823), le(%v902, %v913), mul(%v902, 4)] : index
+      %v909 = index.assume %v902 [range(%v902, 0, 1073741823), le(%v902, %v913), multiple_of(%v902, 4)] : index
       %v910 = vector.load %bias_view[%v909] : view<[%n]xbf16> -> vector<4xbf16>
       %v911 = vector.extf %v910 : vector<4xbf16> to vector<4xf32>
       %v912 = vector.addf %v908, %v911 : vector<4xf32>
@@ -1166,7 +1166,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v916 = index.add %v915, %v902 : index
       %v917 = index.add %v30, %v916 : index
       %v919 = index.sub %csize, %v7 : index
-      %v918 = index.assume %v917 [range(%v917, 0, 1073741823), le(%v917, %v919), mul(%v917, 4)] : index
+      %v918 = index.assume %v917 [range(%v917, 0, 1073741823), le(%v917, %v919), multiple_of(%v917, 4)] : index
       vector.store %v914, %out_view[%v918] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1276,7 +1276,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1005 = vector.splat %alpha : vector<4xf32>
       %v1006 = vector.mulf %v1004, %v1005 : vector<4xf32>
       %v1011 = index.sub %n, %v7 : index
-      %v1007 = index.assume %v1000 [range(%v1000, 0, 1073741823), le(%v1000, %v1011), mul(%v1000, 4)] : index
+      %v1007 = index.assume %v1000 [range(%v1000, 0, 1073741823), le(%v1000, %v1011), multiple_of(%v1000, 4)] : index
       %v1008 = vector.load %bias_view[%v1007] : view<[%n]xbf16> -> vector<4xbf16>
       %v1009 = vector.extf %v1008 : vector<4xbf16> to vector<4xf32>
       %v1010 = vector.addf %v1006, %v1009 : vector<4xf32>
@@ -1285,7 +1285,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1014 = index.add %v1013, %v1000 : index
       %v1015 = index.add %v30, %v1014 : index
       %v1017 = index.sub %csize, %v7 : index
-      %v1016 = index.assume %v1015 [range(%v1015, 0, 1073741823), le(%v1015, %v1017), mul(%v1015, 4)] : index
+      %v1016 = index.assume %v1015 [range(%v1015, 0, 1073741823), le(%v1015, %v1017), multiple_of(%v1015, 4)] : index
       vector.store %v1012, %out_view[%v1016] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1392,7 +1392,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1103 = vector.splat %alpha : vector<4xf32>
       %v1104 = vector.mulf %v1102, %v1103 : vector<4xf32>
       %v1109 = index.sub %n, %v7 : index
-      %v1105 = index.assume %v1098 [range(%v1098, 0, 1073741823), le(%v1098, %v1109), mul(%v1098, 4)] : index
+      %v1105 = index.assume %v1098 [range(%v1098, 0, 1073741823), le(%v1098, %v1109), multiple_of(%v1098, 4)] : index
       %v1106 = vector.load %bias_view[%v1105] : view<[%n]xbf16> -> vector<4xbf16>
       %v1107 = vector.extf %v1106 : vector<4xbf16> to vector<4xf32>
       %v1108 = vector.addf %v1104, %v1107 : vector<4xf32>
@@ -1401,7 +1401,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1112 = index.add %v1111, %v1098 : index
       %v1113 = index.add %v30, %v1112 : index
       %v1115 = index.sub %csize, %v7 : index
-      %v1114 = index.assume %v1113 [range(%v1113, 0, 1073741823), le(%v1113, %v1115), mul(%v1113, 4)] : index
+      %v1114 = index.assume %v1113 [range(%v1113, 0, 1073741823), le(%v1113, %v1115), multiple_of(%v1113, 4)] : index
       vector.store %v1110, %out_view[%v1114] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1511,7 +1511,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1201 = vector.splat %alpha : vector<4xf32>
       %v1202 = vector.mulf %v1200, %v1201 : vector<4xf32>
       %v1207 = index.sub %n, %v7 : index
-      %v1203 = index.assume %v1196 [range(%v1196, 0, 1073741823), le(%v1196, %v1207), mul(%v1196, 4)] : index
+      %v1203 = index.assume %v1196 [range(%v1196, 0, 1073741823), le(%v1196, %v1207), multiple_of(%v1196, 4)] : index
       %v1204 = vector.load %bias_view[%v1203] : view<[%n]xbf16> -> vector<4xbf16>
       %v1205 = vector.extf %v1204 : vector<4xbf16> to vector<4xf32>
       %v1206 = vector.addf %v1202, %v1205 : vector<4xf32>
@@ -1520,7 +1520,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1210 = index.add %v1209, %v1196 : index
       %v1211 = index.add %v30, %v1210 : index
       %v1213 = index.sub %csize, %v7 : index
-      %v1212 = index.assume %v1211 [range(%v1211, 0, 1073741823), le(%v1211, %v1213), mul(%v1211, 4)] : index
+      %v1212 = index.assume %v1211 [range(%v1211, 0, 1073741823), le(%v1211, %v1213), multiple_of(%v1211, 4)] : index
       vector.store %v1208, %out_view[%v1212] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1627,7 +1627,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1299 = vector.splat %alpha : vector<4xf32>
       %v1300 = vector.mulf %v1298, %v1299 : vector<4xf32>
       %v1305 = index.sub %n, %v7 : index
-      %v1301 = index.assume %v1294 [range(%v1294, 0, 1073741823), le(%v1294, %v1305), mul(%v1294, 4)] : index
+      %v1301 = index.assume %v1294 [range(%v1294, 0, 1073741823), le(%v1294, %v1305), multiple_of(%v1294, 4)] : index
       %v1302 = vector.load %bias_view[%v1301] : view<[%n]xbf16> -> vector<4xbf16>
       %v1303 = vector.extf %v1302 : vector<4xbf16> to vector<4xf32>
       %v1304 = vector.addf %v1300, %v1303 : vector<4xf32>
@@ -1636,7 +1636,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1308 = index.add %v1307, %v1294 : index
       %v1309 = index.add %v30, %v1308 : index
       %v1311 = index.sub %csize, %v7 : index
-      %v1310 = index.assume %v1309 [range(%v1309, 0, 1073741823), le(%v1309, %v1311), mul(%v1309, 4)] : index
+      %v1310 = index.assume %v1309 [range(%v1309, 0, 1073741823), le(%v1309, %v1311), multiple_of(%v1309, 4)] : index
       vector.store %v1306, %out_view[%v1310] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1746,7 +1746,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1397 = vector.splat %alpha : vector<4xf32>
       %v1398 = vector.mulf %v1396, %v1397 : vector<4xf32>
       %v1403 = index.sub %n, %v7 : index
-      %v1399 = index.assume %v1392 [range(%v1392, 0, 1073741823), le(%v1392, %v1403), mul(%v1392, 4)] : index
+      %v1399 = index.assume %v1392 [range(%v1392, 0, 1073741823), le(%v1392, %v1403), multiple_of(%v1392, 4)] : index
       %v1400 = vector.load %bias_view[%v1399] : view<[%n]xbf16> -> vector<4xbf16>
       %v1401 = vector.extf %v1400 : vector<4xbf16> to vector<4xf32>
       %v1402 = vector.addf %v1398, %v1401 : vector<4xf32>
@@ -1755,7 +1755,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1406 = index.add %v1405, %v1392 : index
       %v1407 = index.add %v30, %v1406 : index
       %v1409 = index.sub %csize, %v7 : index
-      %v1408 = index.assume %v1407 [range(%v1407, 0, 1073741823), le(%v1407, %v1409), mul(%v1407, 4)] : index
+      %v1408 = index.assume %v1407 [range(%v1407, 0, 1073741823), le(%v1407, %v1409), multiple_of(%v1407, 4)] : index
       vector.store %v1404, %out_view[%v1408] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1862,7 +1862,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1495 = vector.splat %alpha : vector<4xf32>
       %v1496 = vector.mulf %v1494, %v1495 : vector<4xf32>
       %v1501 = index.sub %n, %v7 : index
-      %v1497 = index.assume %v1490 [range(%v1490, 0, 1073741823), le(%v1490, %v1501), mul(%v1490, 4)] : index
+      %v1497 = index.assume %v1490 [range(%v1490, 0, 1073741823), le(%v1490, %v1501), multiple_of(%v1490, 4)] : index
       %v1498 = vector.load %bias_view[%v1497] : view<[%n]xbf16> -> vector<4xbf16>
       %v1499 = vector.extf %v1498 : vector<4xbf16> to vector<4xf32>
       %v1500 = vector.addf %v1496, %v1499 : vector<4xf32>
@@ -1871,7 +1871,7 @@ kernel.def target(@krea2_conv3x3_bf16_bf16_nt_bias_wide_target) export("krea2_co
       %v1504 = index.add %v1503, %v1490 : index
       %v1505 = index.add %v30, %v1504 : index
       %v1507 = index.sub %csize, %v7 : index
-      %v1506 = index.assume %v1505 [range(%v1505, 0, 1073741823), le(%v1505, %v1507), mul(%v1505, 4)] : index
+      %v1506 = index.assume %v1505 [range(%v1505, 0, 1073741823), le(%v1505, %v1507), multiple_of(%v1505, 4)] : index
       vector.store %v1502, %out_view[%v1506] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {

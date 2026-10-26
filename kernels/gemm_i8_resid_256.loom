@@ -11,12 +11,12 @@
 //
 amdgpu.target<gfx11-generic> @krea2_gemm_i8_resid_256_gfx11 {subgroup_size = 32}
 
-config.decl @krea2.gemm_i8_resid_256.k_size : %value: index where [range(%value, 128, 65536), mul(%value, 128)]
+config.decl @krea2.gemm_i8_resid_256.k_size : %value: index where [range(%value, 128, 65536), multiple_of(%value, 128)]
 
-config.decl @krea2.gemm_i8_resid_256.n_size : %value: index where [range(%value, 128, 32768), mul(%value, 128)]
+config.decl @krea2.gemm_i8_resid_256.n_size : %value: index where [range(%value, 128, 32768), multiple_of(%value, 128)]
 
 // operand row pitch in k elements: K, or K plus a step when the row's bytes are a multiple of 1024
-config.decl @krea2.gemm_i8_resid_256.k_stride : %value: index where [range(%value, 64, 65536), mul(%value, 64)]
+config.decl @krea2.gemm_i8_resid_256.k_stride : %value: index where [range(%value, 64, 65536), multiple_of(%value, 64)]
 
 // m-tiles per raster group: chosen per token count so the tile rows divide with as few ghost rows as possible
 config.decl @krea2.gemm_i8_resid_256.m_group : %value: index where [range(%value, 1, 4)]
@@ -37,9 +37,9 @@ kernel.def target(@krea2_gemm_i8_resid_256_gfx11) export("krea2_gemm_i8_resid_25
   %k_size0 = config.get @krea2.gemm_i8_resid_256.k_size : index
   %n_size0 = config.get @krea2.gemm_i8_resid_256.n_size : index
   %k_stride0 = config.get @krea2.gemm_i8_resid_256.k_stride : index
-  %k_size = index.assume %k_size0 [range(%k_size0, 128, 65536), mul(%k_size0, 128)] : index
-  %n_size = index.assume %n_size0 [range(%n_size0, 128, 32768), mul(%n_size0, 128)] : index
-  %k_stride1 = index.assume %k_stride0 [range(%k_stride0, 64, 65536), mul(%k_stride0, 64)] : index
+  %k_size = index.assume %k_size0 [range(%k_size0, 128, 65536), multiple_of(%k_size0, 128)] : index
+  %n_size = index.assume %n_size0 [range(%n_size0, 128, 32768), multiple_of(%n_size0, 128)] : index
+  %k_stride1 = index.assume %k_stride0 [range(%k_stride0, 64, 65536), multiple_of(%k_stride0, 64)] : index
   %k_stride = index.assume %k_stride1 [ge(%k_stride1, %k_size)] : index
 
   %c0 = index.constant 0 : index
@@ -247,7 +247,7 @@ kernel.def target(@krea2_gemm_i8_resid_256_gfx11) export("krea2_gemm_i8_resid_25
 
   // Carry one 128-byte K tile ahead. Eight WMMA substeps amortize each pair
   // of workgroup barriers and the global-address calculations over twice K.
-  %kq_first = index.assume %st_quad [le(%st_quad, %k_quad_limit), mul(%st_quad, 4)] : index
+  %kq_first = index.assume %st_quad [le(%st_quad, %k_quad_limit), multiple_of(%st_quad, 4)] : index
   %ga0 = vector.load %a_view[%a_row0, %kq_first] : view<[%m_bounded]x[%k_quads]xi32> -> vector<4xi32>
   %ga1 = vector.load %a_view[%a_row1, %kq_first] : view<[%m_bounded]x[%k_quads]xi32> -> vector<4xi32>
   %ga2 = vector.load %a_view[%a_row2, %kq_first] : view<[%m_bounded]x[%k_quads]xi32> -> vector<4xi32>
@@ -279,7 +279,7 @@ kernel.def target(@krea2_gemm_i8_resid_256_gfx11) export("krea2_gemm_i8_resid_25
     %kq_next0 = index.div %k_next, %c4 : index
     %kq_slot = index.add %kq_next0, %st_quad : index
     %kq_safe = scf.select %in_k, %kq_slot, %st_quad : index
-    %kq_next = index.assume %kq_safe [le(%kq_safe, %k_quad_limit), mul(%kq_safe, 4)] : index
+    %kq_next = index.assume %kq_safe [le(%kq_safe, %k_quad_limit), multiple_of(%kq_safe, 4)] : index
     %na0 = vector.load %a_view[%a_row0, %kq_next] : view<[%m_bounded]x[%k_quads]xi32> -> vector<4xi32>
     %na1 = vector.load %a_view[%a_row1, %kq_next] : view<[%m_bounded]x[%k_quads]xi32> -> vector<4xi32>
     %na2 = vector.load %a_view[%a_row2, %kq_next] : view<[%m_bounded]x[%k_quads]xi32> -> vector<4xi32>

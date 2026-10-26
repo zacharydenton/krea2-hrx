@@ -50,7 +50,7 @@ kernel.def target(@krea2_train_attention_pack_target) export("krea2_train_attent
     %row0 = index.mul %rt, %c32 : index
     %col0a = index.mul %ct, %c32 : index
     %col_limit = index.sub %width, %c32 : index
-    %col0 = index.assume %col0a [le(%col0a, %col_limit), mul(%col0a, 32)] : index
+    %col0 = index.assume %col0a [le(%col0a, %col_limit), multiple_of(%col0a, 32)] : index
     %x_global = buffer.assume.memory_space<global> %x : buffer
     %o_global = buffer.assume.memory_space<global> %transposed : buffer
     %x_view = buffer.view %x_global[%c0_offset] : buffer -> view<[%rows_b]x[%width]xbf16>
@@ -65,18 +65,18 @@ kernel.def target(@krea2_train_attention_pack_target) export("krea2_train_attent
     %lr = index.div %lane, %c8 : index
     %lc0 = index.rem %lane, %c8 : index
     %lc = index.mul %lc0, %c4 : index
-    %lcb = index.assume %lc [le(%lc, %c28), mul(%lc, 4)] : index
+    %lcb = index.assume %lc [le(%lc, %c28), multiple_of(%lc, 4)] : index
     %grow = index.add %row0, %lr : index
     %in_rows = index.cmp ult, %grow, %rows_b : index
     scf.if %in_rows {
       %grow_b = index.assume %grow [lt(%grow, %rows_b)] : index
       %gcol = index.add %col0, %lcb : index
       %gcol_limit = index.sub %width, %c4 : index
-      %gcolb = index.assume %gcol [le(%gcol, %gcol_limit), mul(%gcol, 4)] : index
+      %gcolb = index.assume %gcol [le(%gcol, %gcol_limit), multiple_of(%gcol, 4)] : index
       %v = vector.load %x_view[%grow_b, %gcolb] : view<[%rows_b]x[%width]xbf16> -> vector<4xbf16>
       %p_row = index.mul %grow_b, %width : index
       %p_index0 = index.add %p_row, %gcolb : index
-      %p_index = index.assume %p_index0 [le(%p_index0, %p_limit), mul(%p_index0, 4)] : index
+      %p_index = index.assume %p_index0 [le(%p_index0, %p_limit), multiple_of(%p_index0, 4)] : index
       vector.store %v, %p_view[%p_index] : vector<4xbf16>, view<[%p_size]xbf16>
       vector.store %v, %tile[%lr, %lcb] : vector<4xbf16>, view<32x36xbf16>
     } else {
@@ -85,10 +85,10 @@ kernel.def target(@krea2_train_attention_pack_target) export("krea2_train_attent
         %pad_row = index.assume %grow [lt(%grow, %cap)] : index
         %pad_col0 = index.add %col0, %lcb : index
         %pad_limit = index.sub %width, %c4 : index
-        %pad_col = index.assume %pad_col0 [le(%pad_col0, %pad_limit), mul(%pad_col0, 4)] : index
+        %pad_col = index.assume %pad_col0 [le(%pad_col0, %pad_limit), multiple_of(%pad_col0, 4)] : index
         %pad_base = index.mul %pad_row, %width : index
         %pad_index0 = index.add %pad_base, %pad_col : index
-        %pad_index = index.assume %pad_index0 [le(%pad_index0, %p_limit), mul(%pad_index0, 4)] : index
+        %pad_index = index.assume %pad_index0 [le(%pad_index0, %p_limit), multiple_of(%pad_index0, 4)] : index
         vector.store %zero4, %p_view[%pad_index] : vector<4xbf16>, view<[%p_size]xbf16>
       }
       vector.store %zero4, %tile[%lr, %lcb] : vector<4xbf16>, view<32x36xbf16>
@@ -97,7 +97,7 @@ kernel.def target(@krea2_train_attention_pack_target) export("krea2_train_attent
     // store: lane -> tile column lane/8 (an output row), tile rows (lane%8)*4 .. +4 (output columns)
     %tc = index.div %lane, %c8 : index
     %tr = index.mul %lc0, %c4 : index
-    %trb = index.assume %tr [le(%tr, %c28), mul(%tr, 4)] : index
+    %trb = index.assume %tr [le(%tr, %c28), multiple_of(%tr, 4)] : index
     %e0 = view.load %tile[%trb, %tc] : view<32x36xbf16> -> bf16
     %tr1 = index.add %trb, %c1 : index
     %tr2 = index.add %trb, %c2 : index
@@ -112,7 +112,7 @@ kernel.def target(@krea2_train_attention_pack_target) export("krea2_train_attent
     %ocol_limit = index.sub %cap, %c4 : index
     %in_cols = index.cmp ule, %ocol, %ocol_limit : index
     scf.if %in_cols {
-      %ocol_b = index.assume %ocol [le(%ocol, %ocol_limit), mul(%ocol, 4)] : index
+      %ocol_b = index.assume %ocol [le(%ocol, %ocol_limit), multiple_of(%ocol, 4)] : index
       vector.store %ov, %o_view[%orow_b, %ocol_b] : vector<4xbf16>, view<[%width]x[%cap]xbf16>
     }
   } else {

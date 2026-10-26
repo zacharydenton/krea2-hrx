@@ -117,7 +117,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v67 = index.add %v27, %v66 : index
       %v68 = scf.if %v64 -> (vector<4xbf16>) {
         %v70 = index.sub %asize, %v7 : index
-        %v69 = index.assume %v67 [range(%v67, 0, 1073741823), le(%v67, %v70), mul(%v67, 4)] : index
+        %v69 = index.assume %v67 [range(%v67, 0, 1073741823), le(%v67, %v70), multiple_of(%v67, 4)] : index
         %v71 = vector.load %a_view[%v69] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v71 : vector<4xbf16>
       } else {
@@ -133,7 +133,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v78 = index.add %v28, %v77 : index
       %v79 = scf.if %v75 -> (vector<4xbf16>) {
         %v81 = index.sub %bsize, %v7 : index
-        %v80 = index.assume %v78 [range(%v78, 0, 1073741823), le(%v78, %v81), mul(%v78, 4)] : index
+        %v80 = index.assume %v78 [range(%v78, 0, 1073741823), le(%v78, %v81), multiple_of(%v78, 4)] : index
         %v82 = vector.load %b_view[%v80] : view<[%bsize]xbf16> -> vector<4xbf16>
         scf.yield %v82 : vector<4xbf16>
       } else {
@@ -278,7 +278,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v177 = index.add %v27, %v176 : index
       %v178 = scf.if %v174 -> (vector<4xbf16>) {
         %v180 = index.sub %asize, %v7 : index
-        %v179 = index.assume %v177 [range(%v177, 0, 1073741823), le(%v177, %v180), mul(%v177, 4)] : index
+        %v179 = index.assume %v177 [range(%v177, 0, 1073741823), le(%v177, %v180), multiple_of(%v177, 4)] : index
         %v181 = vector.load %a_view[%v179] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v181 : vector<4xbf16>
       } else {
@@ -294,7 +294,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v188 = index.add %v28, %v187 : index
       %v189 = scf.if %v185 -> (vector<4xbf16>) {
         %v191 = index.sub %bsize, %v7 : index
-        %v190 = index.assume %v188 [range(%v188, 0, 1073741823), le(%v188, %v191), mul(%v188, 4)] : index
+        %v190 = index.assume %v188 [range(%v188, 0, 1073741823), le(%v188, %v191), multiple_of(%v188, 4)] : index
         %v192 = vector.load %b_view[%v190] : view<[%bsize]xbf16> -> vector<4xbf16>
         scf.yield %v192 : vector<4xbf16>
       } else {
@@ -439,7 +439,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v285 = index.add %v27, %v284 : index
       %v286 = scf.if %v282 -> (vector<4xbf16>) {
         %v288 = index.sub %asize, %v7 : index
-        %v287 = index.assume %v285 [range(%v285, 0, 1073741823), le(%v285, %v288), mul(%v285, 4)] : index
+        %v287 = index.assume %v285 [range(%v285, 0, 1073741823), le(%v285, %v288), multiple_of(%v285, 4)] : index
         %v289 = vector.load %a_view[%v287] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v289 : vector<4xbf16>
       } else {
@@ -455,7 +455,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v296 = index.add %v28, %v295 : index
       %v297 = scf.if %v293 -> (vector<4xbf16>) {
         %v299 = index.sub %bsize, %v7 : index
-        %v298 = index.assume %v296 [range(%v296, 0, 1073741823), le(%v296, %v299), mul(%v296, 4)] : index
+        %v298 = index.assume %v296 [range(%v296, 0, 1073741823), le(%v296, %v299), multiple_of(%v296, 4)] : index
         %v300 = vector.load %b_view[%v298] : view<[%bsize]xbf16> -> vector<4xbf16>
         scf.yield %v300 : vector<4xbf16>
       } else {
@@ -600,7 +600,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v394 = index.add %v27, %v393 : index
       %v395 = scf.if %v391 -> (vector<4xbf16>) {
         %v397 = index.sub %asize, %v7 : index
-        %v396 = index.assume %v394 [range(%v394, 0, 1073741823), le(%v394, %v397), mul(%v394, 4)] : index
+        %v396 = index.assume %v394 [range(%v394, 0, 1073741823), le(%v394, %v397), multiple_of(%v394, 4)] : index
         %v398 = vector.load %a_view[%v396] : view<[%asize]xbf16> -> vector<4xbf16>
         scf.yield %v398 : vector<4xbf16>
       } else {
@@ -616,7 +616,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v405 = index.add %v28, %v404 : index
       %v406 = scf.if %v402 -> (vector<4xbf16>) {
         %v408 = index.sub %bsize, %v7 : index
-        %v407 = index.assume %v405 [range(%v405, 0, 1073741823), le(%v405, %v408), mul(%v405, 4)] : index
+        %v407 = index.assume %v405 [range(%v405, 0, 1073741823), le(%v405, %v408), multiple_of(%v405, 4)] : index
         %v409 = vector.load %b_view[%v407] : view<[%bsize]xbf16> -> vector<4xbf16>
         scf.yield %v409 : vector<4xbf16>
       } else {
@@ -813,7 +813,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v548 = vector.splat %alpha : vector<4xf32>
       %v549 = vector.mulf %v547, %v548 : vector<4xf32>
       %v554 = index.sub %n, %v7 : index
-      %v550 = index.assume %v543 [range(%v543, 0, 1073741823), le(%v543, %v554), mul(%v543, 4)] : index
+      %v550 = index.assume %v543 [range(%v543, 0, 1073741823), le(%v543, %v554), multiple_of(%v543, 4)] : index
       %v551 = vector.load %bias_view[%v550] : view<[%n]xbf16> -> vector<4xbf16>
       %v552 = vector.extf %v551 : vector<4xbf16> to vector<4xf32>
       %v553 = vector.addf %v549, %v552 : vector<4xf32>
@@ -822,7 +822,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v557 = index.add %v556, %v543 : index
       %v558 = index.add %v30, %v557 : index
       %v560 = index.sub %csize, %v7 : index
-      %v559 = index.assume %v558 [range(%v558, 0, 1073741823), le(%v558, %v560), mul(%v558, 4)] : index
+      %v559 = index.assume %v558 [range(%v558, 0, 1073741823), le(%v558, %v560), multiple_of(%v558, 4)] : index
       vector.store %v555, %out_view[%v559] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -929,7 +929,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v646 = vector.splat %alpha : vector<4xf32>
       %v647 = vector.mulf %v645, %v646 : vector<4xf32>
       %v652 = index.sub %n, %v7 : index
-      %v648 = index.assume %v641 [range(%v641, 0, 1073741823), le(%v641, %v652), mul(%v641, 4)] : index
+      %v648 = index.assume %v641 [range(%v641, 0, 1073741823), le(%v641, %v652), multiple_of(%v641, 4)] : index
       %v649 = vector.load %bias_view[%v648] : view<[%n]xbf16> -> vector<4xbf16>
       %v650 = vector.extf %v649 : vector<4xbf16> to vector<4xf32>
       %v651 = vector.addf %v647, %v650 : vector<4xf32>
@@ -938,7 +938,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v655 = index.add %v654, %v641 : index
       %v656 = index.add %v30, %v655 : index
       %v658 = index.sub %csize, %v7 : index
-      %v657 = index.assume %v656 [range(%v656, 0, 1073741823), le(%v656, %v658), mul(%v656, 4)] : index
+      %v657 = index.assume %v656 [range(%v656, 0, 1073741823), le(%v656, %v658), multiple_of(%v656, 4)] : index
       vector.store %v653, %out_view[%v657] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1048,7 +1048,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v744 = vector.splat %alpha : vector<4xf32>
       %v745 = vector.mulf %v743, %v744 : vector<4xf32>
       %v750 = index.sub %n, %v7 : index
-      %v746 = index.assume %v739 [range(%v739, 0, 1073741823), le(%v739, %v750), mul(%v739, 4)] : index
+      %v746 = index.assume %v739 [range(%v739, 0, 1073741823), le(%v739, %v750), multiple_of(%v739, 4)] : index
       %v747 = vector.load %bias_view[%v746] : view<[%n]xbf16> -> vector<4xbf16>
       %v748 = vector.extf %v747 : vector<4xbf16> to vector<4xf32>
       %v749 = vector.addf %v745, %v748 : vector<4xf32>
@@ -1057,7 +1057,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v753 = index.add %v752, %v739 : index
       %v754 = index.add %v30, %v753 : index
       %v756 = index.sub %csize, %v7 : index
-      %v755 = index.assume %v754 [range(%v754, 0, 1073741823), le(%v754, %v756), mul(%v754, 4)] : index
+      %v755 = index.assume %v754 [range(%v754, 0, 1073741823), le(%v754, %v756), multiple_of(%v754, 4)] : index
       vector.store %v751, %out_view[%v755] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1164,7 +1164,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v842 = vector.splat %alpha : vector<4xf32>
       %v843 = vector.mulf %v841, %v842 : vector<4xf32>
       %v848 = index.sub %n, %v7 : index
-      %v844 = index.assume %v837 [range(%v837, 0, 1073741823), le(%v837, %v848), mul(%v837, 4)] : index
+      %v844 = index.assume %v837 [range(%v837, 0, 1073741823), le(%v837, %v848), multiple_of(%v837, 4)] : index
       %v845 = vector.load %bias_view[%v844] : view<[%n]xbf16> -> vector<4xbf16>
       %v846 = vector.extf %v845 : vector<4xbf16> to vector<4xf32>
       %v847 = vector.addf %v843, %v846 : vector<4xf32>
@@ -1173,7 +1173,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v851 = index.add %v850, %v837 : index
       %v852 = index.add %v30, %v851 : index
       %v854 = index.sub %csize, %v7 : index
-      %v853 = index.assume %v852 [range(%v852, 0, 1073741823), le(%v852, %v854), mul(%v852, 4)] : index
+      %v853 = index.assume %v852 [range(%v852, 0, 1073741823), le(%v852, %v854), multiple_of(%v852, 4)] : index
       vector.store %v849, %out_view[%v853] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1283,7 +1283,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v940 = vector.splat %alpha : vector<4xf32>
       %v941 = vector.mulf %v939, %v940 : vector<4xf32>
       %v946 = index.sub %n, %v7 : index
-      %v942 = index.assume %v935 [range(%v935, 0, 1073741823), le(%v935, %v946), mul(%v935, 4)] : index
+      %v942 = index.assume %v935 [range(%v935, 0, 1073741823), le(%v935, %v946), multiple_of(%v935, 4)] : index
       %v943 = vector.load %bias_view[%v942] : view<[%n]xbf16> -> vector<4xbf16>
       %v944 = vector.extf %v943 : vector<4xbf16> to vector<4xf32>
       %v945 = vector.addf %v941, %v944 : vector<4xf32>
@@ -1292,7 +1292,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v949 = index.add %v948, %v935 : index
       %v950 = index.add %v30, %v949 : index
       %v952 = index.sub %csize, %v7 : index
-      %v951 = index.assume %v950 [range(%v950, 0, 1073741823), le(%v950, %v952), mul(%v950, 4)] : index
+      %v951 = index.assume %v950 [range(%v950, 0, 1073741823), le(%v950, %v952), multiple_of(%v950, 4)] : index
       vector.store %v947, %out_view[%v951] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1399,7 +1399,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1038 = vector.splat %alpha : vector<4xf32>
       %v1039 = vector.mulf %v1037, %v1038 : vector<4xf32>
       %v1044 = index.sub %n, %v7 : index
-      %v1040 = index.assume %v1033 [range(%v1033, 0, 1073741823), le(%v1033, %v1044), mul(%v1033, 4)] : index
+      %v1040 = index.assume %v1033 [range(%v1033, 0, 1073741823), le(%v1033, %v1044), multiple_of(%v1033, 4)] : index
       %v1041 = vector.load %bias_view[%v1040] : view<[%n]xbf16> -> vector<4xbf16>
       %v1042 = vector.extf %v1041 : vector<4xbf16> to vector<4xf32>
       %v1043 = vector.addf %v1039, %v1042 : vector<4xf32>
@@ -1408,7 +1408,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1047 = index.add %v1046, %v1033 : index
       %v1048 = index.add %v30, %v1047 : index
       %v1050 = index.sub %csize, %v7 : index
-      %v1049 = index.assume %v1048 [range(%v1048, 0, 1073741823), le(%v1048, %v1050), mul(%v1048, 4)] : index
+      %v1049 = index.assume %v1048 [range(%v1048, 0, 1073741823), le(%v1048, %v1050), multiple_of(%v1048, 4)] : index
       vector.store %v1045, %out_view[%v1049] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1518,7 +1518,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1136 = vector.splat %alpha : vector<4xf32>
       %v1137 = vector.mulf %v1135, %v1136 : vector<4xf32>
       %v1142 = index.sub %n, %v7 : index
-      %v1138 = index.assume %v1131 [range(%v1131, 0, 1073741823), le(%v1131, %v1142), mul(%v1131, 4)] : index
+      %v1138 = index.assume %v1131 [range(%v1131, 0, 1073741823), le(%v1131, %v1142), multiple_of(%v1131, 4)] : index
       %v1139 = vector.load %bias_view[%v1138] : view<[%n]xbf16> -> vector<4xbf16>
       %v1140 = vector.extf %v1139 : vector<4xbf16> to vector<4xf32>
       %v1141 = vector.addf %v1137, %v1140 : vector<4xf32>
@@ -1527,7 +1527,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1145 = index.add %v1144, %v1131 : index
       %v1146 = index.add %v30, %v1145 : index
       %v1148 = index.sub %csize, %v7 : index
-      %v1147 = index.assume %v1146 [range(%v1146, 0, 1073741823), le(%v1146, %v1148), mul(%v1146, 4)] : index
+      %v1147 = index.assume %v1146 [range(%v1146, 0, 1073741823), le(%v1146, %v1148), multiple_of(%v1146, 4)] : index
       vector.store %v1143, %out_view[%v1147] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1634,7 +1634,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1234 = vector.splat %alpha : vector<4xf32>
       %v1235 = vector.mulf %v1233, %v1234 : vector<4xf32>
       %v1240 = index.sub %n, %v7 : index
-      %v1236 = index.assume %v1229 [range(%v1229, 0, 1073741823), le(%v1229, %v1240), mul(%v1229, 4)] : index
+      %v1236 = index.assume %v1229 [range(%v1229, 0, 1073741823), le(%v1229, %v1240), multiple_of(%v1229, 4)] : index
       %v1237 = vector.load %bias_view[%v1236] : view<[%n]xbf16> -> vector<4xbf16>
       %v1238 = vector.extf %v1237 : vector<4xbf16> to vector<4xf32>
       %v1239 = vector.addf %v1235, %v1238 : vector<4xf32>
@@ -1643,7 +1643,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1243 = index.add %v1242, %v1229 : index
       %v1244 = index.add %v30, %v1243 : index
       %v1246 = index.sub %csize, %v7 : index
-      %v1245 = index.assume %v1244 [range(%v1244, 0, 1073741823), le(%v1244, %v1246), mul(%v1244, 4)] : index
+      %v1245 = index.assume %v1244 [range(%v1244, 0, 1073741823), le(%v1244, %v1246), multiple_of(%v1244, 4)] : index
       vector.store %v1241, %out_view[%v1245] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1753,7 +1753,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1332 = vector.splat %alpha : vector<4xf32>
       %v1333 = vector.mulf %v1331, %v1332 : vector<4xf32>
       %v1338 = index.sub %n, %v7 : index
-      %v1334 = index.assume %v1327 [range(%v1327, 0, 1073741823), le(%v1327, %v1338), mul(%v1327, 4)] : index
+      %v1334 = index.assume %v1327 [range(%v1327, 0, 1073741823), le(%v1327, %v1338), multiple_of(%v1327, 4)] : index
       %v1335 = vector.load %bias_view[%v1334] : view<[%n]xbf16> -> vector<4xbf16>
       %v1336 = vector.extf %v1335 : vector<4xbf16> to vector<4xf32>
       %v1337 = vector.addf %v1333, %v1336 : vector<4xf32>
@@ -1762,7 +1762,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1341 = index.add %v1340, %v1327 : index
       %v1342 = index.add %v30, %v1341 : index
       %v1344 = index.sub %csize, %v7 : index
-      %v1343 = index.assume %v1342 [range(%v1342, 0, 1073741823), le(%v1342, %v1344), mul(%v1342, 4)] : index
+      %v1343 = index.assume %v1342 [range(%v1342, 0, 1073741823), le(%v1342, %v1344), multiple_of(%v1342, 4)] : index
       vector.store %v1339, %out_view[%v1343] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1869,7 +1869,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1430 = vector.splat %alpha : vector<4xf32>
       %v1431 = vector.mulf %v1429, %v1430 : vector<4xf32>
       %v1436 = index.sub %n, %v7 : index
-      %v1432 = index.assume %v1425 [range(%v1425, 0, 1073741823), le(%v1425, %v1436), mul(%v1425, 4)] : index
+      %v1432 = index.assume %v1425 [range(%v1425, 0, 1073741823), le(%v1425, %v1436), multiple_of(%v1425, 4)] : index
       %v1433 = vector.load %bias_view[%v1432] : view<[%n]xbf16> -> vector<4xbf16>
       %v1434 = vector.extf %v1433 : vector<4xbf16> to vector<4xf32>
       %v1435 = vector.addf %v1431, %v1434 : vector<4xf32>
@@ -1878,7 +1878,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1439 = index.add %v1438, %v1425 : index
       %v1440 = index.add %v30, %v1439 : index
       %v1442 = index.sub %csize, %v7 : index
-      %v1441 = index.assume %v1440 [range(%v1440, 0, 1073741823), le(%v1440, %v1442), mul(%v1440, 4)] : index
+      %v1441 = index.assume %v1440 [range(%v1440, 0, 1073741823), le(%v1440, %v1442), multiple_of(%v1440, 4)] : index
       vector.store %v1437, %out_view[%v1441] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -1988,7 +1988,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1528 = vector.splat %alpha : vector<4xf32>
       %v1529 = vector.mulf %v1527, %v1528 : vector<4xf32>
       %v1534 = index.sub %n, %v7 : index
-      %v1530 = index.assume %v1523 [range(%v1523, 0, 1073741823), le(%v1523, %v1534), mul(%v1523, 4)] : index
+      %v1530 = index.assume %v1523 [range(%v1523, 0, 1073741823), le(%v1523, %v1534), multiple_of(%v1523, 4)] : index
       %v1531 = vector.load %bias_view[%v1530] : view<[%n]xbf16> -> vector<4xbf16>
       %v1532 = vector.extf %v1531 : vector<4xbf16> to vector<4xf32>
       %v1533 = vector.addf %v1529, %v1532 : vector<4xf32>
@@ -1997,7 +1997,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1537 = index.add %v1536, %v1523 : index
       %v1538 = index.add %v30, %v1537 : index
       %v1540 = index.sub %csize, %v7 : index
-      %v1539 = index.assume %v1538 [range(%v1538, 0, 1073741823), le(%v1538, %v1540), mul(%v1538, 4)] : index
+      %v1539 = index.assume %v1538 [range(%v1538, 0, 1073741823), le(%v1538, %v1540), multiple_of(%v1538, 4)] : index
       vector.store %v1535, %out_view[%v1539] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -2104,7 +2104,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1626 = vector.splat %alpha : vector<4xf32>
       %v1627 = vector.mulf %v1625, %v1626 : vector<4xf32>
       %v1632 = index.sub %n, %v7 : index
-      %v1628 = index.assume %v1621 [range(%v1621, 0, 1073741823), le(%v1621, %v1632), mul(%v1621, 4)] : index
+      %v1628 = index.assume %v1621 [range(%v1621, 0, 1073741823), le(%v1621, %v1632), multiple_of(%v1621, 4)] : index
       %v1629 = vector.load %bias_view[%v1628] : view<[%n]xbf16> -> vector<4xbf16>
       %v1630 = vector.extf %v1629 : vector<4xbf16> to vector<4xf32>
       %v1631 = vector.addf %v1627, %v1630 : vector<4xf32>
@@ -2113,7 +2113,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1635 = index.add %v1634, %v1621 : index
       %v1636 = index.add %v30, %v1635 : index
       %v1638 = index.sub %csize, %v7 : index
-      %v1637 = index.assume %v1636 [range(%v1636, 0, 1073741823), le(%v1636, %v1638), mul(%v1636, 4)] : index
+      %v1637 = index.assume %v1636 [range(%v1636, 0, 1073741823), le(%v1636, %v1638), multiple_of(%v1636, 4)] : index
       vector.store %v1633, %out_view[%v1637] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -2223,7 +2223,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1724 = vector.splat %alpha : vector<4xf32>
       %v1725 = vector.mulf %v1723, %v1724 : vector<4xf32>
       %v1730 = index.sub %n, %v7 : index
-      %v1726 = index.assume %v1719 [range(%v1719, 0, 1073741823), le(%v1719, %v1730), mul(%v1719, 4)] : index
+      %v1726 = index.assume %v1719 [range(%v1719, 0, 1073741823), le(%v1719, %v1730), multiple_of(%v1719, 4)] : index
       %v1727 = vector.load %bias_view[%v1726] : view<[%n]xbf16> -> vector<4xbf16>
       %v1728 = vector.extf %v1727 : vector<4xbf16> to vector<4xf32>
       %v1729 = vector.addf %v1725, %v1728 : vector<4xf32>
@@ -2232,7 +2232,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1733 = index.add %v1732, %v1719 : index
       %v1734 = index.add %v30, %v1733 : index
       %v1736 = index.sub %csize, %v7 : index
-      %v1735 = index.assume %v1734 [range(%v1734, 0, 1073741823), le(%v1734, %v1736), mul(%v1734, 4)] : index
+      %v1735 = index.assume %v1734 [range(%v1734, 0, 1073741823), le(%v1734, %v1736), multiple_of(%v1734, 4)] : index
       vector.store %v1731, %out_view[%v1735] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -2339,7 +2339,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1822 = vector.splat %alpha : vector<4xf32>
       %v1823 = vector.mulf %v1821, %v1822 : vector<4xf32>
       %v1828 = index.sub %n, %v7 : index
-      %v1824 = index.assume %v1817 [range(%v1817, 0, 1073741823), le(%v1817, %v1828), mul(%v1817, 4)] : index
+      %v1824 = index.assume %v1817 [range(%v1817, 0, 1073741823), le(%v1817, %v1828), multiple_of(%v1817, 4)] : index
       %v1825 = vector.load %bias_view[%v1824] : view<[%n]xbf16> -> vector<4xbf16>
       %v1826 = vector.extf %v1825 : vector<4xbf16> to vector<4xf32>
       %v1827 = vector.addf %v1823, %v1826 : vector<4xf32>
@@ -2348,7 +2348,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1831 = index.add %v1830, %v1817 : index
       %v1832 = index.add %v30, %v1831 : index
       %v1834 = index.sub %csize, %v7 : index
-      %v1833 = index.assume %v1832 [range(%v1832, 0, 1073741823), le(%v1832, %v1834), mul(%v1832, 4)] : index
+      %v1833 = index.assume %v1832 [range(%v1832, 0, 1073741823), le(%v1832, %v1834), multiple_of(%v1832, 4)] : index
       vector.store %v1829, %out_view[%v1833] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -2458,7 +2458,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1920 = vector.splat %alpha : vector<4xf32>
       %v1921 = vector.mulf %v1919, %v1920 : vector<4xf32>
       %v1926 = index.sub %n, %v7 : index
-      %v1922 = index.assume %v1915 [range(%v1915, 0, 1073741823), le(%v1915, %v1926), mul(%v1915, 4)] : index
+      %v1922 = index.assume %v1915 [range(%v1915, 0, 1073741823), le(%v1915, %v1926), multiple_of(%v1915, 4)] : index
       %v1923 = vector.load %bias_view[%v1922] : view<[%n]xbf16> -> vector<4xbf16>
       %v1924 = vector.extf %v1923 : vector<4xbf16> to vector<4xf32>
       %v1925 = vector.addf %v1921, %v1924 : vector<4xf32>
@@ -2467,7 +2467,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v1929 = index.add %v1928, %v1915 : index
       %v1930 = index.add %v30, %v1929 : index
       %v1932 = index.sub %csize, %v7 : index
-      %v1931 = index.assume %v1930 [range(%v1930, 0, 1073741823), le(%v1930, %v1932), mul(%v1930, 4)] : index
+      %v1931 = index.assume %v1930 [range(%v1930, 0, 1073741823), le(%v1930, %v1932), multiple_of(%v1930, 4)] : index
       vector.store %v1927, %out_view[%v1931] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -2574,7 +2574,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v2018 = vector.splat %alpha : vector<4xf32>
       %v2019 = vector.mulf %v2017, %v2018 : vector<4xf32>
       %v2024 = index.sub %n, %v7 : index
-      %v2020 = index.assume %v2013 [range(%v2013, 0, 1073741823), le(%v2013, %v2024), mul(%v2013, 4)] : index
+      %v2020 = index.assume %v2013 [range(%v2013, 0, 1073741823), le(%v2013, %v2024), multiple_of(%v2013, 4)] : index
       %v2021 = vector.load %bias_view[%v2020] : view<[%n]xbf16> -> vector<4xbf16>
       %v2022 = vector.extf %v2021 : vector<4xbf16> to vector<4xf32>
       %v2023 = vector.addf %v2019, %v2022 : vector<4xf32>
@@ -2583,7 +2583,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nt_bias_tiled_target) export("krea2_gemm
       %v2027 = index.add %v2026, %v2013 : index
       %v2028 = index.add %v30, %v2027 : index
       %v2030 = index.sub %csize, %v7 : index
-      %v2029 = index.assume %v2028 [range(%v2028, 0, 1073741823), le(%v2028, %v2030), mul(%v2028, 4)] : index
+      %v2029 = index.assume %v2028 [range(%v2028, 0, 1073741823), le(%v2028, %v2030), multiple_of(%v2028, 4)] : index
       vector.store %v2025, %out_view[%v2029] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {

@@ -91,7 +91,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %ai0 = index.mul %asafe, %k : index
  %ai1 = index.add %ai0, %kc : index
  %alimit = index.sub %asize, %c8 : index
- %ai = index.assume %ai1 [range(%ai1, 0, 1073741823), le(%ai1, %alimit), mul(%ai1, 8)] : index
+ %ai = index.assume %ai1 [range(%ai1, 0, 1073741823), le(%ai1, %alimit), multiple_of(%ai1, 8)] : index
  %adata = vector.load %av[%ai] : view<[%asize]xbf16> -> vector<8xbf16>
  vector.store %adata, %aa[%strow, %stcol] : vector<8xbf16>, view<64x40xbf16>
  scf.if %nt {
@@ -99,7 +99,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %bi0 = index.mul %bgrow, %k : index
  %bi1 = index.add %bi0, %kc : index
  %blimit = index.sub %bsize, %c8 : index
- %bi = index.assume %bi1 [range(%bi1, 0, 1073741823), le(%bi1, %blimit), mul(%bi1, 8)] : index
+ %bi = index.assume %bi1 [range(%bi1, 0, 1073741823), le(%bi1, %blimit), multiple_of(%bi1, 8)] : index
  %bdata = vector.load %bv[%bi] : view<[%bsize]xbf16> -> vector<8xbf16>
  vector.store %bdata, %bb[%strow, %stcol] : vector<8xbf16>, view<64x40xbf16>
  } else {
@@ -108,7 +108,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %bi0 = index.mul %bk, %n : index
  %bi1 = index.add %bi0, %bc : index
  %blimit = index.sub %bsize, %c8 : index
- %bi = index.assume %bi1 [range(%bi1, 0, 1073741823), le(%bi1, %blimit), mul(%bi1, 8)] : index
+ %bi = index.assume %bi1 [range(%bi1, 0, 1073741823), le(%bi1, %blimit), multiple_of(%bi1, 8)] : index
  %bdata = vector.load %bv[%bi] : view<[%bsize]xbf16> -> vector<8xbf16>
  vector.store %bdata, %bn[%nnrow, %nncol] : vector<8xbf16>, view<32x72xbf16>
  }
@@ -172,7 +172,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p0_0off0 = index.mul %p0_0r, %n : index
  %p0_0off1 = index.add %p0_0off0, %p0_0c : index
  %p0_0limit = index.sub %csize, %c4 : index
- %p0_0off = index.assume %p0_0off1 [range(%p0_0off1, 0, 1073741823), le(%p0_0off1, %p0_0limit), mul(%p0_0off1, 4)] : index
+ %p0_0off = index.assume %p0_0off1 [range(%p0_0off1, 0, 1073741823), le(%p0_0off1, %p0_0limit), multiple_of(%p0_0off1, 4)] : index
  %p0_0v = vector.load %rv[%p0_0lr, %pc] : view<16x16xf32> -> vector<4xf32>
  %p0_0bf = vector.fptrunc %p0_0v : vector<4xf32> to vector<4xbf16>
  %p0_0rounded = vector.extf %p0_0bf : vector<4xbf16> to vector<4xf32>
@@ -203,7 +203,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p0_8off0 = index.mul %p0_8r, %n : index
  %p0_8off1 = index.add %p0_8off0, %p0_8c : index
  %p0_8limit = index.sub %csize, %c4 : index
- %p0_8off = index.assume %p0_8off1 [range(%p0_8off1, 0, 1073741823), le(%p0_8off1, %p0_8limit), mul(%p0_8off1, 4)] : index
+ %p0_8off = index.assume %p0_8off1 [range(%p0_8off1, 0, 1073741823), le(%p0_8off1, %p0_8limit), multiple_of(%p0_8off1, 4)] : index
  %p0_8v = vector.load %rv[%p0_8lr, %pc] : view<16x16xf32> -> vector<4xf32>
  %p0_8bf = vector.fptrunc %p0_8v : vector<4xf32> to vector<4xbf16>
  %p0_8rounded = vector.extf %p0_8bf : vector<4xbf16> to vector<4xf32>
@@ -237,7 +237,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p1_0off0 = index.mul %p1_0r, %n : index
  %p1_0off1 = index.add %p1_0off0, %p1_0c : index
  %p1_0limit = index.sub %csize, %c4 : index
- %p1_0off = index.assume %p1_0off1 [range(%p1_0off1, 0, 1073741823), le(%p1_0off1, %p1_0limit), mul(%p1_0off1, 4)] : index
+ %p1_0off = index.assume %p1_0off1 [range(%p1_0off1, 0, 1073741823), le(%p1_0off1, %p1_0limit), multiple_of(%p1_0off1, 4)] : index
  %p1_0v = vector.load %rv[%p1_0lr, %pc] : view<16x16xf32> -> vector<4xf32>
  %p1_0bf = vector.fptrunc %p1_0v : vector<4xf32> to vector<4xbf16>
  %p1_0rounded = vector.extf %p1_0bf : vector<4xbf16> to vector<4xf32>
@@ -268,7 +268,7 @@ kernel.def target(@target) export("krea2_train_gemm_lora_add") @krea2_train_gemm
  %p1_8off0 = index.mul %p1_8r, %n : index
  %p1_8off1 = index.add %p1_8off0, %p1_8c : index
  %p1_8limit = index.sub %csize, %c4 : index
- %p1_8off = index.assume %p1_8off1 [range(%p1_8off1, 0, 1073741823), le(%p1_8off1, %p1_8limit), mul(%p1_8off1, 4)] : index
+ %p1_8off = index.assume %p1_8off1 [range(%p1_8off1, 0, 1073741823), le(%p1_8off1, %p1_8limit), multiple_of(%p1_8off1, 4)] : index
  %p1_8v = vector.load %rv[%p1_8lr, %pc] : view<16x16xf32> -> vector<4xf32>
  %p1_8bf = vector.fptrunc %p1_8v : vector<4xf32> to vector<4xbf16>
  %p1_8rounded = vector.extf %p1_8bf : vector<4xbf16> to vector<4xf32>

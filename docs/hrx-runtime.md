@@ -1,6 +1,6 @@
 # Shared HRX runtime
 
-Krea uses [`hrx-rs` 0.10.1](https://crates.io/crates/hrx-rs) for keyed kernel
+Krea uses [`hrx-rs` 0.12.0](https://crates.io/crates/hrx-rs) for keyed kernel
 requests and the coordinated graph API.
 The manifest renames it to `hrx`, so call sites read `hrx::`.
 The GPU runtime and Loom come from the native bundle pinned by HRX.
@@ -94,7 +94,7 @@ The compiler and runtime come from HRX's public, verified native bundle:
 Install the matching CLI from crates.io:
 
 ```sh
-cargo install --locked hrx-rs --version 0.10.1
+cargo install --locked hrx-rs --version 0.12.0
 hrx prepare
 cargo build --release
 ```

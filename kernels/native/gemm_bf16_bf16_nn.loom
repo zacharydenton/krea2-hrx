@@ -390,7 +390,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nn_target) export("krea2_gemm_bf16_bf16_
       %v247 = index.add %v246, %v238 : index
       %v248 = index.add %v29, %v247 : index
       %v250 = index.sub %csize, %v7 : index
-      %v249 = index.assume %v248 [range(%v248, 0, 1073741823), le(%v248, %v250), mul(%v248, 4)] : index
+      %v249 = index.assume %v248 [range(%v248, 0, 1073741823), le(%v248, %v250), multiple_of(%v248, 4)] : index
       vector.store %v245, %out_view[%v249] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -485,7 +485,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nn_target) export("krea2_gemm_bf16_bf16_
       %v324 = index.add %v323, %v315 : index
       %v325 = index.add %v29, %v324 : index
       %v327 = index.sub %csize, %v7 : index
-      %v326 = index.assume %v325 [range(%v325, 0, 1073741823), le(%v325, %v327), mul(%v325, 4)] : index
+      %v326 = index.assume %v325 [range(%v325, 0, 1073741823), le(%v325, %v327), multiple_of(%v325, 4)] : index
       vector.store %v322, %out_view[%v326] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -583,7 +583,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nn_target) export("krea2_gemm_bf16_bf16_
       %v401 = index.add %v400, %v392 : index
       %v402 = index.add %v29, %v401 : index
       %v404 = index.sub %csize, %v7 : index
-      %v403 = index.assume %v402 [range(%v402, 0, 1073741823), le(%v402, %v404), mul(%v402, 4)] : index
+      %v403 = index.assume %v402 [range(%v402, 0, 1073741823), le(%v402, %v404), multiple_of(%v402, 4)] : index
       vector.store %v399, %out_view[%v403] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {
@@ -678,7 +678,7 @@ kernel.def target(@krea2_gemm_bf16_bf16_nn_target) export("krea2_gemm_bf16_bf16_
       %v478 = index.add %v477, %v469 : index
       %v479 = index.add %v29, %v478 : index
       %v481 = index.sub %csize, %v7 : index
-      %v480 = index.assume %v479 [range(%v479, 0, 1073741823), le(%v479, %v481), mul(%v479, 4)] : index
+      %v480 = index.assume %v479 [range(%v479, 0, 1073741823), le(%v479, %v481), multiple_of(%v479, 4)] : index
       vector.store %v476, %out_view[%v480] : vector<4xbf16>, view<[%csize]xbf16>
     }
   } else {

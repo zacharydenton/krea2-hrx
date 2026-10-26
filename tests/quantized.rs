@@ -367,7 +367,9 @@ fn production_attention_tiles_match_grouped_cpu_softmax() {
                 &config,
                 [tokens.div_ceil(rows) as u32, kv as u32, 1],
                 (rows * 8) as u32,
-                &[tokens as u64, 0],
+                // The launch takes the token count alone; the KV head count
+                // only shapes the grid, so it has no constant slot.
+                &[tokens as u64],
                 &[bytes(&q), bytes(&k), bytes(&v_transposed), vec![0; tokens * heads * d * 2]],
             );
             close(&halves(&out[3], false), &want, 2e-2, 2e-2);

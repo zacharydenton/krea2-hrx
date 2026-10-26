@@ -7,10 +7,10 @@
 //
 amdgpu.target<gfx11-generic> @krea2_prepare_plain_i8_gfx11 {subgroup_size = 32}
 
-config.decl @krea2.prepare_plain_i8.width : %value: index where [range(%value, 2048, 32768), mul(%value, 2048)]
+config.decl @krea2.prepare_plain_i8.width : %value: index where [range(%value, 2048, 32768), multiple_of(%value, 2048)]
 
 // packed output row pitch in elements (the GEMM's k_stride): width, or width plus one k step when the row is 8192 bytes
-config.decl @krea2.prepare_plain_i8.out_stride : %value: index where [range(%value, 2048, 65536), mul(%value, 64)]
+config.decl @krea2.prepare_plain_i8.out_stride : %value: index where [range(%value, 2048, 65536), multiple_of(%value, 64)]
 
 kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8") @krea2_prepare_plain_i8(%tokens: index) {
   %c1 = index.constant 1 : index
@@ -85,7 +85,7 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
     %active = index.cmp ult, %t_chunk, %groups16 : index
     scf.if %active {
       %t_base = index.mul %t_chunk, %c16 : index
-      %base = index.assume %t_base [le(%t_base, %last16), mul(%t_base, 16)] : index
+      %base = index.assume %t_base [le(%t_base, %last16), multiple_of(%t_base, 16)] : index
       %input_half = vector.load %h_view[%row, %base] : view<[%tokens_b]x[%width]xf16> -> vector<16xf16>
       %input = vector.extf %input_half : vector<16xf16> to vector<16xf32>
       %quarter4 = vector.splat %quarter : vector<4xf32>
@@ -284,7 +284,7 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
     %a_lane_step = index.mul %a_j, %c256 : index
     %a_chunk = index.add %a_lane_step, %lane : index
     %a_i0 = index.mul %a_chunk, %c8 : index
-    %a_i = index.assume %a_i0 [le(%a_i0, %width_last), mul(%a_i0, 8)] : index
+    %a_i = index.assume %a_i0 [le(%a_i0, %width_last), multiple_of(%a_i0, 8)] : index
     %a_x_h = vector.load %x_view[%a_i] : view<[%width]xf16> -> vector<8xf16>
     %a_x = vector.extf %a_x_h : vector<8xf16> to vector<8xf32>
     %a_abs = vector.absf %a_x : vector<8xf32>
@@ -302,7 +302,7 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
     %q_lane_step = index.mul %q_j, %c256 : index
     %q_chunk = index.add %q_lane_step, %lane : index
     %q_i0 = index.mul %q_chunk, %c8 : index
-    %q_i = index.assume %q_i0 [le(%q_i0, %width_last), mul(%q_i0, 8)] : index
+    %q_i = index.assume %q_i0 [le(%q_i0, %width_last), multiple_of(%q_i0, 8)] : index
     %q_w = index.assume %q_chunk [lt(%q_chunk, %word_width), lt(%q_chunk, %out_words)] : index
     %q_x_h = vector.load %x_view[%q_i] : view<[%width]xf16> -> vector<8xf16>
     %q_x = vector.extf %q_x_h : vector<8xf16> to vector<8xf32>
@@ -334,8 +334,8 @@ kernel.def target(@krea2_prepare_plain_i8_gfx11) export("krea2_prepare_plain_i8"
     %q_hi = scalar.ori %q_hi2, %q_s7 : i32
     %q_words = vector.from_elements %q_lo, %q_hi : vector<2xi32>
     %q_w2 = index.mul %q_chunk, %c2 : index
-    %q_w2b = index.assume %q_w2 [le(%q_w2, %word_last), mul(%q_w2, 2)] : index
-    %q_w2o = index.assume %q_w2b [le(%q_w2b, %out_wlast), mul(%q_w2b, 2)] : index
+    %q_w2b = index.assume %q_w2 [le(%q_w2, %word_last), multiple_of(%q_w2, 2)] : index
+    %q_w2o = index.assume %q_w2b [le(%q_w2b, %out_wlast), multiple_of(%q_w2b, 2)] : index
     vector.store %q_words, %qw_view[%row, %q_w2o] : vector<2xi32>, view<[%tokens_b]x[%out_words]xi32>
   }
   // the token scale, by one lane, after the last loop (a divergent region before a

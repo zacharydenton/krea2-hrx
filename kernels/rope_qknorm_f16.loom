@@ -10,13 +10,13 @@
 //   (x[2i], x[2i+1]) -> (x0*cos - x1*sin, x1*cos + x0*sin), cos/sin [tokens][128]
 amdgpu.target<gfx11-generic> @krea2_rope_qknorm_gfx11 {subgroup_size = 32}
 
-config.decl @krea2.rope_qknorm_f16.row_stride : %value: index where [range(%value, 128, 65536), mul(%value, 128)]
+config.decl @krea2.rope_qknorm_f16.row_stride : %value: index where [range(%value, 128, 65536), multiple_of(%value, 128)]
 
 config.decl @krea2.rope_qknorm_f16.q_heads : %value: index where [range(%value, 1, 256)]
 
 config.decl @krea2.rope_qknorm_f16.kv_heads : %value: index where [range(%value, 1, 256)]
 
-config.decl @krea2.rope_qknorm_f16.k_offset : %value: index where [range(%value, 128, 65536), mul(%value, 128)]
+config.decl @krea2.rope_qknorm_f16.k_offset : %value: index where [range(%value, 128, 65536), multiple_of(%value, 128)]
 
 config.decl @krea2.rope_qknorm_f16.eps : f32
 
@@ -98,11 +98,11 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
       %v_base = index.add %v_offset, %v_base0 : index
       %base = scf.select %is_v, %v_base, %base_qk : index
       %col0 = index.add %base, %lane_col : index
-      %col = index.assume %col0 [le(%col0, %col_limit), mul(%col0, 4)] : index
+      %col = index.assume %col0 [le(%col0, %col_limit), multiple_of(%col0, 4)] : index
       %v16 = vector.load %qkv_view[%row, %col] : view<[%tokens_b]x[%row_stride]xf16> -> vector<4xf16>
       scf.if %is_v {
         %vc0 = index.add %v_base0, %lane_col : index
-        %vc = index.assume %vc0 [le(%vc0, %k_limit), mul(%vc0, 4)] : index
+        %vc = index.assume %vc0 [le(%vc0, %k_limit), multiple_of(%vc0, 4)] : index
         vector.store %v16, %vo_view[%row, %vc] : vector<4xf16>, view<[%tokens_b]x[%k_width]xf16>
       } else {
         %v = vector.extf %v16 : vector<4xf16> to vector<4xf32>
@@ -145,11 +145,11 @@ kernel.def target(@krea2_rope_qknorm_gfx11) export("krea2_rope_qknorm_f16") @kre
         %out16 = vector.fptrunc %out : vector<4xf32> to vector<4xf16>
         scf.if %is_q {
           %qc0 = index.add %q_base, %lane_col : index
-          %qc = index.assume %qc0 [le(%qc0, %q_limit), mul(%qc0, 4)] : index
+          %qc = index.assume %qc0 [le(%qc0, %q_limit), multiple_of(%qc0, 4)] : index
           vector.store %out16, %qo_view[%row, %qc] : vector<4xf16>, view<[%tokens_b]x[%q_width]xf16>
         } else {
           %kc0 = index.add %k_base0, %lane_col : index
-          %kc = index.assume %kc0 [le(%kc0, %k_limit), mul(%kc0, 4)] : index
+          %kc = index.assume %kc0 [le(%kc0, %k_limit), multiple_of(%kc0, 4)] : index
           vector.store %out16, %ko_view[%row, %kc] : vector<4xf16>, view<[%tokens_b]x[%k_width]xf16>
         }
       }

@@ -14,14 +14,14 @@ kernel.def target(@target) export("krea2_train_residual_gate") @krea2_train_resi
  %off = index.constant 0 : offset
  %c4 = index.constant 4 : index
  %step = index.constant 1024 : index
- %n = index.assume %count [range(%count, 4, 1073741824), mul(%count, 4)] : index
+ %n = index.assume %count [range(%count, 4, 1073741824), multiple_of(%count, 4)] : index
  %lane = kernel.workitem.id<x> : index
  %group = kernel.workgroup.id<x> : index
  %base = index.mul %group, %step : index
  %local = index.mul %lane, %c4 : index
  %at = index.add %base, %local : index
  %cols0 = config.get @krea2.train_residual_gate.cols : index
- %cols = index.assume %cols0 [range(%cols0, 4, 1073741824), mul(%cols0, 4)] : index
+ %cols = index.assume %cols0 [range(%cols0, 4, 1073741824), multiple_of(%cols0, 4)] : index
  %residualg = buffer.assume.memory_space<global> %residual : buffer
  %residualv = buffer.view %residualg[%off] : buffer -> view<[%n]xbf16>
  %valueg = buffer.assume.memory_space<global> %value : buffer
@@ -33,12 +33,12 @@ kernel.def target(@target) export("krea2_train_residual_gate") @krea2_train_resi
  %ok = index.cmp ult, %at, %n : index
  scf.if %ok {
  %limit = index.sub %n, %c4 : index
- %i = index.assume %at [range(%at, 0, 1073741823), le(%at, %limit), mul(%at, 4)] : index
+ %i = index.assume %at [range(%at, 0, 1073741823), le(%at, %limit), multiple_of(%at, 4)] : index
  %vb = vector.load %valuev[%i] : view<[%n]xbf16> -> vector<4xbf16>
  %vf = vector.extf %vb : vector<4xbf16> to vector<4xf32>
  %col0 = index.rem %i, %cols : index
  %col_limit = index.sub %cols, %c4 : index
- %col = index.assume %col0 [range(%col0, 0, 1073741823), le(%col0, %col_limit), mul(%col0, 4)] : index
+ %col = index.assume %col0 [range(%col0, 0, 1073741823), le(%col0, %col_limit), multiple_of(%col0, 4)] : index
  %mb = vector.load %modulationv[%col] : view<[%cols]xbf16> -> vector<4xbf16>
  %mf = vector.extf %mb : vector<4xbf16> to vector<4xf32>
  %product = vector.mulf %vf, %mf : vector<4xf32>
